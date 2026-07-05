@@ -152,8 +152,14 @@ export async function createProps( scene ) {
 
 	}
 
+	// positions de référence définies pour une carte de 160 : on les met à
+	// l'échelle de la carte réelle (les TAILLES d'objets, elles, ne bougent pas)
+	const S = WORLD / 160;
+	const obstacles = OBSTACLES.map( ( o ) => ( { ...o, x: o.x * S, z: o.z * S } ) );
+	const keepClear = KEEP_CLEAR.map( ( k ) => ( { ...k, x: k.x * S, z: k.z * S } ) );
+
 	const rand = mulberry32( 20260705 );
-	const clear = ( x, z, r ) => KEEP_CLEAR.every( ( k ) => Math.hypot( x - k.x, z - k.z ) > k.r + r );
+	const clear = ( x, z, r ) => keepClear.every( ( k ) => Math.hypot( x - k.x, z - k.z ) > k.r + r );
 
 	function scatter( count, rMin, rMax, itemR ) {
 
@@ -209,13 +215,17 @@ export async function createProps( scene ) {
 		[ 'Plant_01', 'footprint' ], [ 'Plant_02', 'footprint' ],
 	].map( ( [ n, f ] ) => loadUnitGeo( n, f ) ) );
 
-	const ring = treeRing( [ 'Tree_07', 'Tree_07', 'Tree_08', 'Tree_06', 'Tree_01' ], 34, 78, 96, 15, 26 );
+	const ring = treeRing(
+		[ 'Tree_07', 'Tree_07', 'Tree_08', 'Tree_06', 'Tree_01' ],
+		Math.round( 34 * S ), 78 * S, 96 * S, 15, 26,
+	);
 
 	// arbres intérieurs en bord de terrain (troncs = petits murs pour les fourmis)
-	const innerTrees = scatter( 6, 58, 74, 3 ).map( ( p ) => ( { ...p, scale: 13 + rand() * 8 } ) );
+	const innerTrees = scatter( Math.round( 6 * S ), 58 * S, 74 * S, 3 )
+		.map( ( p ) => ( { ...p, scale: 13 + rand() * 8 } ) );
 	const heroTrees = [
-		{ x: - 62, z: - 58, yaw: 0.8, scale: 30 },
-		{ x: 66, z: 52, yaw: 2.4, scale: 28 },
+		{ x: - 62 * S, z: - 58 * S, yaw: 0.8, scale: 30 },
+		{ x: 66 * S, z: 52 * S, yaw: 2.4, scale: 28 },
 	];
 
 	for ( const [ model, list ] of ring ) {
@@ -228,7 +238,7 @@ export async function createProps( scene ) {
 	await addInstances( 'Tree_02', 'height', heroTrees );
 
 	// --- obstacles (visuels ; l'empreinte physique part dans la grille de murs) ---
-	for ( const o of OBSTACLES ) {
+	for ( const o of obstacles ) {
 
 		await addInstances( o.model, o.kind === 'rect' ? 'length' : 'height', [ {
 			x: o.x, z: o.z, yaw: o.yaw, scale: o.scale,
@@ -237,7 +247,8 @@ export async function createProps( scene ) {
 	}
 
 	// --- déco : cailloux, champignons, fougères ---
-	const rocks = scatter( 18, 16, 74, 1.5 ).map( ( p ) => ( { ...p, scale: 0.5 + rand() * 0.7 } ) );
+	const rocks = scatter( Math.round( 18 * S ), 16 * S, 74 * S, 1.5 )
+		.map( ( p ) => ( { ...p, scale: 0.5 + rand() * 0.7 } ) );
 	const rockVariants = [ 'Rock_01', 'Rock_02', 'Rock_03', 'Rock_04', 'Rock_05' ];
 
 	for ( let i = 0; i < rockVariants.length; i ++ ) {
@@ -248,7 +259,8 @@ export async function createProps( scene ) {
 	}
 
 	const shroomSpots = [
-		{ x: - 22, z: - 8 }, { x: 12, z: - 29 }, { x: - 31, z: 25 }, { x: 42, z: 44 },
+		{ x: - 22 * S, z: - 8 * S }, { x: 12 * S, z: - 29 * S },
+		{ x: - 31 * S, z: 25 * S }, { x: 42 * S, z: 44 * S },
 	];
 	const shrooms = [];
 
@@ -272,7 +284,8 @@ export async function createProps( scene ) {
 	await addInstances( 'Mushroom_01', 'height', shrooms.filter( ( _, i ) => i % 2 === 0 ) );
 	await addInstances( 'Mushroom_03', 'height', shrooms.filter( ( _, i ) => i % 2 === 1 ) );
 
-	const ferns = scatter( 14, 42, 76, 2.5 ).map( ( p ) => ( { ...p, scale: 2.0 + rand() * 1.4 } ) );
+	const ferns = scatter( Math.round( 14 * S ), 42 * S, 76 * S, 2.5 )
+		.map( ( p ) => ( { ...p, scale: 2.0 + rand() * 1.4 } ) );
 	await addInstances( 'Plant_01', 'footprint', ferns.filter( ( _, i ) => i % 2 === 0 ) );
 	await addInstances( 'Plant_02', 'footprint', ferns.filter( ( _, i ) => i % 2 === 1 ) );
 
@@ -282,7 +295,7 @@ export async function createProps( scene ) {
 	// dérivées de l'encombrement réel : taille normalisée mesurée × échelle posée
 	const wallStamps = [];
 
-	for ( const o of OBSTACLES ) {
+	for ( const o of obstacles ) {
 
 		const { size } = await loadUnitGeo( o.model, o.kind === 'rect' ? 'length' : 'height' );
 		const g = worldToGrid( o.x, o.z );
@@ -325,7 +338,7 @@ export async function createProps( scene ) {
 
 		for ( const t of list ) {
 
-			if ( Math.max( Math.abs( t.x ), Math.abs( t.z ) ) < 78 ) wallStamps.push( treeStamp( t ) );
+			if ( Math.max( Math.abs( t.x ), Math.abs( t.z ) ) < WORLD / 2 - 2 ) wallStamps.push( treeStamp( t ) );
 
 		}
 

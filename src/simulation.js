@@ -15,13 +15,23 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, If, Loop, uniform, uniformArray, instancedArray, instanceIndex,
-	float, int, uint, vec2, vec4, ivec2, uvec2,
+	float, int, uint, vec2, vec3, vec4, ivec2, uvec2,
 	exp, cos, sin, sqrt, floor, ceil, max, min, clamp, mix, length, select,
 	atomicAdd, atomicSub, atomicLoad, atomicStore,
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
-import { GRID, MAX_ANTS, FIXED, NEST, params } from './config.js';
+import { GRID, MAX_ANTS, FIXED, NEST, params, gfx } from './config.js';
+
+// gisements de départ (partagés avec la caméra cinématique)
+export const SEED_BLOBS = [
+	{ angle: 0.5, dist: 250, radius: 6 },
+	{ angle: 2.0, dist: 320, radius: 8 },
+	{ angle: 2.6, dist: 200, radius: 5 },
+	{ angle: 3.7, dist: 270, radius: 5 },
+	{ angle: 4.4, dist: 300, radius: 7 },
+	{ angle: 5.1, dist: 360, radius: 8 },
+];
 
 export class AntSimulation {
 
@@ -47,6 +57,9 @@ export class AntSimulation {
 			reinitFrom: uniform( 0 ),    // ré-initialisation partielle des fourmis (slider)
 			stampCount: uniform( 0 ),    // nombre de coups de pinceau de la frame
 			obstacleCount: uniform( 0 ),
+			ballSpacing: uniform( gfx.foodBallSpacing ),  // texels entre billes de nourriture
+			ballRadius: uniform( gfx.foodBallRadius ),    // rayon d'une bille
+			haloSpread: uniform( gfx.haloSpread ),        // portée du halo lumineux
 		};
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
@@ -184,7 +197,8 @@ export class AntSimulation {
 				const carrying = st.equal( uint( 1 ) ).toVar();
 
 				// --- capteurs : 3 cônes de 3×3 texels sur la carte recherchée ---
-				const sense = ( angleOffset, saltA, saltB ) => {
+				// (canal B du champ : nourriture si > 0, mur si < 0 ; A = halo, ignoré)
+				const sense = ( angleOffset ) => {
 
 					const sang = ang.add( angleOffset );
 					const sp = pos.add( vec2( cos( sang ), sin( sang ) ).mul( u.sensorDist ) );
@@ -200,7 +214,8 @@ export class AntSimulation {
 							);
 							const t = textureLoad( readTex, c );
 							// porteuse → suit la carte « maison » (R) ; exploratrice → « nourriture » (G)
-							w = w.add( select( carrying, t.x, t.y ) ).sub( t.w.mul( 0.8 ) );
+							w = w.add( select( carrying, t.x, t.y ) )
+								.sub( clamp( t.z.negate(), 0, 1 ).mul( 0.8 ) );
 
 						}
 
@@ -382,22 +397,23 @@ export class AntSimulation {
 			const iy = i.div( uint( GRID ) );
 			const c = ivec2( ix.toInt(), iy.toInt() );
 
-			// flou 3×3 des canaux R/G pour la diffusion
-			let sum = vec2( 0 );
+			// flou 3×3 : canaux R/G pour la diffusion des phéromones,
+			// canal A pour le halo lumineux de la nourriture (mêmes fetchs = gratuit)
+			let sum = vec3( 0 );
 
 			for ( let oy = - 1; oy <= 1; oy ++ ) {
 
 				for ( let ox = - 1; ox <= 1; ox ++ ) {
 
 					const nc = clamp( c.add( ivec2( ox, oy ) ), ivec2( 0 ), ivec2( GRID - 1 ) );
-					sum = sum.add( textureLoad( readTex, nc ).xy );
+					sum = sum.add( textureLoad( readTex, nc ).xyw );
 
 				}
 
 			}
 
 			const center = textureLoad( readTex, c ).xy;
-			const blurred = sum.div( 9 );
+			const blurred = sum.xy.div( 9 );
 
 			const pher = mix( center, blurred, clamp( u.diffuse.mul( u.dt ), 0, 1 ) ).toVar();
 			pher.assign( max( pher.sub( u.evap.mul( u.dt ) ), vec2( 0 ) ) );
@@ -432,12 +448,14 @@ export class AntSimulation {
 
 			pher.assign( clamp( pher, vec2( 0 ), vec2( 1 ) ) );
 
-			textureStore( writeTex, uvec2( ix, iy ), vec4(
-				pher.x,
-				pher.y,
-				min( foodHere.toFloat().div( 24 ), 1 ),
-				wallHere.toFloat(),
-			) );
+			// halo : diffusion itérée (bord exponentiel) réalimentée par les billes
+			const foodVis = min( foodHere.toFloat().div( 12 ), 1 );
+			const halo = clamp( max( sum.z.div( 9 ).mul( u.haloSpread ), foodVis ), 0, 1 );
+
+			// packing : B = nourriture (+) / mur (−), A = halo
+			const bPacked = select( wallHere.greaterThan( uint( 0 ) ), float( - 1 ), foodVis );
+
+			textureStore( writeTex, uvec2( ix, iy ), vec4( pher.x, pher.y, bPacked, halo ) );
 
 		} )().compute( GRID * GRID );
 
@@ -503,13 +521,41 @@ export class AntSimulation {
 
 					If( s.w.lessThan( 0.5 ), () => {
 
-						// nourriture, bord irrégulier pour un aspect organique
-						const rim = hash( gi.toFloat().add( 3.31 ) ).mul( 0.35 ).add( 0.65 );
+						// nourriture en BILLES éparses : centres jitterés sur une
+						// grille de période ballSpacing, une bille = petit disque
+						If( wall.element( gi ).equal( uint( 0 ) ), () => {
 
-						If( d.lessThanEqual( s.z.mul( rim ) )
-							.and( wall.element( gi ).equal( uint( 0 ) ) ), () => {
+							const P = u.ballSpacing;
+							const bloc = floor( p.div( P ) );
+							const isBall = float( 0 ).toVar();
 
-							atomicStore( food.element( gi ), u.stampFood.element( i ).toUint() );
+							for ( let by = - 1; by <= 1; by ++ ) {
+
+								for ( let bx = - 1; bx <= 1; bx ++ ) {
+
+									const b = bloc.add( vec2( bx, by ) ).add( vec2( 8 ) ); // graines positives
+									const jx = hash( b.x.mul( 127.1 ).add( b.y.mul( 311.7 ) ) );
+									const jy = hash( b.x.mul( 269.5 ).add( b.y.mul( 183.3 ) ) );
+									const center = b.sub( vec2( 8 ) ).mul( P )
+										.add( vec2( jx, jy ).mul( P.sub( u.ballRadius.mul( 2 ) ) ).add( u.ballRadius ) );
+
+									// bille retenue seulement si son centre est dans le pinceau
+									If( length( p.sub( center ) ).lessThan( u.ballRadius )
+										.and( length( center.sub( s.xy ) ).lessThanEqual( s.z ) ), () => {
+
+										isBall.assign( 1 );
+
+									} );
+
+								}
+
+							}
+
+							If( isBall.greaterThan( 0.5 ), () => {
+
+								atomicStore( food.element( gi ), u.stampFood.element( i ).toUint() );
+
+							} );
 
 						} );
 
@@ -566,14 +612,7 @@ export class AntSimulation {
 	async _seedFood() {
 
 		// petits gisements de départ autour du nid, semés en un seul dispatch
-		const blobs = [
-			{ angle: 0.5, dist: 250, radius: 6 },
-			{ angle: 2.0, dist: 320, radius: 8 },
-			{ angle: 2.6, dist: 200, radius: 5 },
-			{ angle: 3.7, dist: 270, radius: 5 },
-			{ angle: 4.4, dist: 300, radius: 7 },
-			{ angle: 5.1, dist: 360, radius: 8 },
-		];
+		const blobs = SEED_BLOBS;
 
 		blobs.forEach( ( b, k ) => {
 

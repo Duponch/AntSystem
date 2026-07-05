@@ -114,7 +114,6 @@ export function createSky( scene ) {
 
 	const moonDir = new THREE.Vector3( - 0.30, 0.44, - 0.85 ).normalize();
 	const moon = new THREE.Mesh( new THREE.PlaneGeometry( 92, 92 ), moonMat );
-	moon.position.copy( moonDir ).multiplyScalar( SKY_R * 0.9 );
 	moon.frustumCulled = false;
 	moon.renderOrder = - 0.9;
 	scene.add( moon );
@@ -123,7 +122,6 @@ export function createSky( scene ) {
 	// Lumières : clair de lune (caster unique) + ambiante bleutée
 	// ------------------------------------------------------------------
 	const moonLight = new THREE.DirectionalLight( NIGHT.moonLight, gfx.moonIntensity );
-	moonLight.position.copy( moonDir ).multiplyScalar( 220 );
 	moonLight.castShadow = true;
 	moonLight.shadow.mapSize.set( 2048, 2048 );
 	moonLight.shadow.camera.left = moonLight.shadow.camera.bottom = - WORLD * 0.75;
@@ -145,11 +143,49 @@ export function createSky( scene ) {
 	scene.fog = fog;
 
 	// ------------------------------------------------------------------
+	// Heure de la nuit : arc de lune de l'est (t=0) au zénith (0.5) à l'ouest (1)
+	// ------------------------------------------------------------------
+	let baseMoonIntensity = gfx.moonIntensity;
+
+	function applyMoonIntensity() {
+
+		// le clair de lune faiblit près de l'horizon
+		const horizon = THREE.MathUtils.smoothstep( moonDir.y, 0.03, 0.25 );
+		moonLight.intensity = baseMoonIntensity * horizon;
+
+	}
+
+	function setTime( t ) {
+
+		const el = ( 6 + 63 * Math.sin( Math.PI * t ) ) * Math.PI / 180;
+		const az = - 1.9 + 3.8 * t;
+		moonDir.set(
+			Math.sin( az ) * Math.cos( el ),
+			Math.sin( el ),
+			- Math.cos( az ) * Math.cos( el ),
+		).normalize();
+
+		moon.position.copy( moonDir ).multiplyScalar( SKY_R * 0.9 );
+		moonLight.position.copy( moonDir ).multiplyScalar( 220 );
+		applyMoonIntensity();
+
+	}
+
+	setTime( gfx.nightTime );
+
 	return {
 		moonLight,
 		ambient,
 		fog,
 		uStars,
+		moonDir,
+		setTime,
+		setMoonIntensity( v ) {
+
+			baseMoonIntensity = v;
+			applyMoonIntensity();
+
+		},
 		update( camera ) {
 
 			moon.lookAt( camera.position );

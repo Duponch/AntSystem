@@ -3,11 +3,12 @@
 import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-import { params, gfx, worldToGrid, MAX_ANTS } from './config.js';
+import { params, gfx, worldToGrid, MAX_ANTS, saveSettings, clearSettings } from './config.js';
+import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength } from './environment.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 
-export function createUI( { sim, ants, env, sky, grass, controls, camera, renderer, onReset } ) {
+export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -69,7 +70,7 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
 		.onChange( ( v ) => env.uTrail.value = v );
 	// l'animation reste proportionnelle à la vitesse ; ceci règle le rapport
-	fDisplay.add( params, 'walkAnim', 0.2, 3, 0.05 ).name( 'Calibrage animation' );
+	fDisplay.add( params, 'walkAnim', 0.2, 4, 0.05 ).name( 'Calibrage animation' );
 	fDisplay.add( params, 'shadows' ).name( 'Ombres' ).onChange( ( v ) => {
 
 		renderer.shadowMap.enabled = v;
@@ -77,10 +78,53 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 		applyAntShadows();
 
 	} );
+	const cineCtrl = fDisplay.add( params, 'cinematic' ).name( '🎬 Caméra cinématique' )
+		.onChange( ( v ) => cinematic.setEnabled( v ) );
+	cinematic.bindController( cineCtrl );
 	fDisplay.close();
 	applyAntShadows();
 
 	const fGfx = gui.addFolder( 'Graphismes' );
+
+	const fMap = fGfx.addFolder( 'Carte' );
+	fMap.add( gfx, 'mapSize', 100, 320, 10 ).name( 'Taille (recharge)' )
+		.onFinishChange( () => {
+
+			saveSettings();
+			location.reload();
+
+		} );
+	fMap.add( gfx, 'groundThickness', 0.2, 10, 0.1 ).name( 'Épaisseur du sol' )
+		.onChange( ( v ) => env.setThickness( v ) );
+
+	const fColors = fGfx.addFolder( 'Couleurs' );
+	fColors.addColor( gfx, 'groundColorA' ).name( 'Sol/herbe sombre' )
+		.onChange( ( v ) => uGroundA.value.set( v ) );
+	fColors.addColor( gfx, 'groundColorB' ).name( 'Sol/herbe clair' )
+		.onChange( ( v ) => uGroundB.value.set( v ) );
+	fColors.addColor( gfx, 'antColor' ).name( 'Fourmis' )
+		.onChange( ( v ) => ants.bodyMat.color.set( v ) );
+	fColors.addColor( gfx, 'anthillColor' ).name( 'Fourmilière' )
+		.onChange( ( v ) => env.anthillMat.color.set( v ) );
+	fColors.addColor( gfx, 'foodColor' ).name( 'Nourriture' ).onChange( ( v ) => {
+
+		uFoodColor.value.set( v );
+		ants.grainMat.color.set( v );
+		ants.grainMat.emissive.set( v );
+
+	} );
+
+	const fFood = fGfx.addFolder( 'Nourriture' );
+	fFood.add( gfx, 'foodBallSpacing', 3, 14, 0.5 ).name( 'Espacement billes' )
+		.onChange( ( v ) => sim.u.ballSpacing.value = v );
+	fFood.add( gfx, 'foodBallRadius', 0.8, 3, 0.1 ).name( 'Taille billes' )
+		.onChange( ( v ) => sim.u.ballRadius.value = v );
+	fFood.add( gfx, 'foodGlow', 0, 4, 0.05 ).name( 'Brillance' )
+		.onChange( ( v ) => uFoodGlow.value = v );
+	fFood.add( gfx, 'haloSpread', 0.5, 0.99, 0.005 ).name( 'Halo : portée' )
+		.onChange( ( v ) => sim.u.haloSpread.value = v );
+	fFood.add( gfx, 'haloStrength', 0, 2.5, 0.05 ).name( 'Halo : intensité' )
+		.onChange( ( v ) => uHaloStrength.value = v );
 
 	const fGrass = fGfx.addFolder( 'Herbe' );
 	fGrass.add( gfx, 'grass' ).name( 'Herbe' );
@@ -96,23 +140,44 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 		.onChange( ( v ) => grass.setShadows( v ) );
 
 	const fNight = fGfx.addFolder( 'Nuit' );
+	fNight.add( gfx, 'nightTime', 0, 1, 0.005 ).name( 'Heure de la nuit' )
+		.onChange( ( v ) => sky.setTime( v ) );
 	fNight.add( gfx, 'moonIntensity', 0, 4, 0.05 ).name( 'Clair de lune' )
-		.onChange( ( v ) => sky.moonLight.intensity = v );
+		.onChange( ( v ) => sky.setMoonIntensity( v ) );
 	fNight.add( gfx, 'ambientIntensity', 0, 2.5, 0.05 ).name( 'Ambiante' )
 		.onChange( ( v ) => sky.ambient.intensity = v );
 	fNight.add( gfx, 'fogDensity', 0, 0.025, 0.0005 ).name( 'Brouillard' )
 		.onChange( ( v ) => sky.fog.density = v );
 	fNight.add( gfx, 'stars', 0, 1, 0.02 ).name( 'Étoiles' )
 		.onChange( ( v ) => sky.uStars.value = v );
+	fNight.add( gfx, 'godrays' ).name( 'Rayons de lune (godrays)' );
+	fNight.add( gfx, 'godrayIntensity', 0, 2.5, 0.05 ).name( 'Intensité des rayons' )
+		.onChange( ( v ) => godrays.uIntensity.value = v );
 
 	fGfx.close();
+
+	// --- persistance ---
+	gui.add( { save: () => {
+
+		saveSettings();
+		overlayFlash( '💾 Réglages sauvegardés' );
+
+	} }, 'save' ).name( '💾 Sauvegarder les réglages' );
+
+	gui.add( { reset: () => {
+
+		clearSettings();
+		location.reload();
+
+	} }, 'reset' ).name( '♻️ Réglages par défaut' );
 
 	// ------------------------------------------------------------------
 	// Peinture : clic gauche = outil, clic droit = orbite
 	// ------------------------------------------------------------------
+	// clic gauche : outil · clic molette maintenu : déplacement · clic droit : orbite
 	controls.mouseButtons = {
 		LEFT: null,
-		MIDDLE: THREE.MOUSE.DOLLY,
+		MIDDLE: THREE.MOUSE.PAN,
 		RIGHT: THREE.MOUSE.ROTATE,
 	};
 	// tactile : un doigt peint, deux doigts zooment/déplacent
@@ -227,9 +292,26 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 	} );
 
 	// ------------------------------------------------------------------
-	// Overlay (stats + aide)
+	// Overlay (stats + aide) + messages éphémères
 	// ------------------------------------------------------------------
 	const overlay = document.getElementById( 'overlay' );
+
+	const flash = document.createElement( 'div' );
+	flash.style.cssText =
+		'position:fixed;top:14px;left:50%;transform:translateX(-50%);color:#cde;' +
+		'background:#000a;padding:6px 14px;border-radius:6px;font-size:13px;' +
+		'opacity:0;transition:opacity .3s;pointer-events:none;z-index:10;';
+	document.body.appendChild( flash );
+	let flashTimer = null;
+
+	function overlayFlash( text ) {
+
+		flash.textContent = text;
+		flash.style.opacity = '1';
+		clearTimeout( flashTimer );
+		flashTimer = setTimeout( () => flash.style.opacity = '0', 1600 );
+
+	}
 
 	function updateOverlay( stats, fps ) {
 
@@ -239,7 +321,7 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 			`🐜 ${carrying} en transport · ` +
 			`${params.antCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
 			`<span style="opacity:.65">Clic gauche : ${params.tool} · Clic droit : orbite · ` +
-			`Molette : zoom · Espace : pause · 1/2/3 : outils</span>`;
+			`Clic molette : déplacer · Molette : zoom · Espace : pause · 1/2/3 : outils</span>`;
 
 	}
 

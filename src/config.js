@@ -1,9 +1,29 @@
-// Constantes de la simulation — grille de phéromones et monde 3D.
+// Constantes de la simulation, paramètres réglables et persistance.
+// Les réglages sauvegardés (localStorage) sont fusionnés au chargement ;
+// la taille de la carte ne s'applique qu'au rechargement de la page.
+
+const STORAGE_KEY = 'antsystem-settings-v1';
+
+function loadSaved() {
+
+	try {
+
+		return JSON.parse( localStorage.getItem( STORAGE_KEY ) ) || null;
+
+	} catch {
+
+		return null;
+
+	}
+
+}
+
+const saved = loadSaved();
 
 export const GRID = 1024;              // résolution de la grille (texels)
-export const WORLD = 160;              // taille du sol en unités monde
-export const TEXEL = WORLD / GRID;     // taille d'un texel en unités monde
-export const MAX_ANTS = 65536;         // capacité GPU (buffers alloués une fois)
+export const WORLD = ( saved && saved.gfx && saved.gfx.mapSize ) || 160; // unités monde (au rechargement)
+export const TEXEL = WORLD / GRID;
+export const MAX_ANTS = 65536;
 export const FIXED = 1024;             // échelle virgule fixe des dépôts u32
 
 export const NEST = {
@@ -12,25 +32,25 @@ export const NEST = {
 	radius: 20,                        // texels
 };
 
-// Paramètres réglables (valeurs par défaut issues de Pezzza's Work / Sebastian Lague)
+// Paramètres de simulation (défauts calibrés en jeu)
 export const params = {
 	// Colonie
 	antCount: 869,                     // clin d'œil à la vidéo
-	simSpeed: 1,
+	simSpeed: 4,
 	paused: false,
 
 	// Comportement (unités : texels et radians par seconde)
-	moveSpeed: 22,
+	moveSpeed: 5,
 	steerStrength: 6,
 	wanderStrength: 1.6,
 	sensorAngleDeg: 30,
-	sensorDist: 12,
+	sensorDist: 14,
 
-	// Phéromones (lentes à disparaître : les pistes structurent la colonie)
-	depositRate: 12,                   // intensité déposée par seconde (avant fondu)
-	fade: 0.03,                        // k du fondu exp(-k·temps_depuis_source)
-	evaporation: 0.06,                 // décroissance linéaire par seconde
-	diffusion: 1.2,                    // taux de flou par seconde
+	// Phéromones (très persistantes : les pistes structurent la colonie)
+	depositRate: 12,
+	fade: 0.005,                       // k du fondu exp(-k·temps_depuis_source)
+	evaporation: 0.01,                 // décroissance linéaire par seconde
+	diffusion: 1.2,
 
 	// Outils
 	tool: 'nourriture',                // 'nourriture' | 'mur' | 'gomme'
@@ -40,39 +60,102 @@ export const params = {
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
-	// calibrage animation : cycles de marche par texel parcouru
-	// (l'animation reste proportionnelle à la vitesse de déplacement)
-	walkAnim: 1.0,
+	// calibrage animation : rapport entre fréquence de foulée et vitesse
+	walkAnim: 2.9,
+	cinematic: false,
 };
 
-// Paramètres graphiques (ambiance nocturne, herbe, décor)
+// Paramètres graphiques
 export const gfx = {
-	// Herbe GPU : disque continu de brins centré sur la caméra
+	// Carte (mapSize appliqué au rechargement)
+	mapSize: 160,
+	groundThickness: 3,
+
+	// Herbe : disque continu de brins centré sur la caméra
 	grass: true,
-	grassDensity: 40,                  // brins par m²
-	grassHeight: 0.55,                 // facteur hauteur (fourmis toujours visibles)
+	grassDensity: 40,
+	grassHeight: 0.55,
 	grassWidth: 0.85,
-	grassRadius: 45,                   // rayon du disque de brins (unités monde)
-	grassWind: 0.45,
-	grassShadows: false,               // ombres portées par les brins (coûteux)
+	grassRadius: 45,
+	grassWind: 1.0,
+	grassShadows: false,
+
+	// Couleurs
+	groundColorA: '#2b3a21',           // mousse sombre (sol ET herbe)
+	groundColorB: '#4a5c3a',           // mousse claire
+	antColor: '#16120e',
+	anthillColor: '#7a5230',           // marron terre
+	foodColor: '#ff9d3a',
+
+	// Nourriture (billes + halo)
+	foodBallSpacing: 5,                // texels entre billes
+	foodBallRadius: 1.4,               // rayon d'une bille (texels)
+	foodGlow: 1.4,                     // brillance des billes
+	haloSpread: 0.93,                  // portée du halo (diffusion)
+	haloStrength: 0.7,                 // intensité du halo
 
 	// Ciel et nuit
+	nightTime: 0.5,                    // 0 = lever de lune, 1 = coucher
 	moonIntensity: 3.2,
 	ambientIntensity: 2.2,
 	fogDensity: 0.008,
-	stars: 0.7,                        // densité/intensité des étoiles
+	stars: 0.7,
+	godrays: false,                    // rayons de lune (post-process)
+	godrayIntensity: 0.9,
 };
 
+// fusion des réglages sauvegardés (clés connues uniquement)
+if ( saved ) {
+
+	for ( const [ k, v ] of Object.entries( saved.params || {} ) ) {
+
+		if ( k in params && typeof v === typeof params[ k ] ) params[ k ] = v;
+
+	}
+
+	for ( const [ k, v ] of Object.entries( saved.gfx || {} ) ) {
+
+		if ( k in gfx && typeof v === typeof gfx[ k ] ) gfx[ k ] = v;
+
+	}
+
+	params.paused = false;
+	params.cinematic = false;
+
+}
+
+export function saveSettings() {
+
+	localStorage.setItem( STORAGE_KEY, JSON.stringify( { params, gfx } ) );
+
+}
+
+export function clearSettings() {
+
+	localStorage.removeItem( STORAGE_KEY );
+
+}
+
+export function hasSavedSettings() {
+
+	return saved !== null;
+
+}
+
 export function worldToGrid( x, z ) {
+
 	return {
 		x: ( x / WORLD + 0.5 ) * GRID,
 		y: ( z / WORLD + 0.5 ) * GRID,
 	};
+
 }
 
 export function gridToWorld( gx, gy ) {
+
 	return {
 		x: ( gx / GRID - 0.5 ) * WORLD,
 		z: ( gy / GRID - 0.5 ) * WORLD,
 	};
+
 }

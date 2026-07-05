@@ -12,7 +12,7 @@ import {
 } from 'three/tsl';
 
 import { loadAntVAT } from './vat.js';
-import { GRID, WORLD, params } from './config.js';
+import { GRID, WORLD, params, gfx } from './config.js';
 
 export async function createAnts( sim ) {
 
@@ -60,7 +60,7 @@ export async function createAnts( sim ) {
 	bodyGeo.instanceCount = params.antCount;
 
 	const bodyMat = new THREE.MeshStandardNodeMaterial( {
-		color: 0x16120e,
+		color: new THREE.Color( gfx.antColor ),
 		roughness: 0.6,
 		metalness: 0.0,
 	} );
@@ -96,10 +96,10 @@ export async function createAnts( sim ) {
 	grainGeo.attributes = ico.attributes;
 	grainGeo.instanceCount = params.antCount;
 
-	// apparence « luciole » : bille ambrée rougeoyante, comme la nourriture au sol
+	// apparence « luciole » : bille rougeoyante, assortie à la nourriture au sol
 	const grainMat = new THREE.MeshStandardNodeMaterial( {
-		color: 0xffb45c,
-		emissive: 0xff9d3a,
+		color: new THREE.Color( gfx.foodColor ),
+		emissive: new THREE.Color( gfx.foodColor ),
 		emissiveIntensity: 2.2,
 		roughness: 0.4,
 	} );
@@ -123,6 +123,8 @@ export async function createAnts( sim ) {
 
 	return {
 		group,
+		bodyMat,
+		grainMat,
 		setCount( n ) {
 
 			bodyGeo.instanceCount = n;

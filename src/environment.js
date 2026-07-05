@@ -13,10 +13,15 @@ import {
 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { WORLD, NEST, GRID, params } from './config.js';
+import { WORLD, NEST, GRID, params, gfx } from './config.js';
 
-// intensité des pistes, partagée sol/herbe (réglée par l'UI)
+// uniforms partagés sol/herbe (réglés par l'UI)
 export const uTrail = uniform( params.trailIntensity );
+export const uGroundA = uniform( new THREE.Color( gfx.groundColorA ) );
+export const uGroundB = uniform( new THREE.Color( gfx.groundColorB ) );
+export const uFoodColor = uniform( new THREE.Color( gfx.foodColor ) );
+export const uFoodGlow = uniform( gfx.foodGlow );
+export const uHaloStrength = uniform( gfx.haloStrength );
 
 // Crée un nœud d'échantillonnage du champ, enregistré pour suivre le ping-pong.
 export function makeFieldSampler( sim, uvNode ) {
@@ -27,16 +32,18 @@ export function makeFieldSampler( sim, uvNode ) {
 
 }
 
+// Champ packé : B (f.z) = nourriture (+) / mur (−) ; A (f.w) = halo lumineux.
+
 // Albédo du sol en un point (worldXZ vec2, f = échantillon vec4 du champ).
 export function groundAlbedo( worldXZ, f ) {
 
-	const wallM = smoothstep( 0.2, 0.8, f.w );
+	const wallM = smoothstep( 0.2, 0.8, f.z.negate() );
 	const foodM = clamp( f.z, 0, 1 );
 
 	// mousse : deux verts mélangés par un bruit organique multi-échelle
 	const patches = mx_noise_float( worldXZ.mul( 0.055 ) ).mul( 0.5 ).add( 0.5 );
 	const detail = mx_noise_float( worldXZ.mul( 0.6 ) ).mul( 0.5 ).add( 0.5 );
-	const col = mix( color( 0x2b3a21 ), color( 0x4a5c3a ), patches )
+	const col = mix( uGroundA, uGroundB, patches )
 		.mul( detail.mul( 0.3 ).add( 0.85 ) ).toVar();
 
 	// bords assombris (lisière de forêt)
@@ -45,18 +52,19 @@ export function groundAlbedo( worldXZ, f ) {
 	);
 	col.mulAssign( vignette );
 
-	col.assign( mix( col, color( 0x4a453c ), wallM ) );            // murs/terre
-	col.assign( mix( col, color( 0x8a5a20 ), foodM.mul( 0.85 ) ) ); // nourriture ambrée
+	col.assign( mix( col, color( 0x4a453c ), wallM ) );                 // murs/terre
+	col.assign( mix( col, uFoodColor.mul( 0.55 ), foodM.mul( 0.85 ) ) ); // billes
 
 	return col;
 
 }
 
-// Émissif du sol : pistes de phéromones + nourriture luminescente (lucioles).
+// Émissif du sol : pistes de phéromones + billes luminescentes avec halo.
 export function groundEmissive( f ) {
 
-	const wallM = smoothstep( 0.2, 0.8, f.w );
+	const wallM = smoothstep( 0.2, 0.8, f.z.negate() );
 	const foodM = clamp( f.z, 0, 1 );
+	const halo = clamp( f.w, 0, 1 );
 
 	// quadratique : les pistes structurées ressortent, le voile diffus s'éteint
 	const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x.mul( f.x ) ).mul( 0.45 );
@@ -66,10 +74,13 @@ export function groundEmissive( f ) {
 		.mul( float( 1 ).sub( wallM ) )
 		.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
 
-	// la nourriture rougeoie comme des lucioles posées dans l'herbe
-	const foodGlow = vec3( 1.0, 0.62, 0.18 ).mul( foodM ).mul( 0.85 );
+	// billes rougeoyantes + halo progressif (fondu exponentiel autour)
+	const glow = uFoodColor.mul(
+		foodM.mul( uFoodGlow )
+			.add( halo.mul( halo ).mul( uHaloStrength ).mul( float( 1 ).sub( foodM ) ) ),
+	).mul( float( 1 ).sub( wallM ) );
 
-	return trails.add( foodGlow );
+	return trails.add( glow );
 
 }
 
@@ -90,6 +101,32 @@ export async function createEnvironment( scene, sim ) {
 	const ground = new THREE.Mesh( groundGeo, groundMat );
 	ground.receiveShadow = true;
 	scene.add( ground );
+
+	// ------------------------------------------------------------------
+	// Socle : épaisseur de terre sous le sol (réglable)
+	// ------------------------------------------------------------------
+	const soilMat = new THREE.MeshStandardNodeMaterial( { roughness: 1, metalness: 0 } );
+	soilMat.colorNode = Fn( () => {
+
+		// strates de terre subtiles
+		const strata = mx_noise_float( positionWorld.xz.mul( 0.25 ).add( positionWorld.y ) )
+			.mul( 0.5 ).add( 0.5 );
+		return mix( color( 0x1e1710 ), color( 0x33261a ), strata );
+
+	} )();
+
+	const soil = new THREE.Mesh( new THREE.BoxGeometry( WORLD, 1, WORLD ), soilMat );
+	soil.scale.y = gfx.groundThickness;
+	soil.position.y = - gfx.groundThickness / 2 - 0.01;
+	soil.receiveShadow = true;
+	scene.add( soil );
+
+	function setThickness( t ) {
+
+		soil.scale.y = Math.max( 0.05, t );
+		soil.position.y = - t / 2 - 0.01;
+
+	}
 
 	// ------------------------------------------------------------------
 	// Fourmilière (GLB), pieds au sol, empreinte ≈ zone du nid
@@ -120,10 +157,11 @@ export async function createEnvironment( scene, sim ) {
 	anthillGeo.translate( - ( bb.min.x + bb.max.x ) / 2, - bb.min.y, - ( bb.min.z + bb.max.z ) / 2 );
 	anthillGeo.scale( s, s, s );
 
-	const anthill = new THREE.Mesh(
-		anthillGeo,
-		new THREE.MeshStandardNodeMaterial( { color: 0x6f5a3c, roughness: 1 } ),
-	);
+	const anthillMat = new THREE.MeshStandardNodeMaterial( {
+		color: new THREE.Color( gfx.anthillColor ),
+		roughness: 1,
+	} );
+	const anthill = new THREE.Mesh( anthillGeo, anthillMat );
 	anthill.scale.setScalar( nestWorldR * 2.4 );
 	anthill.position.y = - nestWorldR * 0.08;      // base légèrement enterrée
 	anthill.castShadow = true;
@@ -133,6 +171,8 @@ export async function createEnvironment( scene, sim ) {
 	return {
 		ground,
 		uTrail,
+		anthillMat,
+		setThickness,
 	};
 
 }

@@ -5,13 +5,15 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-import { params } from './config.js';
+import { params, gfx } from './config.js';
 import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
 import { createEnvironment } from './environment.js';
 import { createSky } from './graphics/sky.js';
 import { createGrass } from './graphics/grass.js';
 import { createProps } from './graphics/props.js';
+import { createGodrays } from './graphics/godrays.js';
+import { createCinematic } from './graphics/cinematic.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -86,9 +88,12 @@ async function main() {
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
+	const godrays = createGodrays( renderer, scene, camera, sky );
+	const cinematic = createCinematic( { camera, controls, sim, renderer } );
+
 	// --- interface ---
 	const ui = createUI( {
-		sim, ants, env, sky, grass, controls, camera, renderer,
+		sim, ants, env, sky, grass, godrays, cinematic, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -135,9 +140,15 @@ async function main() {
 		ants.tick( simDt );
 		sky.update( camera );
 		grass.update( camera, rawDt );
+		cinematic.update( rawDt );
 
-		controls.update();
-		renderer.render( scene, camera );
+		// OrbitControls.update() repositionne la caméra même désactivé :
+		// on le saute pendant les plans cinématiques
+		if ( ! params.cinematic ) controls.update();
+
+		// early-out réel : sans godrays, aucun post-processing n'est payé
+		if ( gfx.godrays ) godrays.render();
+		else renderer.render( scene, camera );
 
 		frame ++;
 
@@ -153,7 +164,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, ants, sky, grass };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, godrays, cinematic };
 
 	window.addEventListener( 'resize', () => {
 
