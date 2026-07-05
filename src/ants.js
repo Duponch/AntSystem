@@ -1,62 +1,32 @@
-// Rendu des fourmis : le maillage du GLB instancié, transformé dans le vertex
-// shader directement depuis les buffers de la simulation (aucun aller-retour CPU).
-//
-// Le GLB n'a pas de normales → three bascule automatiquement en flat shading
-// (normales dérivées des positions transformées), donc l'éclairage des
-// instances tournées est correct sans retouche.
+// Rendu des fourmis : maillage rigué baké en VAT (voir vat.js), instancié et
+// transformé dans le vertex shader depuis les buffers de la simulation.
+// Le cycle de marche est lu dans la texture VAT avec une phase par instance,
+// cadencé par le temps de SIMULATION (la pause fige la démarche) et par la
+// vitesse de déplacement (les fourmis trottinent d'autant plus vite).
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, instanceIndex, positionLocal,
-	vec3, mat3, float, cos, sin, time, abs,
+	Fn, instanceIndex, vertexIndex, positionLocal, uniform,
+	vec3, mat3, float, int, ivec2, uint, cos, sin, fract, floor, mix, hash,
+	textureLoad,
 } from 'three/tsl';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
+import { loadAntVAT } from './vat.js';
 import { GRID, WORLD, params } from './config.js';
-
-const ANT_LENGTH = 0.95; // longueur du corps en unités monde
 
 export async function createAnts( sim ) {
 
-	// --- géométrie : fusion des primitives du GLB, pieds au sol, taille normalisée ---
-	const gltf = await new GLTFLoader().loadAsync( '/Ant.glb' );
-	gltf.scene.updateMatrixWorld( true );
+	const vat = await loadAntVAT( '/AntRigged.glb', { frames: 20, targetLength: 0.95 } );
 
-	const parts = [];
-	gltf.scene.traverse( ( o ) => {
+	// phase de marche accumulée côté CPU (dans [0,1) : pas de saut quand la
+	// fréquence change, pas de perte de précision f32 en session longue)
+	const uPhase = uniform( 0 );
+	let phaseAcc = 0;
 
-		if ( o.isMesh ) {
-
-			const g = o.geometry.clone();
-			g.applyMatrix4( o.matrixWorld );
-			parts.push( g );
-
-		}
-
-	} );
-
-	const merged = mergeGeometries( parts, false );
-	merged.computeBoundingBox();
-
-	const bb = merged.boundingBox;
-	const size = new THREE.Vector3();
-	bb.getSize( size );
-
-	const scale = ANT_LENGTH / size.z;
-	merged.translate(
-		- ( bb.min.x + bb.max.x ) / 2,
-		- bb.min.y,
-		- ( bb.min.z + bb.max.z ) / 2,
-	);
-	merged.scale( scale, scale, scale );
-
-	const headZ = ( size.z / 2 ) * scale;     // avant du corps (+Z supposé)
-	const bodyH = size.y * scale;
-
-	// --- transformation par instance, partagée par le corps et le point de nourriture ---
 	const texel = WORLD / GRID;
+	const framesF = float( vat.frames );
 
+	// --- transformation par instance, partagée par le corps et le grain ---
 	const instanceTransform = () => {
 
 		const a = sim.antData.element( instanceIndex );
@@ -83,10 +53,10 @@ export async function createAnts( sim ) {
 
 	};
 
-	// --- corps ---
+	// --- corps : sommets lus dans la VAT (deux frames interpolées) ---
 	const bodyGeo = new THREE.InstancedBufferGeometry();
-	bodyGeo.index = merged.index;
-	bodyGeo.attributes = merged.attributes;
+	bodyGeo.index = vat.geometry.index;
+	bodyGeo.attributes = vat.geometry.attributes;
 	bodyGeo.instanceCount = params.antCount;
 
 	const bodyMat = new THREE.MeshStandardNodeMaterial( {
@@ -99,10 +69,18 @@ export async function createAnts( sim ) {
 
 		const { rot, world } = instanceTransform();
 
-		// léger trottinement
-		const bob = abs( sin( time.mul( 26 ).add( instanceIndex.toFloat().mul( 1.71 ) ) ) ).mul( 0.02 );
+		// phase de marche accumulée + décalage par fourmi
+		const cycle = uPhase.add( hash( instanceIndex.add( uint( 1013 ) ) ) );
+		const ff = fract( cycle ).mul( framesF );
+		const f0 = floor( ff ).toInt();
+		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
+		const w = fract( ff );
 
-		return rot.mul( positionLocal ).add( world ).add( vec3( 0, bob, 0 ) );
+		const p0 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), f0 ) ).xyz;
+		const p1 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), f1 ) ).xyz;
+		const animated = mix( p0, p1, w );
+
+		return rot.mul( animated ).add( world );
 
 	} )();
 
@@ -113,7 +91,7 @@ export async function createAnts( sim ) {
 
 	// --- grain de nourriture porté (échelle 0 quand la fourmi n'a rien) ---
 	const grainGeo = new THREE.InstancedBufferGeometry();
-	const ico = new THREE.IcosahedronGeometry( 0.14, 1 );
+	const ico = new THREE.IcosahedronGeometry( 0.085, 0 );
 	grainGeo.index = ico.index;
 	grainGeo.attributes = ico.attributes;
 	grainGeo.instanceCount = params.antCount;
@@ -129,7 +107,7 @@ export async function createAnts( sim ) {
 
 		const { rot, world } = instanceTransform();
 		const carrying = sim.antState.element( instanceIndex ).toFloat();
-		const offset = rot.mul( vec3( 0, bodyH * 0.65, headZ * 0.9 ) );
+		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) );
 
 		return positionLocal.mul( carrying ).add( offset ).add( world );
 
@@ -137,7 +115,7 @@ export async function createAnts( sim ) {
 
 	const grain = new THREE.Mesh( grainGeo, grainMat );
 	grain.frustumCulled = false;
-	grain.castShadow = true;
+	// pas d'ombre pour un grain de 8 cm sous la lune
 
 	const group = new THREE.Group();
 	group.add( body, grain );
@@ -153,7 +131,13 @@ export async function createAnts( sim ) {
 		setShadows( on ) {
 
 			body.castShadow = on;
-			grain.castShadow = on;
+
+		},
+		// à appeler chaque frame avec le dt de SIMULATION (0 si pause)
+		tick( simDt ) {
+
+			phaseAcc = ( phaseAcc + simDt * params.moveSpeed * params.walkAnim * 0.14 ) % 1;
+			uPhase.value = phaseAcc;
 
 		},
 	};

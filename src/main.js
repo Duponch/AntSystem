@@ -9,6 +9,9 @@ import { params } from './config.js';
 import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
 import { createEnvironment } from './environment.js';
+import { createSky } from './graphics/sky.js';
+import { createGrass } from './graphics/grass.js';
+import { createProps } from './graphics/props.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -25,7 +28,7 @@ async function main() {
 	renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
 	renderer.setSize( window.innerWidth, window.innerHeight );
 	renderer.toneMapping = THREE.ACESFilmicToneMapping;
-	renderer.toneMappingExposure = 1.1;
+	renderer.toneMappingExposure = 1.35;
 	renderer.shadowMap.enabled = params.shadows;
 
 	try {
@@ -55,9 +58,9 @@ async function main() {
 	// --- scène / caméra ---
 	const scene = new THREE.Scene();
 	const camera = new THREE.PerspectiveCamera(
-		55, window.innerWidth / window.innerHeight, 0.1, 1000,
+		55, window.innerWidth / window.innerHeight, 0.1, 2600,
 	);
-	camera.position.set( 0, 62, 82 );
+	camera.position.set( 0, 42, 68 );
 
 	const controls = new OrbitControls( camera, renderer.domElement );
 	controls.enableDamping = true;
@@ -70,14 +73,22 @@ async function main() {
 	// --- simulation + monde ---
 	const sim = new AntSimulation( renderer );
 	const env = createEnvironment( scene, sim );
-	const ants = await createAnts( sim );
+	const sky = createSky( scene );
+	const grass = createGrass( scene );
+
+	// décor + fourmis en parallèle (chargements de fichiers)
+	const [ props, ants ] = await Promise.all( [
+		createProps( scene ),
+		createAnts( sim ),
+	] );
 	scene.add( ants.group );
 
 	await sim.init();
+	await sim.setObstacles( props.wallStamps );
 
 	// --- interface ---
 	const ui = createUI( {
-		sim, ants, env, controls, camera, renderer,
+		sim, ants, env, sky, grass, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -105,10 +116,12 @@ async function main() {
 		fpsCount ++;
 
 		const painted = sim.drainBrush();
+		const running = ! params.paused && params.simSpeed > 0;
+		const simDt = running ? rawDt * params.simSpeed : 0;
 
-		if ( ! params.paused && params.simSpeed > 0 ) {
+		if ( running ) {
 
-			sim.step( rawDt * params.simSpeed );
+			sim.step( simDt );
 			env.updateFieldTexture();
 
 		} else if ( painted || ui.consumePaintFlag() ) {
@@ -118,6 +131,10 @@ async function main() {
 			env.updateFieldTexture();
 
 		}
+
+		ants.tick( simDt );
+		sky.update( camera );
+		grass.update( camera, rawDt );
 
 		controls.update();
 		renderer.render( scene, camera );
@@ -136,7 +153,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, ants };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, ants, sky, grass };
 
 	window.addEventListener( 'resize', () => {
 

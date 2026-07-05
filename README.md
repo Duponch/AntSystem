@@ -36,16 +36,28 @@ Tout l'état vit sur le GPU ; le CPU ne fait qu'orchestrer les passes de calcul 
 
 2. **Passe grille** (une invocation par texel, 1024²) — diffusion 3×3 + évaporation linéaire, injection des dépôts accumulés, marqueurs permanents (le nid sature la carte maison, la nourriture sature la carte nourriture), puis écriture dans une paire de textures `rgba16float` en ping-pong qui sert à la fois aux capteurs et à l'affichage.
 
-3. **Rendu** — le maillage `Ant.glb` (~2 000 triangles) est instancié via `InstancedBufferGeometry` ; le `positionNode` du matériau lit directement les buffers de simulation dans le vertex shader (zéro aller-retour CPU). Les ombres suivent automatiquement. Le sol affiche le champ de phéromones en émissif (bleu = maison, orange = nourriture).
+3. **Rendu** — la fourmi riguée et animée dans Blender (11 os, cycle de marche tripode) est bakée en **VAT** (Vertex Animation Texture) au chargement : le vertex shader instancié lit deux frames de la texture et interpole, avec une phase par fourmi — le skinning ne coûte rien, même à 65 536 instances. Le `positionNode` lit directement les buffers de simulation (zéro aller-retour CPU), les ombres suivent automatiquement, et l'absence de normales déclenche le flat shading dérivé des positions déformées. Le sol affiche le champ de phéromones en émissif (bleu = maison, orange = nourriture).
+
+## Graphismes (nuit cozy low-poly)
+
+- **Tapis d'herbe 100 % GPU** : un brin = 2 triangles, position/lacet/taille/teinte/vent dérivés de `instanceIndex` par `hash()` dans le vertex shader (zéro donnée par brin côté CPU). 25 chunks avec frustum culling, rayon d'affichage et densité dégressive selon la hauteur caméra.
+- **Ciel nocturne** : dôme en dégradé zénith/horizon, étoiles procédurales scintillantes, lune billboard TSL (disque + halo + cratères), brouillard exponentiel assorti à l'horizon.
+- **Clair de lune** : directionnelle bleutée avec ombres (y compris sur l'herbe) + ambiante nuit — palette portée du projet Simulation.
+- **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères, lucioles.
+- Tout est réglable en direct dans le dossier **Graphismes** du panneau.
 
 ## Structure
 
 ```
 src/
-  config.js       constantes et paramètres réglables
-  simulation.js   kernels TSL : fourmis, grille, pinceau, stats
-  ants.js         rendu instancié du GLB + grain de nourriture porté
-  environment.js  sol (visualisation du champ), nid, lumières
-  ui.js           panneau lil-gui, peinture au pointeur, overlay
-  main.js         bootstrap WebGPU et boucle
+  config.js         constantes, paramètres simulation + graphismes
+  simulation.js     kernels TSL : fourmis, grille, pinceau, obstacles, stats
+  vat.js            bake du cycle de marche squelettique en texture
+  ants.js           rendu instancié VAT + grain de nourriture porté
+  environment.js    sol (visualisation du champ), nid
+  graphics/sky.js   dôme, lune, étoiles, lumières, brouillard, lucioles
+  graphics/grass.js tapis d'herbe GPU en chunks
+  graphics/props.js arbres, obstacles, déco (pack FBX low-poly)
+  ui.js             panneau lil-gui, peinture au pointeur, overlay
+  main.js           bootstrap WebGPU et boucle
 ```

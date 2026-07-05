@@ -3,16 +3,22 @@
 import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-import { params, worldToGrid, MAX_ANTS } from './config.js';
+import { params, gfx, worldToGrid, MAX_ANTS } from './config.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 
-export function createUI( { sim, ants, env, controls, camera, renderer, onReset } ) {
+export function createUI( { sim, ants, env, sky, grass, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
 	// ------------------------------------------------------------------
 	const gui = new GUI( { title: '🐜 AntSystem' } );
+
+	// au-delà de ce nombre, les ombres des fourmis doublent le coût vertex
+	// pour un gain visuel nul : on les coupe automatiquement
+	const ANT_SHADOW_MAX = 16384;
+	const applyAntShadows = () =>
+		ants.setShadows( params.shadows && params.antCount <= ANT_SHADOW_MAX );
 
 	const fColony = gui.addFolder( 'Colonie' );
 	fColony.add( params, 'antCount', 10, MAX_ANTS, 1 ).name( 'Fourmis' ).onChange( ( v ) => {
@@ -23,6 +29,7 @@ export function createUI( { sim, ants, env, controls, camera, renderer, onReset 
 
 		sim.u.antCount.value = v;
 		ants.setCount( v );
+		applyAntShadows();
 
 	} );
 	fColony.add( params, 'simSpeed', 0, 4, 0.1 ).name( 'Vitesse ×' );
@@ -61,14 +68,45 @@ export function createUI( { sim, ants, env, controls, camera, renderer, onReset 
 	const fDisplay = gui.addFolder( 'Affichage' );
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
 		.onChange( ( v ) => env.uTrail.value = v );
+	fDisplay.add( params, 'walkAnim', 0.3, 2.5, 0.05 ).name( 'Vitesse de marche' );
 	fDisplay.add( params, 'shadows' ).name( 'Ombres' ).onChange( ( v ) => {
 
 		renderer.shadowMap.enabled = v;
-		ants.setShadows( v );
-		env.sun.castShadow = v;
+		sky.moonLight.castShadow = v;
+		applyAntShadows();
 
 	} );
 	fDisplay.close();
+	applyAntShadows();
+
+	const fGfx = gui.addFolder( 'Graphismes' );
+
+	const fGrass = fGfx.addFolder( 'Herbe' );
+	fGrass.add( gfx, 'grass' ).name( 'Herbe' );
+	fGrass.add( gfx, 'grassDensity', 5, grass.MAX_DENSITY, 1 ).name( 'Densité (brins/m²)' );
+	fGrass.add( gfx, 'grassHeight', 0.25, 1.6, 0.05 ).name( 'Hauteur' )
+		.onChange( ( v ) => grass.u.height.value = v );
+	fGrass.add( gfx, 'grassWidth', 0.3, 2, 0.05 ).name( 'Largeur' )
+		.onChange( ( v ) => grass.u.width.value = v );
+	fGrass.add( gfx, 'grassDistance', 20, 140, 1 ).name( 'Distance' );
+	fGrass.add( gfx, 'grassWind', 0, 1, 0.02 ).name( 'Vent' )
+		.onChange( ( v ) => grass.u.wind.value = v );
+	fGrass.add( gfx, 'grassShadows' ).name( 'Ombres des brins' )
+		.onChange( ( v ) => grass.setShadows( v ) );
+
+	const fNight = fGfx.addFolder( 'Nuit' );
+	fNight.add( gfx, 'moonIntensity', 0, 4, 0.05 ).name( 'Clair de lune' )
+		.onChange( ( v ) => sky.moonLight.intensity = v );
+	fNight.add( gfx, 'ambientIntensity', 0, 2.5, 0.05 ).name( 'Ambiante' )
+		.onChange( ( v ) => sky.ambient.intensity = v );
+	fNight.add( gfx, 'fogDensity', 0, 0.025, 0.0005 ).name( 'Brouillard' )
+		.onChange( ( v ) => sky.fog.density = v );
+	fNight.add( gfx, 'stars', 0, 1, 0.02 ).name( 'Étoiles' )
+		.onChange( ( v ) => sky.uStars.value = v );
+	fNight.add( gfx, 'fireflies' ).name( 'Lucioles' )
+		.onChange( ( v ) => sky.setFireflies( v ) );
+
+	fGfx.close();
 
 	// ------------------------------------------------------------------
 	// Peinture : clic gauche = outil, clic droit = orbite

@@ -46,7 +46,16 @@ export class AntSimulation {
 			nestRadius: uniform( NEST.radius ),
 			reinitFrom: uniform( 0 ),    // ré-initialisation partielle des fourmis (slider)
 			stampCount: uniform( 0 ),    // nombre de coups de pinceau de la frame
+			obstacleCount: uniform( 0 ),
 		};
+
+		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
+		// A = (cx, cy, demi-longueur, demi-largeur) en texels ; B = (axe.x, axe.y, type, 0)
+		this._obstacleA = Array.from( { length: 64 }, () => new THREE.Vector4() );
+		this._obstacleB = Array.from( { length: 64 }, () => new THREE.Vector4() );
+		u.obstacleA = uniformArray( this._obstacleA );
+		u.obstacleB = uniformArray( this._obstacleB );
+		this._obstacles = null;
 
 		// coups de pinceau de la frame : (x, y, rayon, mode 0/1/2) + quantité de nourriture
 		this._stampVecs = Array.from( { length: 16 }, () => new THREE.Vector4() );
@@ -422,6 +431,47 @@ export class AntSimulation {
 
 		} )().compute( GRID * GRID );
 
+		// ------------------------------------------------------------------
+		// Rasterisation des obstacles du décor dans la grille de murs
+		// ------------------------------------------------------------------
+		this.kObstacles = Fn( () => {
+
+			const gi = instanceIndex;
+			const p = vec2( gi.mod( uint( GRID ) ).toFloat(), gi.div( uint( GRID ) ).toFloat() );
+
+			Loop( { start: int( 0 ), end: u.obstacleCount.toInt(), type: 'int', condition: '<' }, ( { i } ) => {
+
+				const A = u.obstacleA.element( i );      // cx, cy, hw, hh
+				const B = u.obstacleB.element( i );      // axe.x, axe.y, type
+				const d = p.sub( A.xy );
+
+				If( B.z.lessThan( 0.5 ), () => {
+
+					// disque
+					If( length( d ).lessThan( A.z ), () => {
+
+						wall.element( gi ).assign( uint( 1 ) );
+
+					} );
+
+				} ).Else( () => {
+
+					// rectangle orienté (axe = direction de la longueur)
+					const along = d.x.mul( B.x ).add( d.y.mul( B.y ) );
+					const across = d.x.mul( B.y.negate() ).add( d.y.mul( B.x ) );
+
+					If( along.abs().lessThan( A.z ).and( across.abs().lessThan( A.w ) ), () => {
+
+						wall.element( gi ).assign( uint( 1 ) );
+
+					} );
+
+				} );
+
+			} );
+
+		} )().compute( GRID * GRID );
+
 		const [ tA, tB ] = this.textures;
 		this.kAnt = [ makeAntKernel( tA ), makeAntKernel( tB ) ];
 		this.kGrid = [ makeGridKernel( tA, tB ), makeGridKernel( tB, tA ) ];
@@ -489,6 +539,7 @@ export class AntSimulation {
 		await r.computeAsync( this.kClearField );
 		await r.computeAsync( this.kClearStats );
 		await r.computeAsync( this.kInitAnts );
+		if ( this._obstacles ) await this._stampObstacles();
 		await this._seedFood();
 
 	}
@@ -567,19 +618,48 @@ export class AntSimulation {
 		if ( this._brushQueue.length === 0 ) return false;
 
 		const n = Math.min( this._stampVecs.length, this._brushQueue.length );
+		let hasEraser = false;
 
 		for ( let k = 0; k < n; k ++ ) {
 
 			const s = this._brushQueue.shift();
 			this._stampVecs[ k ].set( s.gx, s.gy, s.radius, s.mode );
 			this._stampFood[ k ] = s.foodAmount;
+			if ( s.mode === 2 ) hasEraser = true;
 
 		}
 
 		this.u.stampCount.value = n;
 		this.renderer.compute( this.kBrush );
 		this.u.stampCount.value = 0;
+
+		// la gomme ne doit pas percer les obstacles du décor : on les re-tamponne
+		if ( hasEraser && this._obstacles ) this.renderer.compute( this.kObstacles );
+
 		return true;
+
+	}
+
+	// Déclare les obstacles du décor et les rasterise dans la grille de murs
+	// (re-rasterisés à chaque reset, après le nettoyage du terrain).
+	async setObstacles( stamps ) {
+
+		this._obstacles = stamps.slice( 0, this._obstacleA.length );
+		await this._stampObstacles();
+
+	}
+
+	async _stampObstacles() {
+
+		this._obstacles.forEach( ( s, i ) => {
+
+			this._obstacleA[ i ].set( s.cx, s.cy, s.hw, s.hh );
+			this._obstacleB[ i ].set( s.ax, s.ay, s.type, 0 );
+
+		} );
+
+		this.u.obstacleCount.value = this._obstacles.length;
+		await this.renderer.computeAsync( this.kObstacles );
 
 	}
 

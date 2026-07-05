@@ -1,9 +1,11 @@
-// Environnement : sol avec visualisation du champ de phéromones, nid, lumières.
+// Sol de la clairière : mousse nocturne avec taches organiques, visualisation
+// du champ de phéromones en émissif, murs/terre, nid. L'éclairage, le ciel et
+// le brouillard vivent dans graphics/sky.js.
 
 import * as THREE from 'three/webgpu';
 import {
 	Fn, texture, uniform, positionWorld,
-	vec2, vec3, float, color, mix, clamp, smoothstep, length,
+	vec3, float, color, mix, clamp, smoothstep, length, mx_noise_float,
 } from 'three/tsl';
 
 import { WORLD, GRID, NEST, params } from './config.js';
@@ -13,7 +15,7 @@ export function createEnvironment( scene, sim ) {
 	const uTrail = uniform( params.trailIntensity );
 
 	// ------------------------------------------------------------------
-	// Sol : couleur du terreau + murs + nourriture, pistes en émissif
+	// Sol : mousse + murs + nourriture, pistes en émissif
 	// ------------------------------------------------------------------
 	const groundGeo = new THREE.PlaneGeometry( WORLD, WORLD ).rotateX( - Math.PI / 2 );
 	const groundMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.95, metalness: 0 } );
@@ -28,14 +30,20 @@ export function createEnvironment( scene, sim ) {
 		const wallM = smoothstep( 0.2, 0.8, f.w );
 		const foodM = clamp( f.z, 0, 1 );
 
-		// terreau, légèrement assombri vers les bords
-		const vignette = float( 1 ).sub(
-			smoothstep( 0.35, 0.75, length( positionWorld.xz ).div( WORLD ) ).mul( 0.35 ),
-		);
-		let col = color( 0x453525 ).mul( vignette ).toVar();
+		// mousse : deux verts mélangés par un bruit organique multi-échelle
+		const patches = mx_noise_float( positionWorld.xz.mul( 0.055 ) ).mul( 0.5 ).add( 0.5 );
+		const detail = mx_noise_float( positionWorld.xz.mul( 0.6 ) ).mul( 0.5 ).add( 0.5 );
+		let col = mix( color( 0x2b3a21 ), color( 0x4a5c3a ), patches )
+			.mul( detail.mul( 0.3 ).add( 0.85 ) ).toVar();
 
-		col.assign( mix( col, color( 0x847c6e ), wallM ) );
-		col.assign( mix( col, color( 0x2f9e44 ), foodM.mul( 0.9 ) ) );
+		// bords assombris (lisière de forêt)
+		const vignette = float( 1 ).sub(
+			smoothstep( 0.32, 0.72, length( positionWorld.xz ).div( WORLD ) ).mul( 0.3 ),
+		);
+		col.mulAssign( vignette );
+
+		col.assign( mix( col, color( 0x4a453c ), wallM ) );          // murs/terre
+		col.assign( mix( col, color( 0x2f9e44 ), foodM.mul( 0.9 ) ) ); // nourriture
 
 		return col;
 
@@ -47,13 +55,18 @@ export function createEnvironment( scene, sim ) {
 		const wallM = smoothstep( 0.2, 0.8, f.w );
 		const foodM = clamp( f.z, 0, 1 );
 
-		const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x ).mul( 0.5 );
-		const food = vec3( 1.0, 0.33, 0.05 ).mul( f.y ).mul( 0.75 );
+		// quadratique : les pistes structurées ressortent, le voile diffus s'éteint
+		const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x.mul( f.x ) ).mul( 0.45 );
+		const food = vec3( 1.0, 0.33, 0.05 ).mul( f.y.mul( f.y ) ).mul( 0.9 );
 
-		// pas de lueur sur les murs ni sur la nourriture (qui doit rester verte)
-		return home.add( food ).mul( uTrail )
+		// nourriture légèrement luminescente (lisibilité nocturne),
+		// pas de lueur de piste sur les murs ni sur la nourriture elle-même
+		const trails = home.add( food ).mul( uTrail )
 			.mul( float( 1 ).sub( wallM ) )
 			.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
+		const foodGlow = vec3( 0.1, 0.5, 0.12 ).mul( foodM ).mul( 0.35 );
+
+		return trails.add( foodGlow );
 
 	} )();
 
@@ -70,7 +83,7 @@ export function createEnvironment( scene, sim ) {
 		new THREE.TorusGeometry( nestWorldR * 0.8, nestWorldR * 0.38, 12, 48 )
 			.rotateX( - Math.PI / 2 )
 			.scale( 1, 0.45, 1 ),
-		new THREE.MeshStandardNodeMaterial( { color: 0x3a2b1c, roughness: 1 } ),
+		new THREE.MeshStandardNodeMaterial( { color: 0x54422c, roughness: 1 } ),
 	);
 	mound.castShadow = true;
 	mound.receiveShadow = true;
@@ -78,35 +91,14 @@ export function createEnvironment( scene, sim ) {
 
 	const hole = new THREE.Mesh(
 		new THREE.CircleGeometry( nestWorldR * 0.55, 32 ).rotateX( - Math.PI / 2 ),
-		new THREE.MeshStandardNodeMaterial( { color: 0x0a0704, roughness: 1 } ),
+		new THREE.MeshStandardNodeMaterial( { color: 0x060402, roughness: 1 } ),
 	);
 	hole.position.y = 0.02;
 	scene.add( hole );
 
-	// ------------------------------------------------------------------
-	// Lumières et ambiance
-	// ------------------------------------------------------------------
-	scene.background = new THREE.Color( 0x0d0f12 );
-	scene.fog = new THREE.Fog( 0x0d0f12, 200, 650 );
-
-	const sun = new THREE.DirectionalLight( 0xfff2dd, 2.4 );
-	sun.position.set( 55, 80, 25 );
-	sun.castShadow = true;
-	sun.shadow.mapSize.set( 2048, 2048 );
-	sun.shadow.camera.left = sun.shadow.camera.bottom = - WORLD * 0.6;
-	sun.shadow.camera.right = sun.shadow.camera.top = WORLD * 0.6;
-	sun.shadow.camera.near = 10;
-	sun.shadow.camera.far = 220;
-	sun.shadow.normalBias = 0.05;
-	scene.add( sun );
-
-	const hemi = new THREE.HemisphereLight( 0x9fb4cc, 0x3a2c1e, 0.55 );
-	scene.add( hemi );
-
 	return {
 		ground,
 		uTrail,
-		sun,
 		// à appeler après chaque étape de simulation (ping-pong)
 		updateFieldTexture() {
 

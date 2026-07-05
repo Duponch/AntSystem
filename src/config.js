@@ -40,6 +40,26 @@ export const params = {
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
+	walkAnim: 1.0,                     // facteur de fréquence de foulée
+};
+
+// Paramètres graphiques (ambiance nocturne, herbe, décor)
+export const gfx = {
+	// Herbe GPU
+	grass: true,
+	grassDensity: 40,                  // brins par m²
+	grassHeight: 0.55,                 // facteur hauteur (fourmis toujours visibles)
+	grassWidth: 0.85,
+	grassDistance: 55,                 // rayon d'affichage (unités monde)
+	grassWind: 0.45,
+	grassShadows: false,               // ombres portées par les brins (coûteux)
+
+	// Ciel et nuit
+	moonIntensity: 3.2,
+	ambientIntensity: 2.2,
+	fogDensity: 0.008,
+	stars: 0.7,                        // densité/intensité des étoiles
+	fireflies: true,
 };
 
 export function worldToGrid( x, z ) {
