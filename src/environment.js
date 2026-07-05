@@ -52,8 +52,9 @@ export function groundAlbedo( worldXZ, f ) {
 	);
 	col.mulAssign( vignette );
 
-	col.assign( mix( col, color( 0x4a453c ), wallM ) );                 // murs/terre
-	col.assign( mix( col, uFoodColor.mul( 0.55 ), foodM.mul( 0.85 ) ) ); // billes
+	col.assign( mix( col, color( 0x4a453c ), wallM ) );  // murs/terre
+	// (la nourriture n'est plus peinte au sol : de vraies billes 3D la portent)
+	void foodM;
 
 	return col;
 
@@ -74,11 +75,10 @@ export function groundEmissive( f ) {
 		.mul( float( 1 ).sub( wallM ) )
 		.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
 
-	// billes rougeoyantes + halo progressif (fondu exponentiel autour)
-	const glow = uFoodColor.mul(
-		foodM.mul( uFoodGlow )
-			.add( halo.mul( halo ).mul( uHaloStrength ).mul( float( 1 ).sub( foodM ) ) ),
-	).mul( float( 1 ).sub( wallM ) );
+	// halo au sol autour des billes (fondu exponentiel diffusé par la grille)
+	const glow = uFoodColor
+		.mul( halo.mul( halo ).mul( uHaloStrength ) )
+		.mul( float( 1 ).sub( wallM ) );
 
 	return trails.add( glow );
 

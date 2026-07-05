@@ -6,9 +6,9 @@
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, instanceIndex, vertexIndex, positionLocal, uniform,
-	vec3, mat3, float, int, ivec2, uint, cos, sin, fract, floor, mix, hash,
-	textureLoad,
+	Fn, instanceIndex, vertexIndex, positionLocal, uniform, varyingProperty,
+	vec2, vec3, mat3, float, int, ivec2, uint, cos, sin, fract, floor, mix, hash,
+	textureLoad, uv, select, cameraPosition, cross, normalize, smoothstep,
 } from 'three/tsl';
 
 import { loadAntVAT } from './vat.js';
@@ -59,15 +59,20 @@ export async function createAnts( sim ) {
 	bodyGeo.attributes = vat.geometry.attributes;
 	bodyGeo.instanceCount = params.antCount;
 
-	const bodyMat = new THREE.MeshStandardNodeMaterial( {
-		color: new THREE.Color( gfx.antColor ),
-		roughness: 0.6,
-		metalness: 0.0,
-	} );
+	const bodyMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
+
+	// couleurs corps / yeux-antennes : drapeau par plage de sommets (les deux
+	// primitives du GLB sont concaténées dans la VAT) → un mix, coût nul
+	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
+	const uAccentColor = uniform( new THREE.Color( gfx.antAccentColor ) );
 
 	bodyMat.positionNode = Fn( () => {
 
 		const { rot, world } = instanceTransform();
+
+		varyingProperty( 'float', 'vAntAccent' ).assign(
+			select( vertexIndex.lessThan( uint( vat.counts[ 0 ] ) ), 0, 1 ),
+		);
 
 		// phase de marche accumulée + décalage par fourmi
 		const cycle = uPhase.add( hash( instanceIndex.add( uint( 1013 ) ) ) );
@@ -81,6 +86,12 @@ export async function createAnts( sim ) {
 		const animated = mix( p0, p1, w );
 
 		return rot.mul( animated ).add( world );
+
+	} )();
+
+	bodyMat.colorNode = Fn( () => {
+
+		return mix( uBodyColor, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
 
 	} )();
 
@@ -118,17 +129,71 @@ export async function createAnts( sim ) {
 	grain.frustumCulled = false;
 	// pas d'ombre pour un grain de 8 cm sous la lune
 
+	// --- halo luciole du grain porté (billboard additif, échelle 0 sinon) ---
+	const uGrainHalo = uniform( gfx.haloSize );
+	const uGrainHaloIntensity = uniform( gfx.haloIntensity );
+
+	const haloGeo = new THREE.InstancedBufferGeometry();
+	const haloQuad = new THREE.PlaneGeometry( 1, 1 );
+	haloGeo.index = haloQuad.index;
+	haloGeo.attributes = haloQuad.attributes;
+	haloGeo.instanceCount = params.antCount;
+
+	const haloMat = new THREE.MeshBasicNodeMaterial( {
+		transparent: true,
+		blending: THREE.AdditiveBlending,
+		depthWrite: false,
+		toneMapped: false,
+		fog: false,
+	} );
+
+	haloMat.positionNode = Fn( () => {
+
+		const { rot, world } = instanceTransform();
+		const carrying = sim.antState.element( instanceIndex ).toFloat();
+		const center = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) ).add( world );
+
+		const view = normalize( cameraPosition.sub( center ) );
+		const right = normalize( cross( vec3( 0, 1, 0 ), view ) );
+		const up = cross( view, right );
+		const size = carrying.mul( 0.9 ).mul( uGrainHalo );
+
+		return center
+			.add( right.mul( positionLocal.x.mul( size ) ) )
+			.add( up.mul( positionLocal.y.mul( size ) ) );
+
+	} )();
+
+	// même objet Color que grainMat.emissive : suit le sélecteur de l'UI
+	const uHaloColor = uniform( grainMat.emissive );
+
+	haloMat.colorNode = Fn( () => {
+
+		const d = uv().sub( vec2( 0.5, 0.5 ) ).length().mul( 2 );
+		const glow = smoothstep( 1, 0, d ).pow( 2.2 );
+		return uHaloColor.mul( glow ).mul( uGrainHaloIntensity ).mul( 0.5 );
+
+	} )();
+
+	const grainHalo = new THREE.Mesh( haloGeo, haloMat );
+	grainHalo.frustumCulled = false;
+
 	const group = new THREE.Group();
-	group.add( body, grain );
+	group.add( body, grain, grainHalo );
 
 	return {
 		group,
 		bodyMat,
 		grainMat,
+		uBodyColor,
+		uAccentColor,
+		uGrainHalo,
+		uGrainHaloIntensity,
 		setCount( n ) {
 
 			bodyGeo.instanceCount = n;
 			grainGeo.instanceCount = n;
+			haloGeo.instanceCount = n;
 
 		},
 		setShadows( on ) {

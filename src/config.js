@@ -84,15 +84,25 @@ export const gfx = {
 	groundColorA: '#2b3a21',           // mousse sombre (sol ET herbe)
 	groundColorB: '#4a5c3a',           // mousse claire
 	antColor: '#16120e',
+	antAccentColor: '#4a5578',         // yeux / antennes
 	anthillColor: '#7a5230',           // marron terre
 	foodColor: '#ff9d3a',
 
-	// Nourriture (billes + halo)
+	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
 	foodBallSpacing: 5,                // texels entre billes
-	foodBallRadius: 1.4,               // rayon d'une bille (texels)
+	foodBallRadius: 0.16,              // rayon VISUEL d'une bille (unités monde)
 	foodGlow: 1.4,                     // brillance des billes
-	haloSpread: 0.93,                  // portée du halo (diffusion)
-	haloStrength: 0.7,                 // intensité du halo
+	haloSpread: 0.93,                  // halo au sol : portée (diffusion)
+	haloStrength: 0.7,                 // halo au sol : intensité
+	haloSize: 1.0,                     // halo lumineux (billboard) : taille
+	haloIntensity: 1.0,                // halo lumineux : intensité
+
+	// Échelles du décor
+	scaleTrees: 1.0,
+	scaleObstacles: 1.0,
+	scaleMushrooms: 1.0,
+	scalePlants: 1.0,
+	scaleRocks: 1.0,
 
 	// Ciel et nuit
 	nightTime: 0.5,                    // 0 = lever de lune, 1 = coucher

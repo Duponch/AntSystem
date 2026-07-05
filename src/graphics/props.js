@@ -12,7 +12,7 @@ import * as THREE from 'three/webgpu';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
-import { WORLD, GRID, worldToGrid } from '../config.js';
+import { WORLD, GRID, worldToGrid, gfx } from '../config.js';
 
 const T = GRID / WORLD;   // texels par unité monde
 
@@ -125,30 +125,56 @@ export async function createProps( scene ) {
 
 	}
 
-	// --- placement instancié ---
+	// --- placement instancié, avec registre par catégorie (échelles UI) ---
 	const group = new THREE.Group();
 	const dummy = new THREE.Object3D();
+	const registry = [];   // { mesh, placements, category }
 
-	async function addInstances( name, fit, placements ) {
+	const CATEGORY_KEY = {
+		trees: 'scaleTrees', obstacles: 'scaleObstacles',
+		mushrooms: 'scaleMushrooms', plants: 'scalePlants', rocks: 'scaleRocks',
+	};
 
-		const { geo } = await loadUnitGeo( name, fit );
-		const mesh = new THREE.InstancedMesh( geo, material, placements.length );
+	function writeMatrices( entry ) {
 
-		placements.forEach( ( p, i ) => {
+		const factor = gfx[ CATEGORY_KEY[ entry.category ] ] || 1;
+
+		entry.placements.forEach( ( p, i ) => {
 
 			dummy.position.set( p.x, p.y || 0, p.z );
 			dummy.rotation.set( 0, p.yaw || 0, 0 );
-			dummy.scale.setScalar( p.scale );
+			dummy.scale.setScalar( p.scale * factor );
 			dummy.updateMatrix();
-			mesh.setMatrixAt( i, dummy.matrix );
+			entry.mesh.setMatrixAt( i, dummy.matrix );
 
 		} );
 
+		entry.mesh.instanceMatrix.needsUpdate = true;
+
+	}
+
+	async function addInstances( name, fit, placements, category ) {
+
+		const { geo } = await loadUnitGeo( name, fit );
+		const mesh = new THREE.InstancedMesh( geo, material, placements.length );
+		const entry = { mesh, placements, category };
+		writeMatrices( entry );
+
 		mesh.castShadow = true;
 		mesh.receiveShadow = true;
-		mesh.instanceMatrix.needsUpdate = true;
 		group.add( mesh );
+		registry.push( entry );
 		return mesh;
+
+	}
+
+	function setCategoryScale( category ) {
+
+		for ( const entry of registry ) {
+
+			if ( entry.category === category ) writeMatrices( entry );
+
+		}
 
 	}
 
@@ -215,34 +241,39 @@ export async function createProps( scene ) {
 		[ 'Plant_01', 'footprint' ], [ 'Plant_02', 'footprint' ],
 	].map( ( [ n, f ] ) => loadUnitGeo( n, f ) ) );
 
+	// couronne d'arbres À L'INTÉRIEUR des limites de la carte
+	const half = WORLD / 2;
 	const ring = treeRing(
 		[ 'Tree_07', 'Tree_07', 'Tree_08', 'Tree_06', 'Tree_01' ],
-		Math.round( 34 * S ), 78 * S, 96 * S, 15, 26,
+		Math.round( 34 * S ), half * 0.80, half * 0.94, 15, 26,
 	);
 
-	// arbres intérieurs en bord de terrain (troncs = petits murs pour les fourmis)
-	const innerTrees = scatter( Math.round( 6 * S ), 58 * S, 74 * S, 3 )
+	// arbres intérieurs (troncs = petits murs pour les fourmis)
+	const innerTrees = scatter( Math.round( 6 * S ), half * 0.52, half * 0.70, 3 )
 		.map( ( p ) => ( { ...p, scale: 13 + rand() * 8 } ) );
 	const heroTrees = [
-		{ x: - 62 * S, z: - 58 * S, yaw: 0.8, scale: 30 },
-		{ x: 66 * S, z: 52 * S, yaw: 2.4, scale: 28 },
+		{ x: - half * 0.72, z: - half * 0.66, yaw: 0.8, scale: 30 },
+		{ x: half * 0.76, z: half * 0.60, yaw: 2.4, scale: 28 },
 	];
 
 	for ( const [ model, list ] of ring ) {
 
-		if ( list.length ) await addInstances( model, 'height', list );
+		if ( list.length ) await addInstances( model, 'height', list, 'trees' );
 
 	}
 
-	await addInstances( 'Tree_07', 'height', innerTrees );
-	await addInstances( 'Tree_02', 'height', heroTrees );
+	await addInstances( 'Tree_07', 'height', innerTrees, 'trees' );
+	await addInstances( 'Tree_02', 'height', heroTrees, 'trees' );
 
 	// --- obstacles (visuels ; l'empreinte physique part dans la grille de murs) ---
+	const obstacleSizes = new Map();
+
 	for ( const o of obstacles ) {
 
-		await addInstances( o.model, o.kind === 'rect' ? 'length' : 'height', [ {
-			x: o.x, z: o.z, yaw: o.yaw, scale: o.scale,
-		} ] );
+		const fit = o.kind === 'rect' ? 'length' : 'height';
+		const { size } = await loadUnitGeo( o.model, fit );
+		obstacleSizes.set( o.model, size );
+		await addInstances( o.model, fit, [ { x: o.x, z: o.z, yaw: o.yaw, scale: o.scale } ], 'obstacles' );
 
 	}
 
@@ -254,7 +285,7 @@ export async function createProps( scene ) {
 	for ( let i = 0; i < rockVariants.length; i ++ ) {
 
 		const mine = rocks.filter( ( _, j ) => j % rockVariants.length === i );
-		if ( mine.length ) await addInstances( rockVariants[ i ], 'footprint', mine );
+		if ( mine.length ) await addInstances( rockVariants[ i ], 'footprint', mine, 'rocks' );
 
 	}
 
@@ -281,69 +312,76 @@ export async function createProps( scene ) {
 
 	}
 
-	await addInstances( 'Mushroom_01', 'height', shrooms.filter( ( _, i ) => i % 2 === 0 ) );
-	await addInstances( 'Mushroom_03', 'height', shrooms.filter( ( _, i ) => i % 2 === 1 ) );
+	await addInstances( 'Mushroom_01', 'height', shrooms.filter( ( _, i ) => i % 2 === 0 ), 'mushrooms' );
+	await addInstances( 'Mushroom_03', 'height', shrooms.filter( ( _, i ) => i % 2 === 1 ), 'mushrooms' );
 
-	const ferns = scatter( Math.round( 14 * S ), 42 * S, 76 * S, 2.5 )
+	const ferns = scatter( Math.round( 14 * S ), 42 * S, Math.min( 76 * S, half * 0.92 ), 2.5 )
 		.map( ( p ) => ( { ...p, scale: 2.0 + rand() * 1.4 } ) );
-	await addInstances( 'Plant_01', 'footprint', ferns.filter( ( _, i ) => i % 2 === 0 ) );
-	await addInstances( 'Plant_02', 'footprint', ferns.filter( ( _, i ) => i % 2 === 1 ) );
+	await addInstances( 'Plant_01', 'footprint', ferns.filter( ( _, i ) => i % 2 === 0 ), 'plants' );
+	await addInstances( 'Plant_02', 'footprint', ferns.filter( ( _, i ) => i % 2 === 1 ), 'plants' );
 
 	scene.add( group );
 
 	// --- empreintes physiques pour la grille de murs (coordonnées texels) ---
-	// dérivées de l'encombrement réel : taille normalisée mesurée × échelle posée
-	const wallStamps = [];
-
-	for ( const o of obstacles ) {
-
-		const { size } = await loadUnitGeo( o.model, o.kind === 'rect' ? 'length' : 'height' );
-		const g = worldToGrid( o.x, o.z );
-		const footX = size.x * o.scale;
-		const footZ = size.z * o.scale;
-
-		if ( Math.max( footX, footZ ) / Math.min( footX, footZ ) > 1.3 ) {
-
-			// empreinte oblongue : rectangle orienté, axe = longueur Z du modèle
-			// en coordonnées grille (gx = x monde, gy = z monde)
-			wallStamps.push( {
-				type: 1, cx: g.x, cy: g.y,
-				hw: ( footZ / 2 ) * 0.95 * T, hh: ( footX / 2 ) * 0.9 * T,
-				ax: Math.sin( o.yaw ), ay: Math.cos( o.yaw ),
-			} );
-
-		} else {
-
-			wallStamps.push( {
-				type: 0, cx: g.x, cy: g.y,
-				hw: ( ( footX + footZ ) / 4 ) * 0.95 * T, hh: 0, ax: 1, ay: 0,
-			} );
-
-		}
-
-	}
-
-	// troncs des arbres posés sur le terrain (intérieurs, héros, et lisière débordante)
-	const treeStamp = ( t ) => {
-
-		const g = worldToGrid( t.x, t.z );
-		const r = Math.max( 1.0, 0.05 * t.scale );
-		return { type: 0, cx: g.x, cy: g.y, hw: r * T, hh: 0, ax: 1, ay: 0 };
-
-	};
-
-	for ( const t of [ ...innerTrees, ...heroTrees ] ) wallStamps.push( treeStamp( t ) );
+	// dérivées de l'encombrement réel × échelles de catégorie (recalculables)
+	const allTrees = [ ...innerTrees, ...heroTrees ];
 
 	for ( const list of ring.values() ) {
 
 		for ( const t of list ) {
 
-			if ( Math.max( Math.abs( t.x ), Math.abs( t.z ) ) < WORLD / 2 - 2 ) wallStamps.push( treeStamp( t ) );
+			if ( Math.max( Math.abs( t.x ), Math.abs( t.z ) ) < half - 2 ) allTrees.push( t );
 
 		}
 
 	}
 
-	return { group, wallStamps };
+	function computeWallStamps() {
+
+		const stamps = [];
+		const oScale = gfx.scaleObstacles || 1;
+		const tScale = gfx.scaleTrees || 1;
+
+		for ( const o of obstacles ) {
+
+			const size = obstacleSizes.get( o.model );
+			const g = worldToGrid( o.x, o.z );
+			const footX = size.x * o.scale * oScale;
+			const footZ = size.z * o.scale * oScale;
+
+			if ( Math.max( footX, footZ ) / Math.min( footX, footZ ) > 1.3 ) {
+
+				// empreinte oblongue : rectangle orienté, axe = longueur Z du modèle
+				// en coordonnées grille (gx = x monde, gy = z monde)
+				stamps.push( {
+					type: 1, cx: g.x, cy: g.y,
+					hw: ( footZ / 2 ) * 0.95 * T, hh: ( footX / 2 ) * 0.9 * T,
+					ax: Math.sin( o.yaw ), ay: Math.cos( o.yaw ),
+				} );
+
+			} else {
+
+				stamps.push( {
+					type: 0, cx: g.x, cy: g.y,
+					hw: ( ( footX + footZ ) / 4 ) * 0.95 * T, hh: 0, ax: 1, ay: 0,
+				} );
+
+			}
+
+		}
+
+		for ( const t of allTrees ) {
+
+			const g = worldToGrid( t.x, t.z );
+			const r = Math.max( 1.0, 0.05 * t.scale * tScale );
+			stamps.push( { type: 0, cx: g.x, cy: g.y, hw: r * T, hh: 0, ax: 1, ay: 0 } );
+
+		}
+
+		return stamps;
+
+	}
+
+	return { group, wallStamps: computeWallStamps(), computeWallStamps, setCategoryScale };
 
 }

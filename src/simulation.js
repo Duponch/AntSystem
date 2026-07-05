@@ -58,7 +58,6 @@ export class AntSimulation {
 			stampCount: uniform( 0 ),    // nombre de coups de pinceau de la frame
 			obstacleCount: uniform( 0 ),
 			ballSpacing: uniform( gfx.foodBallSpacing ),  // texels entre billes de nourriture
-			ballRadius: uniform( gfx.foodBallRadius ),    // rayon d'une bille
 			haloSpread: uniform( gfx.haloSpread ),        // portée du halo lumineux
 		};
 
@@ -521,8 +520,9 @@ export class AntSimulation {
 
 					If( s.w.lessThan( 0.5 ), () => {
 
-						// nourriture en BILLES éparses : centres jitterés sur une
-						// grille de période ballSpacing, une bille = petit disque
+						// nourriture en VRAIES billes : une bille = une cellule, au
+						// centre jitteré de son bloc (même formule que le rendu des
+						// billes dans graphics/foodballs.js)
 						If( wall.element( gi ).equal( uint( 0 ) ), () => {
 
 							const P = u.ballSpacing;
@@ -533,14 +533,15 @@ export class AntSimulation {
 
 								for ( let bx = - 1; bx <= 1; bx ++ ) {
 
-									const b = bloc.add( vec2( bx, by ) ).add( vec2( 8 ) ); // graines positives
-									const jx = hash( b.x.mul( 127.1 ).add( b.y.mul( 311.7 ) ) );
-									const jy = hash( b.x.mul( 269.5 ).add( b.y.mul( 183.3 ) ) );
-									const center = b.sub( vec2( 8 ) ).mul( P )
-										.add( vec2( jx, jy ).mul( P.sub( u.ballRadius.mul( 2 ) ) ).add( u.ballRadius ) );
+									const b = bloc.add( vec2( bx, by ) );
+									const b8 = b.add( vec2( 8 ) );          // graines positives
+									const jx = hash( b8.x.mul( 127.1 ).add( b8.y.mul( 311.7 ) ) );
+									const jy = hash( b8.x.mul( 269.5 ).add( b8.y.mul( 183.3 ) ) );
+									const center = b.add( vec2( 0.1 ) ).add( vec2( jx, jy ).mul( 0.8 ) ).mul( P );
+									const cell = floor( center );
 
-									// bille retenue seulement si son centre est dans le pinceau
-									If( length( p.sub( center ) ).lessThan( u.ballRadius )
+									// ce texel est-il LA cellule de la bille, et la bille dans le pinceau ?
+									If( cell.x.equal( p.x ).and( cell.y.equal( p.y ) )
 										.and( length( center.sub( s.xy ) ).lessThanEqual( s.z ) ), () => {
 
 										isBall.assign( 1 );
@@ -595,7 +596,12 @@ export class AntSimulation {
 		await r.computeAsync( this.kClearField );
 		await r.computeAsync( this.kClearStats );
 		await r.computeAsync( this.kInitAnts );
-		if ( this._obstacles ) await this._stampObstacles();
+
+		// murs : la version ajustée à la main (sauvegardée) prime sur les
+		// empreintes automatiques du décor
+		if ( this._savedWalls ) this._applySavedWalls();
+		else if ( this._obstacles ) await this._stampObstacles();
+
 		await this._seedFood();
 
 	}
@@ -669,14 +675,12 @@ export class AntSimulation {
 		if ( this._brushQueue.length === 0 ) return false;
 
 		const n = Math.min( this._stampVecs.length, this._brushQueue.length );
-		let hasEraser = false;
 
 		for ( let k = 0; k < n; k ++ ) {
 
 			const s = this._brushQueue.shift();
 			this._stampVecs[ k ].set( s.gx, s.gy, s.radius, s.mode );
 			this._stampFood[ k ] = s.foodAmount;
-			if ( s.mode === 2 ) hasEraser = true;
 
 		}
 
@@ -684,10 +688,57 @@ export class AntSimulation {
 		this.renderer.compute( this.kBrush );
 		this.u.stampCount.value = 0;
 
-		// la gomme ne doit pas percer les obstacles du décor : on les re-tamponne
-		if ( hasEraser && this._obstacles ) this.renderer.compute( this.kObstacles );
-
+		// NB : la gomme perce aussi les empreintes du décor — ajustage à la
+		// main, sauvegardable via « Sauvegarder les réglages ».
 		return true;
+
+	}
+
+	// ----------------------------------------------------------------------
+	// Persistance des murs (base64 de bits, ~171 Ko en localStorage)
+	// ----------------------------------------------------------------------
+
+	setSavedWalls( base64OrNull ) {
+
+		this._savedWalls = base64OrNull || null;
+
+	}
+
+	async readWallsBase64() {
+
+		const buf = await this.renderer.getArrayBufferAsync( this.wall.value );
+		const cells = new Uint32Array( buf );
+		const bits = new Uint8Array( Math.ceil( cells.length / 8 ) );
+
+		for ( let i = 0; i < cells.length; i ++ ) {
+
+			if ( cells[ i ] > 0 ) bits[ i >> 3 ] |= 1 << ( i & 7 );
+
+		}
+
+		let s = '';
+		for ( let i = 0; i < bits.length; i += 8192 ) {
+
+			s += String.fromCharCode.apply( null, bits.subarray( i, i + 8192 ) );
+
+		}
+
+		return btoa( s );
+
+	}
+
+	_applySavedWalls() {
+
+		const s = atob( this._savedWalls );
+		const array = this.wall.value.array;
+
+		for ( let i = 0; i < array.length; i ++ ) {
+
+			array[ i ] = ( s.charCodeAt( i >> 3 ) >> ( i & 7 ) ) & 1;
+
+		}
+
+		this.wall.value.needsUpdate = true;
 
 	}
 
@@ -696,7 +747,7 @@ export class AntSimulation {
 	async setObstacles( stamps ) {
 
 		this._obstacles = stamps.slice( 0, this._obstacleA.length );
-		await this._stampObstacles();
+		if ( ! this._savedWalls ) await this._stampObstacles();
 
 	}
 

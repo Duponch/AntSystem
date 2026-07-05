@@ -14,6 +14,7 @@ import { createGrass } from './graphics/grass.js';
 import { createProps } from './graphics/props.js';
 import { createGodrays } from './graphics/godrays.js';
 import { createCinematic } from './graphics/cinematic.js';
+import { createFoodBalls } from './graphics/foodballs.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -83,8 +84,11 @@ async function main() {
 		createAnts( sim ),
 	] );
 	const grass = createGrass( scene, sim );
+	const foodballs = createFoodBalls( scene, sim );
 	scene.add( ants.group );
 
+	// murs ajustés à la main : prioritaires sur les empreintes automatiques
+	sim.setSavedWalls( localStorage.getItem( 'antsystem-walls-v1' ) );
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
@@ -93,7 +97,7 @@ async function main() {
 
 	// --- interface ---
 	const ui = createUI( {
-		sim, ants, env, sky, grass, godrays, cinematic, controls, camera, renderer,
+		sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -164,7 +168,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, godrays, cinematic };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic };
 
 	window.addEventListener( 'resize', () => {
 

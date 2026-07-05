@@ -73,15 +73,16 @@ export function createGrass( scene, sim ) {
 		const s = sin( yaw );
 		const bladeT = uv().y;
 
-		// hauteur masquée : bord du disque en fondu, limites du terrain, nid
+		// masque : bord du disque en fondu, LIMITES STRICTES du terrain, nid —
+		// appliqué au brin ENTIER (largeur comprise), rien ne dépasse de la carte
 		const dCam = length( root.sub( u.cam ) );
-		const height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 ).mul( u.height )
-			.mul( float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) ) )
-			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 2, WORLD / 2, bx.abs() ) ) )
-			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 2, WORLD / 2, bz.abs() ) ) )
+		const mask = float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) )
+			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bx.abs() ) ) )
+			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bz.abs() ) ) )
 			.mul( smoothstep( 3.6, 5.2, length( root ) ) );
 
-		const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 ).mul( u.width );
+		const height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 ).mul( u.height ).mul( mask );
+		const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 ).mul( u.width ).mul( mask );
 
 		const lx = positionLocal.x.mul( width );
 		const ly = positionLocal.y.mul( height );

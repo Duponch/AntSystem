@@ -130,6 +130,7 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 		headZ: ( max.z - cz ) * scale,
 	};
 
-	return { texture, geometry, frames, totalVerts, bounds, cycleDuration: clip.duration };
+	// counts[0] = sommets du corps (1er matériau), counts[1] = yeux/antennes
+	return { texture, geometry, frames, totalVerts, counts, bounds, cycleDuration: clip.duration };
 
 }

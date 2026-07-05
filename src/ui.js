@@ -8,7 +8,7 @@ import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength } from './envi
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 
-export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, controls, camera, renderer, onReset } ) {
+export function createUI( { sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -64,7 +64,8 @@ export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, cont
 	const fTools = gui.addFolder( 'Outils (clic gauche)' );
 	fTools.add( params, 'tool', Object.keys( TOOL_MODES ) ).name( 'Outil' );
 	fTools.add( params, 'brushRadius', 4, 40, 1 ).name( 'Taille pinceau' );
-	fTools.add( params, 'foodAmount', 4, 64, 1 ).name( 'Qté nourriture' );
+	fTools.add( params, 'foodAmount', 4, 64, 1 ).name( 'Qté nourriture' )
+		.onChange( () => foodballs.refresh() );
 
 	const fDisplay = gui.addFolder( 'Affichage' );
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
@@ -103,7 +104,9 @@ export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, cont
 	fColors.addColor( gfx, 'groundColorB' ).name( 'Sol/herbe clair' )
 		.onChange( ( v ) => uGroundB.value.set( v ) );
 	fColors.addColor( gfx, 'antColor' ).name( 'Fourmis' )
-		.onChange( ( v ) => ants.bodyMat.color.set( v ) );
+		.onChange( ( v ) => ants.uBodyColor.value.set( v ) );
+	fColors.addColor( gfx, 'antAccentColor' ).name( 'Yeux / antennes' )
+		.onChange( ( v ) => ants.uAccentColor.value.set( v ) );
 	fColors.addColor( gfx, 'anthillColor' ).name( 'Fourmilière' )
 		.onChange( ( v ) => env.anthillMat.color.set( v ) );
 	fColors.addColor( gfx, 'foodColor' ).name( 'Nourriture' ).onChange( ( v ) => {
@@ -115,16 +118,46 @@ export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, cont
 	} );
 
 	const fFood = fGfx.addFolder( 'Nourriture' );
-	fFood.add( gfx, 'foodBallSpacing', 3, 14, 0.5 ).name( 'Espacement billes' )
-		.onChange( ( v ) => sim.u.ballSpacing.value = v );
-	fFood.add( gfx, 'foodBallRadius', 0.8, 3, 0.1 ).name( 'Taille billes' )
-		.onChange( ( v ) => sim.u.ballRadius.value = v );
+	fFood.add( gfx, 'foodBallSpacing', 3, 14, 1 ).name( 'Espacement billes' ).onChange( ( v ) => {
+
+		sim.u.ballSpacing.value = v;
+		foodballs.refresh();
+
+	} );
+	fFood.add( gfx, 'foodBallRadius', 0.06, 0.4, 0.01 ).name( 'Taille billes' )
+		.onChange( ( v ) => foodballs.u.ballSize.value = v );
 	fFood.add( gfx, 'foodGlow', 0, 4, 0.05 ).name( 'Brillance' )
 		.onChange( ( v ) => uFoodGlow.value = v );
-	fFood.add( gfx, 'haloSpread', 0.5, 0.99, 0.005 ).name( 'Halo : portée' )
+	fFood.add( gfx, 'haloSize', 0, 3, 0.05 ).name( 'Halo luciole : taille' ).onChange( ( v ) => {
+
+		foodballs.u.haloSize.value = v;
+		ants.uGrainHalo.value = v;
+
+	} );
+	fFood.add( gfx, 'haloIntensity', 0, 3, 0.05 ).name( 'Halo luciole : intensité' ).onChange( ( v ) => {
+
+		foodballs.u.haloIntensity.value = v;
+		ants.uGrainHaloIntensity.value = v;
+
+	} );
+	fFood.add( gfx, 'haloSpread', 0.5, 0.99, 0.005 ).name( 'Halo au sol : portée' )
 		.onChange( ( v ) => sim.u.haloSpread.value = v );
-	fFood.add( gfx, 'haloStrength', 0, 2.5, 0.05 ).name( 'Halo : intensité' )
+	fFood.add( gfx, 'haloStrength', 0, 2.5, 0.05 ).name( 'Halo au sol : intensité' )
 		.onChange( ( v ) => uHaloStrength.value = v );
+
+	const fScales = fGfx.addFolder( 'Tailles du décor' );
+	const rescale = ( cat, restamp ) => () => {
+
+		props.setCategoryScale( cat );
+		if ( restamp ) sim.setObstacles( props.computeWallStamps() );
+
+	};
+
+	fScales.add( gfx, 'scaleTrees', 0.3, 2.5, 0.05 ).name( 'Arbres' ).onChange( rescale( 'trees', true ) );
+	fScales.add( gfx, 'scaleObstacles', 0.3, 2.5, 0.05 ).name( 'Bûches / rochers-obstacles' ).onChange( rescale( 'obstacles', true ) );
+	fScales.add( gfx, 'scaleMushrooms', 0.3, 3, 0.05 ).name( 'Champignons' ).onChange( rescale( 'mushrooms', false ) );
+	fScales.add( gfx, 'scalePlants', 0.3, 3, 0.05 ).name( 'Plantes' ).onChange( rescale( 'plants', false ) );
+	fScales.add( gfx, 'scaleRocks', 0.3, 3, 0.05 ).name( 'Cailloux' ).onChange( rescale( 'rocks', false ) );
 
 	const fGrass = fGfx.addFolder( 'Herbe' );
 	fGrass.add( gfx, 'grass' ).name( 'Herbe' );
@@ -156,17 +189,28 @@ export function createUI( { sim, ants, env, sky, grass, godrays, cinematic, cont
 
 	fGfx.close();
 
-	// --- persistance ---
-	gui.add( { save: () => {
+	// --- persistance (réglages + grille de murs ajustée à la main) ---
+	gui.add( { save: async () => {
 
 		saveSettings();
-		overlayFlash( '💾 Réglages sauvegardés' );
+
+		try {
+
+			localStorage.setItem( 'antsystem-walls-v1', await sim.readWallsBase64() );
+			overlayFlash( '💾 Réglages et murs sauvegardés' );
+
+		} catch {
+
+			overlayFlash( '💾 Réglages sauvegardés (murs : échec de lecture)' );
+
+		}
 
 	} }, 'save' ).name( '💾 Sauvegarder les réglages' );
 
 	gui.add( { reset: () => {
 
 		clearSettings();
+		localStorage.removeItem( 'antsystem-walls-v1' );
 		location.reload();
 
 	} }, 'reset' ).name( '♻️ Réglages par défaut' );
