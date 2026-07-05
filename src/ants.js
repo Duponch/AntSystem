@@ -91,15 +91,16 @@ export async function createAnts( sim ) {
 
 	// --- grain de nourriture porté (échelle 0 quand la fourmi n'a rien) ---
 	const grainGeo = new THREE.InstancedBufferGeometry();
-	const ico = new THREE.IcosahedronGeometry( 0.085, 0 );
+	const ico = new THREE.IcosahedronGeometry( 0.1, 0 );
 	grainGeo.index = ico.index;
 	grainGeo.attributes = ico.attributes;
 	grainGeo.instanceCount = params.antCount;
 
+	// apparence « luciole » : bille ambrée rougeoyante, comme la nourriture au sol
 	const grainMat = new THREE.MeshStandardNodeMaterial( {
-		color: 0x3fae4a,
-		emissive: 0x1d7c2e,
-		emissiveIntensity: 0.7,
+		color: 0xffb45c,
+		emissive: 0xff9d3a,
+		emissiveIntensity: 2.2,
 		roughness: 0.4,
 	} );
 

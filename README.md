@@ -40,10 +40,10 @@ Tout l'état vit sur le GPU ; le CPU ne fait qu'orchestrer les passes de calcul 
 
 ## Graphismes (nuit cozy low-poly)
 
-- **Tapis d'herbe 100 % GPU** : un brin = 2 triangles, position/lacet/taille/teinte/vent dérivés de `instanceIndex` par `hash()` dans le vertex shader (zéro donnée par brin côté CPU). 25 chunks avec frustum culling, rayon d'affichage et densité dégressive selon la hauteur caméra.
+- **Tapis d'herbe 100 % GPU** : un brin = 2 triangles, position/lacet/taille/vent dérivés de `instanceIndex` par `hash()` dans le vertex shader (zéro donnée par brin côté CPU). Les brins forment un **disque continu qui suit la caméra** (pavage toroïdal : positions stables dans le monde, recyclage silencieux sur le bord fondu), rayon réglable, densité dégressive selon la hauteur caméra. Chaque brin affiche **l'albédo et l'émissif du sol à sa racine** avec une normale verticale : il est indiscernable du sol, sauf en silhouette au ras du sol.
 - **Ciel nocturne** : dôme en dégradé zénith/horizon, étoiles procédurales scintillantes, lune billboard TSL (disque + halo + cratères), brouillard exponentiel assorti à l'horizon.
 - **Clair de lune** : directionnelle bleutée avec ombres (y compris sur l'herbe) + ambiante nuit — palette portée du projet Simulation.
-- **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères, lucioles.
+- **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères. La fourmilière est un GLB dédié, et la nourriture rougeoie comme des lucioles posées dans l'herbe.
 - Tout est réglable en direct dans le dossier **Graphismes** du panneau.
 
 ## Structure

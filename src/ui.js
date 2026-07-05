@@ -68,7 +68,8 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 	const fDisplay = gui.addFolder( 'Affichage' );
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
 		.onChange( ( v ) => env.uTrail.value = v );
-	fDisplay.add( params, 'walkAnim', 0.3, 2.5, 0.05 ).name( 'Vitesse de marche' );
+	// l'animation reste proportionnelle à la vitesse ; ceci règle le rapport
+	fDisplay.add( params, 'walkAnim', 0.2, 3, 0.05 ).name( 'Calibrage animation' );
 	fDisplay.add( params, 'shadows' ).name( 'Ombres' ).onChange( ( v ) => {
 
 		renderer.shadowMap.enabled = v;
@@ -88,7 +89,7 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 		.onChange( ( v ) => grass.u.height.value = v );
 	fGrass.add( gfx, 'grassWidth', 0.3, 2, 0.05 ).name( 'Largeur' )
 		.onChange( ( v ) => grass.u.width.value = v );
-	fGrass.add( gfx, 'grassDistance', 20, 140, 1 ).name( 'Distance' );
+	fGrass.add( gfx, 'grassRadius', 15, 90, 1 ).name( 'Rayon du tapis' );
 	fGrass.add( gfx, 'grassWind', 0, 1, 0.02 ).name( 'Vent' )
 		.onChange( ( v ) => grass.u.wind.value = v );
 	fGrass.add( gfx, 'grassShadows' ).name( 'Ombres des brins' )
@@ -103,8 +104,6 @@ export function createUI( { sim, ants, env, sky, grass, controls, camera, render
 		.onChange( ( v ) => sky.fog.density = v );
 	fNight.add( gfx, 'stars', 0, 1, 0.02 ).name( 'Étoiles' )
 		.onChange( ( v ) => sky.uStars.value = v );
-	fNight.add( gfx, 'fireflies' ).name( 'Lucioles' )
-		.onChange( ( v ) => sky.setFireflies( v ) );
 
 	fGfx.close();
 

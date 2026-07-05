@@ -1,110 +1,138 @@
 // Sol de la clairière : mousse nocturne avec taches organiques, visualisation
-// du champ de phéromones en émissif, murs/terre, nid. L'éclairage, le ciel et
-// le brouillard vivent dans graphics/sky.js.
+// du champ de phéromones en émissif, murs/terre, fourmilière (GLB).
+//
+// Les fonctions de couleur du sol sont PARTAGÉES avec l'herbe (grass.js) :
+// un brin affiche exactement l'albédo et l'émissif du sol à sa racine, avec
+// la même normale verticale → il est indiscernable du sol tant qu'on ne voit
+// pas sa silhouette dépasser.
 
 import * as THREE from 'three/webgpu';
 import {
 	Fn, texture, uniform, positionWorld,
 	vec3, float, color, mix, clamp, smoothstep, length, mx_noise_float,
 } from 'three/tsl';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { WORLD, GRID, NEST, params } from './config.js';
+import { WORLD, NEST, GRID, params } from './config.js';
 
-export function createEnvironment( scene, sim ) {
+// intensité des pistes, partagée sol/herbe (réglée par l'UI)
+export const uTrail = uniform( params.trailIntensity );
 
-	const uTrail = uniform( params.trailIntensity );
+// Crée un nœud d'échantillonnage du champ, enregistré pour suivre le ping-pong.
+export function makeFieldSampler( sim, uvNode ) {
+
+	const node = texture( sim.currentTexture, uvNode );
+	sim.fieldNodes.push( node );
+	return node;
+
+}
+
+// Albédo du sol en un point (worldXZ vec2, f = échantillon vec4 du champ).
+export function groundAlbedo( worldXZ, f ) {
+
+	const wallM = smoothstep( 0.2, 0.8, f.w );
+	const foodM = clamp( f.z, 0, 1 );
+
+	// mousse : deux verts mélangés par un bruit organique multi-échelle
+	const patches = mx_noise_float( worldXZ.mul( 0.055 ) ).mul( 0.5 ).add( 0.5 );
+	const detail = mx_noise_float( worldXZ.mul( 0.6 ) ).mul( 0.5 ).add( 0.5 );
+	const col = mix( color( 0x2b3a21 ), color( 0x4a5c3a ), patches )
+		.mul( detail.mul( 0.3 ).add( 0.85 ) ).toVar();
+
+	// bords assombris (lisière de forêt)
+	const vignette = float( 1 ).sub(
+		smoothstep( 0.32, 0.72, length( worldXZ ).div( WORLD ) ).mul( 0.3 ),
+	);
+	col.mulAssign( vignette );
+
+	col.assign( mix( col, color( 0x4a453c ), wallM ) );            // murs/terre
+	col.assign( mix( col, color( 0x8a5a20 ), foodM.mul( 0.85 ) ) ); // nourriture ambrée
+
+	return col;
+
+}
+
+// Émissif du sol : pistes de phéromones + nourriture luminescente (lucioles).
+export function groundEmissive( f ) {
+
+	const wallM = smoothstep( 0.2, 0.8, f.w );
+	const foodM = clamp( f.z, 0, 1 );
+
+	// quadratique : les pistes structurées ressortent, le voile diffus s'éteint
+	const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x.mul( f.x ) ).mul( 0.45 );
+	const food = vec3( 1.0, 0.33, 0.05 ).mul( f.y.mul( f.y ) ).mul( 0.9 );
+
+	const trails = home.add( food ).mul( uTrail )
+		.mul( float( 1 ).sub( wallM ) )
+		.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
+
+	// la nourriture rougeoie comme des lucioles posées dans l'herbe
+	const foodGlow = vec3( 1.0, 0.62, 0.18 ).mul( foodM ).mul( 0.85 );
+
+	return trails.add( foodGlow );
+
+}
+
+export async function createEnvironment( scene, sim ) {
 
 	// ------------------------------------------------------------------
-	// Sol : mousse + murs + nourriture, pistes en émissif
+	// Sol
 	// ------------------------------------------------------------------
 	const groundGeo = new THREE.PlaneGeometry( WORLD, WORLD ).rotateX( - Math.PI / 2 );
 	const groundMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.95, metalness: 0 } );
 
-	// nœud texture dont on échange la cible ping-pong chaque frame
 	const guv = positionWorld.xz.div( WORLD ).add( 0.5 );
-	const fieldNode = texture( sim.currentTexture, guv );
+	const fieldNode = makeFieldSampler( sim, guv );
 
-	groundMat.colorNode = Fn( () => {
-
-		const f = fieldNode;
-		const wallM = smoothstep( 0.2, 0.8, f.w );
-		const foodM = clamp( f.z, 0, 1 );
-
-		// mousse : deux verts mélangés par un bruit organique multi-échelle
-		const patches = mx_noise_float( positionWorld.xz.mul( 0.055 ) ).mul( 0.5 ).add( 0.5 );
-		const detail = mx_noise_float( positionWorld.xz.mul( 0.6 ) ).mul( 0.5 ).add( 0.5 );
-		let col = mix( color( 0x2b3a21 ), color( 0x4a5c3a ), patches )
-			.mul( detail.mul( 0.3 ).add( 0.85 ) ).toVar();
-
-		// bords assombris (lisière de forêt)
-		const vignette = float( 1 ).sub(
-			smoothstep( 0.32, 0.72, length( positionWorld.xz ).div( WORLD ) ).mul( 0.3 ),
-		);
-		col.mulAssign( vignette );
-
-		col.assign( mix( col, color( 0x4a453c ), wallM ) );          // murs/terre
-		col.assign( mix( col, color( 0x2f9e44 ), foodM.mul( 0.9 ) ) ); // nourriture
-
-		return col;
-
-	} )();
-
-	groundMat.emissiveNode = Fn( () => {
-
-		const f = fieldNode;
-		const wallM = smoothstep( 0.2, 0.8, f.w );
-		const foodM = clamp( f.z, 0, 1 );
-
-		// quadratique : les pistes structurées ressortent, le voile diffus s'éteint
-		const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x.mul( f.x ) ).mul( 0.45 );
-		const food = vec3( 1.0, 0.33, 0.05 ).mul( f.y.mul( f.y ) ).mul( 0.9 );
-
-		// nourriture légèrement luminescente (lisibilité nocturne),
-		// pas de lueur de piste sur les murs ni sur la nourriture elle-même
-		const trails = home.add( food ).mul( uTrail )
-			.mul( float( 1 ).sub( wallM ) )
-			.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
-		const foodGlow = vec3( 0.1, 0.5, 0.12 ).mul( foodM ).mul( 0.35 );
-
-		return trails.add( foodGlow );
-
-	} )();
+	groundMat.colorNode = Fn( () => groundAlbedo( positionWorld.xz, fieldNode ) )();
+	groundMat.emissiveNode = Fn( () => groundEmissive( fieldNode ) )();
 
 	const ground = new THREE.Mesh( groundGeo, groundMat );
 	ground.receiveShadow = true;
 	scene.add( ground );
 
 	// ------------------------------------------------------------------
-	// Nid : monticule torique + entrée sombre
+	// Fourmilière (GLB), pieds au sol, empreinte ≈ zone du nid
 	// ------------------------------------------------------------------
 	const nestWorldR = ( NEST.radius / GRID ) * WORLD;
 
-	const mound = new THREE.Mesh(
-		new THREE.TorusGeometry( nestWorldR * 0.8, nestWorldR * 0.38, 12, 48 )
-			.rotateX( - Math.PI / 2 )
-			.scale( 1, 0.45, 1 ),
-		new THREE.MeshStandardNodeMaterial( { color: 0x54422c, roughness: 1 } ),
-	);
-	mound.castShadow = true;
-	mound.receiveShadow = true;
-	scene.add( mound );
+	const gltf = await new GLTFLoader().loadAsync( '/Anthill.glb' );
+	gltf.scene.updateMatrixWorld( true );
 
-	const hole = new THREE.Mesh(
-		new THREE.CircleGeometry( nestWorldR * 0.55, 32 ).rotateX( - Math.PI / 2 ),
-		new THREE.MeshStandardNodeMaterial( { color: 0x060402, roughness: 1 } ),
+	let anthillGeo = null;
+	gltf.scene.traverse( ( o ) => {
+
+		if ( o.isMesh && ! anthillGeo ) {
+
+			anthillGeo = o.geometry.clone();
+			anthillGeo.applyMatrix4( o.matrixWorld );
+
+		}
+
+	} );
+
+	anthillGeo.computeBoundingBox();
+	const bb = anthillGeo.boundingBox;
+	const size = new THREE.Vector3();
+	bb.getSize( size );
+
+	const s = 1 / Math.max( size.x, size.z );      // empreinte unité
+	anthillGeo.translate( - ( bb.min.x + bb.max.x ) / 2, - bb.min.y, - ( bb.min.z + bb.max.z ) / 2 );
+	anthillGeo.scale( s, s, s );
+
+	const anthill = new THREE.Mesh(
+		anthillGeo,
+		new THREE.MeshStandardNodeMaterial( { color: 0x6f5a3c, roughness: 1 } ),
 	);
-	hole.position.y = 0.02;
-	scene.add( hole );
+	anthill.scale.setScalar( nestWorldR * 2.4 );
+	anthill.position.y = - nestWorldR * 0.08;      // base légèrement enterrée
+	anthill.castShadow = true;
+	anthill.receiveShadow = true;
+	scene.add( anthill );
 
 	return {
 		ground,
 		uTrail,
-		// à appeler après chaque étape de simulation (ping-pong)
-		updateFieldTexture() {
-
-			fieldNode.value = sim.currentTexture;
-
-		},
 	};
 
 }

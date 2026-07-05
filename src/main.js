@@ -72,15 +72,15 @@ async function main() {
 
 	// --- simulation + monde ---
 	const sim = new AntSimulation( renderer );
-	const env = createEnvironment( scene, sim );
 	const sky = createSky( scene );
-	const grass = createGrass( scene );
 
-	// décor + fourmis en parallèle (chargements de fichiers)
-	const [ props, ants ] = await Promise.all( [
+	// sol/fourmilière + décor + fourmis en parallèle (chargements de fichiers)
+	const [ env, props, ants ] = await Promise.all( [
+		createEnvironment( scene, sim ),
 		createProps( scene ),
 		createAnts( sim ),
 	] );
+	const grass = createGrass( scene, sim );
 	scene.add( ants.group );
 
 	await sim.init();
@@ -96,7 +96,7 @@ async function main() {
 			// réécrit les marqueurs (nid, nourriture semée) dans la texture affichée,
 			// indispensable quand la simulation est en pause
 			sim.refreshDisplay();
-			env.updateFieldTexture();
+			sim.updateFieldNodes();
 
 		},
 	} );
@@ -122,13 +122,13 @@ async function main() {
 		if ( running ) {
 
 			sim.step( simDt );
-			env.updateFieldTexture();
+			sim.updateFieldNodes();
 
 		} else if ( painted || ui.consumePaintFlag() ) {
 
 			// peinture pendant la pause : on rafraîchit l'affichage sans simuler
 			sim.refreshDisplay();
-			env.updateFieldTexture();
+			sim.updateFieldNodes();
 
 		}
 

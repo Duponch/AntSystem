@@ -1,40 +1,41 @@
-// Tapis d'herbe 100 % GPU — porté de E:/Code/Simulation (même three r185/TSL).
-// Un brin = un quad trapézoïdal (2 triangles). AUCUNE donnée par brin côté
-// CPU : position, jitter, lacet, taille, teinte et vent sont dérivés de
-// instanceIndex par hash() dans le vertex shader. Le sol est uniforme, donc
-// pas même besoin du buffer d'ids de tuiles du projet source.
+// Tapis d'herbe 100 % GPU : un DISQUE CONTINU de brins centré sur la caméra.
 //
-// Découpage en chunks de 32×32 u : frustum culling par boundingSphere
-// manuelle + rayon d'affichage + densité dégressive avec la hauteur caméra
-// (instanceCount ajusté, gratuit : zéro buffer par instance).
+// Chaque brin possède une position de réseau stable dérivée de instanceIndex ;
+// le shader la réplique sur un pavage toroïdal de période 2R et choisit la
+// réplique la plus proche de la caméra. Résultat : les brins sont fixes dans
+// le monde tant qu'ils sont dans le disque, et se recyclent silencieusement
+// d'un bord à l'autre (le bord est masqué en fondu) quand la caméra avance —
+// un vrai cercle de brins qui suit la caméra, sans chunks.
+//
+// Camouflage : un brin affiche EXACTEMENT l'albédo + l'émissif du sol à sa
+// racine (fonctions partagées de environment.js) avec une normale verticale —
+// même éclairage que le sol, indiscernable sauf en silhouette.
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, uniform, uv, hash, instanceIndex, positionLocal, time,
-	float, uint, vec2, vec3, mix, sin, cos, smoothstep, transformNormalToView,
+	Fn, uniform, uv, hash, instanceIndex, positionLocal, time, varyingProperty,
+	float, uint, vec2, vec3, sin, cos, floor, length, smoothstep, transformNormalToView,
 } from 'three/tsl';
 
 import { WORLD, gfx } from '../config.js';
+import { makeFieldSampler, groundAlbedo, groundEmissive } from '../environment.js';
 
-const CHUNK = 32;                       // unités monde
-const TILES = CHUNK * CHUNK;            // 1 tuile = 1 m²
-const MAX_DENSITY = 160;                // brins/m² maxi (borne du slider)
+const MAX_BLADES = 2_000_000;
 
-export function createGrass( scene ) {
+export function createGrass( scene, sim ) {
 
-	// --- uniforms partagés ---
 	const u = {
 		height: uniform( gfx.grassHeight ),
 		width: uniform( gfx.grassWidth ),
+		radius: uniform( gfx.grassRadius ),
 		wind: uniform( gfx.grassWind ),
 		windDir: uniform( new THREE.Vector2( 1, 0 ) ),
 		windStrength: uniform( 0.8 ),
 		windGust: uniform( 0 ),
-		rootColor: uniform( new THREE.Color( 0x2b3a21 ) ),   // = couleur du sol
-		tipColor: uniform( new THREE.Color( 0x6f8f52 ) ),
+		cam: uniform( new THREE.Vector2() ),
 	};
 
-	// --- géométrie d'un brin : quad effilé + penché (4 sommets) ---
+	// --- géométrie d'un brin : quad effilé + penché (4 sommets, 2 triangles) ---
 	const blade = ( () => {
 
 		const halfW0 = 0.038, halfW1 = 0.003, lean = 0.035;
@@ -49,159 +50,117 @@ export function createGrass( scene ) {
 
 	} )();
 
-	// --- matériau par chunk (uniform d'origine ; même WGSL → pipeline en cache) ---
-	function makeChunkMaterial( originX, originZ ) {
+	const material = new THREE.MeshStandardNodeMaterial( {
+		roughness: 0.95,          // = sol
+		metalness: 0,
+		side: THREE.DoubleSide,
+	} );
 
-		const origin = uniform( new THREE.Vector2( originX, originZ ) );
+	material.positionNode = Fn( () => {
 
-		const material = new THREE.MeshStandardNodeMaterial( {
-			roughness: 0.96,
-			metalness: 0,
-			side: THREE.DoubleSide,
-		} );
+		// réseau toroïdal de période 2R : réplique la plus proche de la caméra
+		const period = u.radius.mul( 2 );
+		const Lx = hash( instanceIndex ).mul( period );
+		const Lz = hash( instanceIndex.add( uint( 11 ) ) ).mul( period );
+		const bx = Lx.add( floor( u.cam.x.sub( Lx ).div( period ).add( 0.5 ) ).mul( period ) ).toVar();
+		const bz = Lz.add( floor( u.cam.y.sub( Lz ).div( period ).add( 0.5 ) ).mul( period ) ).toVar();
 
-		material.colorNode = Fn( () => {
+		const root = vec2( bx, bz );
+		varyingProperty( 'vec2', 'vGrassRoot' ).assign( root );
 
-			const tint = hash( instanceIndex.add( uint( 71 ) ) ).mul( 0.3 ).add( 0.85 );
-			return mix( u.rootColor.mul( tint ), u.tipColor.mul( tint ), uv().y );
+		const yaw = hash( instanceIndex.add( uint( 29 ) ) ).mul( 6.28318530718 );
+		const c = cos( yaw );
+		const s = sin( yaw );
+		const bladeT = uv().y;
 
-		} )();
+		// hauteur masquée : bord du disque en fondu, limites du terrain, nid
+		const dCam = length( root.sub( u.cam ) );
+		const height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 ).mul( u.height )
+			.mul( float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) ) )
+			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 2, WORLD / 2, bx.abs() ) ) )
+			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 2, WORLD / 2, bz.abs() ) ) )
+			.mul( smoothstep( 3.6, 5.2, length( root ) ) );
 
-		material.positionNode = Fn( () => {
+		const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 ).mul( u.width );
 
-			// tuile hashée (répartition uniforme même à faible densité) + jitter pleine tuile
-			const tile = hash( instanceIndex.add( uint( 97 ) ) ).mul( float( TILES ) ).toUint().min( uint( TILES - 1 ) );
-			const tx = tile.mod( uint( CHUNK ) ).toFloat();
-			const tz = tile.div( uint( CHUNK ) ).toFloat();
-			const bx = tx.add( hash( instanceIndex ) ).add( origin.x );
-			const bz = tz.add( hash( instanceIndex.add( uint( 11 ) ) ) ).add( origin.y );
+		const lx = positionLocal.x.mul( width );
+		const ly = positionLocal.y.mul( height );
+		const lz = positionLocal.z.mul( width );
 
-			const yaw = hash( instanceIndex.add( uint( 29 ) ) ).mul( 6.28318530718 );
-			const c = cos( yaw );
-			const s = sin( yaw );
-			const bladeT = uv().y;
+		// balancement en espace monde le long du vent (base plantée, pointe souple)
+		// (le saut de phase au recyclage est invisible : le bord est masqué)
+		const phase = time.mul( 1.35 ).add( yaw ).add( bx.mul( 0.17 ) ).add( bz.mul( 0.11 ) );
+		const sway = sin( phase ).mul( u.wind ).mul( u.windStrength ).mul( bladeT.mul( bladeT ) ).mul( 0.34 )
+			.add( sin( phase.mul( 2.7 ).add( bx.mul( 0.3 ) ) ).mul( u.windGust ).mul( u.wind ).mul( bladeT.mul( bladeT ) ).mul( 0.22 ) );
 
-			let height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 ).mul( u.height );
-			const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 ).mul( u.width );
+		const rx = lx.mul( c ).add( lz.mul( s ) );
+		const rz = lz.mul( c ).sub( lx.mul( s ) );
 
-			// pas d'herbe sur le nid (les positions sont directement en monde)
-			height = height.mul( smoothstep( 3.6, 5.2, vec2( bx, bz ).length() ) );
+		return vec3(
+			bx.add( rx ).add( u.windDir.x.mul( sway ) ),
+			ly.add( 0.02 ),
+			bz.add( rz ).add( u.windDir.y.mul( sway ) ),
+		);
 
-			const lx = positionLocal.x.mul( width );
-			const ly = positionLocal.y.mul( height );
-			const lz = positionLocal.z.mul( width );
+	} )();
 
-			// balancement en espace monde le long du vent (base plantée, pointe souple)
-			const phase = time.mul( 1.35 ).add( yaw ).add( tx.mul( 0.17 ) ).add( tz.mul( 0.11 ) );
-			const sway = sin( phase ).mul( u.wind ).mul( u.windStrength ).mul( bladeT.mul( bladeT ) ).mul( 0.34 )
-				.add( sin( phase.mul( 2.7 ).add( tx.mul( 0.3 ) ) ).mul( u.windGust ).mul( u.wind ).mul( bladeT.mul( bladeT ) ).mul( 0.22 ) );
+	// camouflage : couleur et émissif du SOL à la racine du brin
+	const rootVar = varyingProperty( 'vec2', 'vGrassRoot' );
+	const rootUv = rootVar.div( WORLD ).add( 0.5 );
+	const fieldNode = makeFieldSampler( sim, rootUv );
 
-			const rx = lx.mul( c ).add( lz.mul( s ) );
-			const rz = lz.mul( c ).sub( lx.mul( s ) );
+	material.colorNode = Fn( () => groundAlbedo( rootVar, fieldNode ) )();
+	material.emissiveNode = Fn( () => groundEmissive( fieldNode ) )();
 
-			return vec3(
-				bx.add( rx ).add( u.windDir.x.mul( sway ) ),
-				ly.add( 0.02 ),
-				bz.add( rz ).add( u.windDir.y.mul( sway ) ),
-			);
+	// normale strictement verticale : éclairé exactement comme le sol
+	material.normalNode = transformNormalToView( vec3( 0, 1, 0 ) );
 
-		} )();
+	// --- mesh unique ---
+	const geo = new THREE.InstancedBufferGeometry();
+	geo.index = blade.index;
+	geo.attributes = blade.attributes;
+	geo.instanceCount = 0;
 
-		// normales quasi verticales : l'herbe est éclairée comme le sol et s'y fond
-		material.normalNode = Fn( () => {
-
-			const yaw = hash( instanceIndex.add( uint( 29 ) ) ).mul( 6.28318530718 );
-			const n = mix( vec3( sin( yaw ), 0, cos( yaw ) ), vec3( 0, 1, 0 ), 0.9 ).normalize();
-			return transformNormalToView( n );
-
-		} )();
-
-		return material;
-
-	}
-
-	// --- chunks ---
-	const side = Math.ceil( WORLD / CHUNK );          // 5 → 25 chunks
-	const chunks = [];
-	const group = new THREE.Group();
-
-	for ( let cz = 0; cz < side; cz ++ ) {
-
-		for ( let cx = 0; cx < side; cx ++ ) {
-
-			const ox = - WORLD / 2 + cx * CHUNK;
-			const oz = - WORLD / 2 + cz * CHUNK;
-
-			const geo = new THREE.InstancedBufferGeometry();
-			geo.index = blade.index;
-			geo.attributes = blade.attributes;
-			geo.instanceCount = 0;
-			geo.boundingSphere = new THREE.Sphere(
-				new THREE.Vector3( ox + CHUNK / 2, 0.5, oz + CHUNK / 2 ),
-				Math.hypot( CHUNK / 2, CHUNK / 2 ) + 2,
-			);
-
-			const mesh = new THREE.Mesh( geo, makeChunkMaterial( ox, oz ) );
-			mesh.frustumCulled = true;
-			mesh.receiveShadow = true;
-			mesh.castShadow = gfx.grassShadows;
-
-			group.add( mesh );
-			chunks.push( {
-				mesh,
-				geo,
-				center: new THREE.Vector2( ox + CHUNK / 2, oz + CHUNK / 2 ),
-			} );
-
-		}
-
-	}
-
-	scene.add( group );
+	const mesh = new THREE.Mesh( geo, material );
+	mesh.frustumCulled = false;               // suit la caméra en permanence
+	mesh.receiveShadow = true;
+	mesh.castShadow = gfx.grassShadows;
+	scene.add( mesh );
 
 	// --- vent animé (errance lente + rafales) ---
 	let windAngle = 0.6;
 	let windTime = 0;
 
-	// --- LOD par frame ---
-	const camPos = new THREE.Vector2();
-
 	function update( camera, dt ) {
 
-		// vent
 		windTime += dt;
 		windAngle += dt * 0.05 * Math.sin( windTime * 0.13 );
 		u.windDir.value.set( Math.cos( windAngle ), Math.sin( windAngle ) );
 		u.windStrength.value = 0.75 + 0.35 * Math.sin( windTime * 0.4 );
 		u.windGust.value = Math.max( 0, Math.sin( windTime * 0.9 ) * Math.sin( windTime * 0.23 ) );
 
+		u.cam.value.set( camera.position.x, camera.position.z );
+		u.radius.value = gfx.grassRadius;
+
 		// densité : pleine près du sol, 12 % vu de très haut
 		const camH = Math.max( 0, camera.position.y );
 		const t = THREE.MathUtils.clamp( 1 - ( camH - 8 ) / 70, 0, 1 );
 		const ratio = 0.12 + t * t * 0.88;
-		const perChunk = Math.round( gfx.grassDensity * TILES * ratio );
 
-		camPos.set( camera.position.x, camera.position.z );
-
-		for ( const c of chunks ) {
-
-			const visible = gfx.grass &&
-				c.center.distanceTo( camPos ) < gfx.grassDistance + CHUNK * 0.75;
-			c.mesh.visible = visible;
-
-			// instanceCount est un simple paramètre de draw : mise à jour gratuite
-			if ( visible ) c.geo.instanceCount = perChunk;
-
-		}
+		const area = 4 * gfx.grassRadius * gfx.grassRadius;
+		geo.instanceCount = gfx.grass
+			? Math.min( MAX_BLADES, Math.round( gfx.grassDensity * area * ratio ) )
+			: 0;
+		mesh.visible = gfx.grass;
 
 	}
 
 	function setShadows( on ) {
 
-		for ( const c of chunks ) c.mesh.castShadow = on;
+		mesh.castShadow = on;
 
 	}
 
-	return { group, u, update, setShadows, MAX_DENSITY };
+	return { mesh, u, update, setShadows };
 
 }

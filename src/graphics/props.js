@@ -34,8 +34,9 @@ const OBSTACLES = [
 // points à éviter pour la déco : nid + gisements de départ (voir _seedFood)
 const KEEP_CLEAR = [
 	{ x: 0, z: 0, r: 14 },
-	{ x: 34.2, z: 18.8, r: 8 }, { x: - 20.8, z: 45.4, r: 8 },
-	{ x: - 35.8, z: - 22.3, r: 8 }, { x: 21.1, z: - 52.1, r: 8 },
+	{ x: 34.2, z: 18.8, r: 6 }, { x: - 20.8, z: 45.4, r: 6 },
+	{ x: - 26.8, z: 16.1, r: 6 }, { x: - 35.8, z: - 22.3, r: 6 },
+	{ x: - 14.4, z: - 44.7, r: 6 }, { x: 21.1, z: - 52.1, r: 6 },
 	...OBSTACLES.map( ( o ) => ( { x: o.x, z: o.z, r: o.scale / 2 + 4 } ) ),
 ];
 

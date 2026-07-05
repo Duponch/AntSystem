@@ -20,37 +20,39 @@ export const params = {
 	paused: false,
 
 	// Comportement (unités : texels et radians par seconde)
-	moveSpeed: 40,
+	moveSpeed: 22,
 	steerStrength: 6,
 	wanderStrength: 1.6,
 	sensorAngleDeg: 30,
 	sensorDist: 12,
 
-	// Phéromones
+	// Phéromones (lentes à disparaître : les pistes structurent la colonie)
 	depositRate: 12,                   // intensité déposée par seconde (avant fondu)
-	fade: 0.05,                        // k du fondu exp(-k·temps_depuis_source)
-	evaporation: 0.15,                 // décroissance linéaire par seconde
+	fade: 0.03,                        // k du fondu exp(-k·temps_depuis_source)
+	evaporation: 0.06,                 // décroissance linéaire par seconde
 	diffusion: 1.2,                    // taux de flou par seconde
 
 	// Outils
 	tool: 'nourriture',                // 'nourriture' | 'mur' | 'gomme'
-	brushRadius: 12,                   // texels
-	foodAmount: 30,                    // unités par cellule
+	brushRadius: 8,                    // texels
+	foodAmount: 12,                    // unités par cellule
 
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
-	walkAnim: 1.0,                     // facteur de fréquence de foulée
+	// calibrage animation : cycles de marche par texel parcouru
+	// (l'animation reste proportionnelle à la vitesse de déplacement)
+	walkAnim: 1.0,
 };
 
 // Paramètres graphiques (ambiance nocturne, herbe, décor)
 export const gfx = {
-	// Herbe GPU
+	// Herbe GPU : disque continu de brins centré sur la caméra
 	grass: true,
 	grassDensity: 40,                  // brins par m²
 	grassHeight: 0.55,                 // facteur hauteur (fourmis toujours visibles)
 	grassWidth: 0.85,
-	grassDistance: 55,                 // rayon d'affichage (unités monde)
+	grassRadius: 45,                   // rayon du disque de brins (unités monde)
 	grassWind: 0.45,
 	grassShadows: false,               // ombres portées par les brins (coûteux)
 
@@ -59,7 +61,6 @@ export const gfx = {
 	ambientIntensity: 2.2,
 	fogDensity: 0.008,
 	stars: 0.7,                        // densité/intensité des étoiles
-	fireflies: true,
 };
 
 export function worldToGrid( x, z ) {

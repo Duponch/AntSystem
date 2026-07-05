@@ -1,15 +1,13 @@
 // Ambiance nocturne — portée de E:/Code/Simulation (déjà en TSL r185) :
 // dôme dégradé zénith/horizon, lune billboard procédurale (disque + halo +
 // cratères), étoiles procédurales scintillantes, brouillard exponentiel
-// asservi à la couleur d'horizon, clair de lune directionnel + ambiante
-// bleutée, et quelques lucioles pour le côté cozy.
+// asservi à la couleur d'horizon, clair de lune directionnel + ambiante bleutée.
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, uniform, uv, time, positionLocal, cameraPosition,
+	Fn, uniform, uv, time, positionLocal,
 	float, vec2, vec3, color, mix, smoothstep, step, fract, floor, hash,
-	sin, cos, cross, normalize, length,
-	instanceIndex,
+	sin, length,
 } from 'three/tsl';
 
 import { WORLD, gfx } from '../config.js';
@@ -147,90 +145,14 @@ export function createSky( scene ) {
 	scene.fog = fog;
 
 	// ------------------------------------------------------------------
-	// Lucioles : quads billboardés additifs qui dérivent et clignotent
-	// ------------------------------------------------------------------
-	const FIREFLIES = 48;
-	const flyGeo = new THREE.InstancedBufferGeometry();
-	const quad = new THREE.PlaneGeometry( 0.42, 0.42 );
-	flyGeo.index = quad.index;
-	flyGeo.attributes = quad.attributes;
-	flyGeo.instanceCount = FIREFLIES;
-
-	const flyMat = new THREE.MeshBasicNodeMaterial( {
-		transparent: true,
-		blending: THREE.AdditiveBlending,
-		depthWrite: false,
-		fog: false,
-		toneMapped: false,
-	} );
-
-	const flyBlink = ( idx ) =>
-		sin( time.mul( hash( idx.add( 7 ) ).mul( 0.8 ).add( 0.5 ) ).add( hash( idx ).mul( 40 ) ) )
-			.mul( 0.5 ).add( 0.5 ).pow( 3 );
-
-	flyMat.positionNode = Fn( () => {
-
-		const idx = instanceIndex;
-
-		// ancre fixe + dérive lente pseudo-aléatoire
-		const ringA = hash( idx.add( 1 ) ).mul( 6.28318 );
-		const ringR = hash( idx.add( 2 ) ).mul( 60 ).add( 12 );
-		const anchor = vec3( cos( ringA ).mul( ringR ), 0, sin( ringA ).mul( ringR ) );
-
-		const t = time.mul( hash( idx.add( 3 ) ).mul( 0.25 ).add( 0.12 ) );
-		const driftX = sin( t.add( hash( idx.add( 4 ) ).mul( 40 ) ) ).mul( 3.5 );
-		const driftZ = cos( t.mul( 0.83 ).add( hash( idx.add( 5 ) ).mul( 40 ) ) ).mul( 3.5 );
-		const driftY = sin( t.mul( 1.31 ).add( hash( idx.add( 6 ) ).mul( 40 ) ) )
-			.mul( 0.8 ).add( hash( idx.add( 8 ) ).mul( 1.6 ).add( 0.7 ) );
-
-		const center = anchor.add( vec3( driftX, driftY, driftZ ) );
-
-		// billboard manuel
-		const view = normalize( cameraPosition.sub( center ) );
-		const right = normalize( cross( vec3( 0, 1, 0 ), view ) );
-		const up = cross( view, right );
-		const size = flyBlink( idx ).mul( 0.7 ).add( 0.5 );
-
-		return center
-			.add( right.mul( positionLocal.x.mul( size ) ) )
-			.add( up.mul( positionLocal.y.mul( size ) ) );
-
-	} )();
-
-	flyMat.colorNode = Fn( () => {
-
-		const d = uv().sub( vec2( 0.5, 0.5 ) ).length().mul( 2 );
-		const glow = d.oneMinus().clamp( 0, 1 ).pow( 2.5 );
-		return vec3( 1.0, 0.72, 0.35 ).mul( glow ).mul( flyBlink( instanceIndex ).mul( 3.2 ).add( 0.15 ) );
-
-	} )();
-
-	flyMat.opacityNode = Fn( () => {
-
-		const d = uv().sub( vec2( 0.5, 0.5 ) ).length().mul( 2 );
-		return d.oneMinus().clamp( 0, 1 );
-
-	} )();
-
-	const fireflies = new THREE.Mesh( flyGeo, flyMat );
-	fireflies.frustumCulled = false;
-	scene.add( fireflies );
-
-	// ------------------------------------------------------------------
 	return {
 		moonLight,
 		ambient,
 		fog,
 		uStars,
-		fireflies,
 		update( camera ) {
 
 			moon.lookAt( camera.position );
-
-		},
-		setFireflies( on ) {
-
-			fireflies.visible = on;
 
 		},
 	};

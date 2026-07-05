@@ -94,11 +94,21 @@ export class AntSimulation {
 		this._readingStats = false;
 		this.statsData = { delivered: 0, picked: 0 };
 
+		// nœuds TSL texture(...) qui affichent le champ (sol, herbe…) :
+		// leur .value doit suivre le ping-pong à chaque étape
+		this.fieldNodes = [];
+
 	}
 
 	get currentTexture() {
 
 		return this.textures[ this.cur ];
+
+	}
+
+	updateFieldNodes() {
+
+		for ( const n of this.fieldNodes ) n.value = this.currentTexture;
 
 	}
 
@@ -555,12 +565,14 @@ export class AntSimulation {
 
 	async _seedFood() {
 
-		// quelques gisements de départ autour du nid, semés en un seul dispatch
+		// petits gisements de départ autour du nid, semés en un seul dispatch
 		const blobs = [
-			{ angle: 0.5, dist: 250, radius: 17 },
-			{ angle: 2.0, dist: 320, radius: 21 },
-			{ angle: 3.7, dist: 270, radius: 15 },
-			{ angle: 5.1, dist: 360, radius: 22 },
+			{ angle: 0.5, dist: 250, radius: 6 },
+			{ angle: 2.0, dist: 320, radius: 8 },
+			{ angle: 2.6, dist: 200, radius: 5 },
+			{ angle: 3.7, dist: 270, radius: 5 },
+			{ angle: 4.4, dist: 300, radius: 7 },
+			{ angle: 5.1, dist: 360, radius: 8 },
 		];
 
 		blobs.forEach( ( b, k ) => {
