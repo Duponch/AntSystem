@@ -190,6 +190,11 @@ export async function createAnts( sim ) {
 	// ------------------------------------------------------------------
 	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
 	const uAccentColor = uniform( new THREE.Color( gfx.antAccentColor ) );
+	const uSoldierColor = uniform( new THREE.Color( gfx.soldierColor ) );
+
+	// caste : même hash stable que le kernel de simulation
+	const soldierOf = ( antId ) =>
+		hash( antId.add( uint( 0xCA57E ) ) ).lessThan( sim.u.soldierRatio );
 
 	// animMode : 0 = interpolation lisse, 1 = frame la plus proche (toujours
 	// animée, sans mélange), 2 = pose figée (au-delà de la distance d'animation,
@@ -208,6 +213,11 @@ export async function createAnts( sim ) {
 			varyingProperty( 'float', 'vAntAccent' ).assign(
 				select( vatIdx.lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ),
 			);
+
+			// soldates : gabarit supérieur + teinte propre
+			const soldier = soldierOf( antId );
+			const bodyScale = select( soldier, float( 1.45 ), float( 1 ) );
+			varyingProperty( 'float', 'vSoldier' ).assign( select( soldier, 1, 0 ) );
 
 			let animated;
 
@@ -238,13 +248,14 @@ export async function createAnts( sim ) {
 
 			}
 
-			return rot.mul( animated ).add( world );
+			return rot.mul( animated.mul( bodyScale ) ).add( world );
 
 		} )();
 
 		material.colorNode = Fn( () => {
 
-			return mix( uBodyColor, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
+			const body = mix( uBodyColor, uSoldierColor, varyingProperty( 'float', 'vSoldier' ).mul( 0.85 ) );
+			return mix( body, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
 
 		} )();
 
@@ -292,7 +303,8 @@ export async function createAnts( sim ) {
 
 		const { rot, world } = antTransform( instanceIndex );
 		const carrying = sim.antState.element( instanceIndex ).toFloat();
-		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) );
+		const bodyScale = select( soldierOf( instanceIndex ), float( 1.45 ), float( 1 ) );
+		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ).mul( bodyScale ) );
 
 		return positionLocal.mul( carrying ).add( offset ).add( world );
 
@@ -358,6 +370,7 @@ export async function createAnts( sim ) {
 		grainMat,
 		uBodyColor,
 		uAccentColor,
+		uSoldierColor,
 		uGrainHalo,
 		uGrainHaloIntensity,
 		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },

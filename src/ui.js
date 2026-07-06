@@ -53,9 +53,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => sim.u.sensorDist.value = v );
 	fBehavior.close();
 
-	const fPredators = gui.addFolder( '🕷 Prédateurs' );
+	const fPredators = gui.addFolder( '🕷 Prédateurs & défense' );
 	fPredators.add( params, 'spiderCount', 0, 3, 1 ).name( 'Araignées' );
 	fPredators.add( params, 'spiderAggro', 0, 1, 0.05 ).name( 'Agressivité' );
+	fPredators.add( params, 'soldierRatio', 0, 0.3, 0.01 ).name( 'Part de soldates' )
+		.onChange( ( v ) => sim.u.soldierRatio.value = v );
 	fPredators.close();
 
 	const fPher = gui.addFolder( 'Phéromones' );
@@ -130,6 +132,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => ants.uBodyColor.value.set( v ) );
 	fColors.addColor( gfx, 'antAccentColor' ).name( 'Yeux / antennes' )
 		.onChange( ( v ) => ants.uAccentColor.value.set( v ) );
+	fColors.addColor( gfx, 'soldierColor' ).name( 'Soldates' )
+		.onChange( ( v ) => ants.uSoldierColor.value.set( v ) );
 	fColors.addColor( gfx, 'anthillColor' ).name( 'Fourmilière' )
 		.onChange( ( v ) => env.anthillMat.color.set( v ) );
 	fColors.addColor( gfx, 'foodColor' ).name( 'Nourriture' ).onChange( ( v ) => {

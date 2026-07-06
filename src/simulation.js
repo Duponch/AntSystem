@@ -63,6 +63,8 @@ export class AntSimulation {
 			seed: uniform( 0 ),                           // graine de run (banc d'essai)
 			spiderCount: uniform( 0 ),                    // prédateurs actifs
 			fleeRadius: uniform( 35 ),                    // rayon de panique (texels)
+			soldierRatio: uniform( params.soldierRatio ), // part de soldates dans la colonie
+			alarmDecay: uniform( 0.35 ),                  // évanouissement de l'alarme (/s)
 		};
 
 		// araignées : (x, y grille, frappe en cours 0/1, rayon de mort en texels)
@@ -89,9 +91,11 @@ export class AntSimulation {
 		this.antState = instancedArray( MAX_ANTS, 'uint' );        // 0 exploratrice, 1 porteuse
 
 		this.deposit = instancedArray( GRID * GRID * 2, 'uint' ).toAtomic(); // accumulateur virgule fixe
+		this.alarm = instancedArray( GRID * GRID, 'uint' ).toAtomic();       // phéromone d'alarme
 		this.food = instancedArray( GRID * GRID, 'uint' ).toAtomic();        // unités de nourriture
 		this.wall = instancedArray( GRID * GRID, 'uint' );                   // 0/1
-		this.stats = instancedArray( 8, 'uint' ).toAtomic();                 // [0] livrées, [1] ramassées
+		// [0] livrées, [1] ramassées, [2] croquées, [3..6] morsures par araignée
+		this.stats = instancedArray( 8, 'uint' ).toAtomic();
 
 		// --- textures ping-pong du champ de phéromones ---
 		this.textures = [ 0, 1 ].map( () => {
@@ -135,7 +139,7 @@ export class AntSimulation {
 	_buildKernels() {
 
 		const u = this.u;
-		const { antData, antState, deposit, food, wall, stats } = this;
+		const { antData, antState, deposit, alarm, food, wall, stats } = this;
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
 
@@ -171,6 +175,7 @@ export class AntSimulation {
 			const i = instanceIndex;
 			atomicStore( deposit.element( i.mul( 2 ) ), uint( 0 ) );
 			atomicStore( deposit.element( i.mul( 2 ).add( 1 ) ), uint( 0 ) );
+			atomicStore( alarm.element( i ), uint( 0 ) );
 			atomicStore( food.element( i ), uint( 0 ) );
 			wall.element( i ).assign( uint( 0 ) );
 
@@ -205,8 +210,12 @@ export class AntSimulation {
 				const timer = min( a.w.add( u.dt ), 600 ).toVar();
 				const carrying = st.equal( uint( 1 ) ).toVar();
 
-				// --- menace : araignées (panique, fuite, prédation) ---
+				// --- caste : soldate (stable par fourmi, même formule que le rendu) ---
+				const soldier = hash( instanceIndex.add( uint( 0xCA57E ) ) ).lessThan( u.soldierRatio ).toVar();
+
+				// --- menace : araignées (panique et fuite… ou charge des soldates) ---
 				const panic = float( 0 ).toVar();
+				const rage = float( 0 ).toVar();
 				const fleeDir = vec2( 0 ).toVar();
 
 				Loop( { start: int( 0 ), end: u.spiderCount.toInt(), type: 'int', condition: '<' }, ( { i: si } ) => {
@@ -218,11 +227,28 @@ export class AntSimulation {
 					If( dSp.lessThan( u.fleeRadius ), () => {
 
 						const w = float( 1 ).sub( dSp.div( u.fleeRadius ) );
-						panic.assign( max( panic, w ) );
-						fleeDir.addAssign( away.div( dSp ).mul( w ) );
 
-						// frappe : la fourmi est croquée — une remplaçante sort du nid
-						// (le portage en cours est perdu)
+						If( soldier, () => {
+
+							// les soldates CHARGENT : cap sur l'araignée, morsures au contact
+							rage.assign( max( rage, w ) );
+							fleeDir.subAssign( away.div( dSp ).mul( w ) );
+
+							If( dSp.lessThan( sp.w.mul( 1.5 ) ), () => {
+
+								atomicAdd( stats.element( si.add( int( 3 ) ) ), uint( 1 ) );
+
+							} );
+
+						} ).Else( () => {
+
+							panic.assign( max( panic, w ) );
+							fleeDir.addAssign( away.div( dSp ).mul( w ) );
+
+						} );
+
+						// la frappe tue soldates comme ouvrières — une remplaçante
+						// sort du nid (le portage en cours est perdu)
 						If( sp.z.greaterThan( 0.5 ).and( dSp.lessThan( sp.w ) ), () => {
 
 							const rr = sqrt( hash( iseed.add( uint( 0xB5297A4D ) ) ) );
@@ -232,12 +258,24 @@ export class AntSimulation {
 							st.assign( uint( 0 ) );
 							timer.assign( 0 );
 							panic.assign( 0 );
+							rage.assign( 0 );
 							fleeDir.assign( vec2( 0 ) );
 							atomicAdd( stats.element( 2 ), uint( 1 ) );
 
 						} );
 
 					} );
+
+				} );
+
+				// --- phéromone d'alarme : déposée par les paniquées (les soldates
+				// en laissent aussi : elle RECRUTE les autres soldates au combat) ---
+				const alarmLevel = max( panic, rage.mul( 0.7 ) );
+
+				If( alarmLevel.greaterThan( 0.12 ), () => {
+
+					const cellA = ivec2( pos );
+					atomicMax( alarm.element( cellIndex( cellA ) ), alarmLevel.mul( FIXED ).toUint() );
 
 				} );
 
@@ -259,8 +297,12 @@ export class AntSimulation {
 							);
 							const t = textureLoad( readTex, c );
 							// porteuse → suit la carte « maison » (R) ; exploratrice → « nourriture » (G)
+							// murs (B négatif) répulsifs ; alarme (B positif) : les ouvrières
+							// l'évitent, les soldates y foncent (recrutement au combat)
+							const alarmS = clamp( t.z, 0, 1 );
 							w = w.add( select( carrying, t.x, t.y ) )
-								.sub( clamp( t.z.negate(), 0, 1 ).mul( 0.8 ) );
+								.sub( clamp( t.z.negate(), 0, 1 ).mul( 0.8 ) )
+								.add( select( soldier, alarmS.mul( 2.2 ), alarmS.mul( - 1.4 ) ) );
 
 						}
 
@@ -303,15 +345,17 @@ export class AntSimulation {
 				const wander = u.wander.mul( select( carrying, 0.5, 1 ) );
 				ang.addAssign( r2.sub( 0.5 ).mul( 2 ).mul( wander ).mul( u.dt ) );
 
-				// panique : virage prononcé vers la direction de fuite (sans atan)
-				If( panic.greaterThan( 0.01 ), () => {
+				// panique/charge : virage prononcé vers la direction voulue (sans atan)
+				const urgency = max( panic, rage ).toVar();
+
+				If( urgency.greaterThan( 0.01 ), () => {
 
 					const dirv = vec2( cos( ang ), sin( ang ) );
 					const crossZ = dirv.x.mul( fleeDir.y ).sub( dirv.y.mul( fleeDir.x ) );
 					const dotv = dirv.x.mul( fleeDir.x ).add( dirv.y.mul( fleeDir.y ) );
 					const turn = select( crossZ.greaterThanEqual( 0 ), float( 1 ), float( - 1 ) );
 					ang.addAssign(
-						turn.mul( panic ).mul( u.steer ).mul( 2.2 ).mul( u.dt )
+						turn.mul( urgency ).mul( u.steer ).mul( 2.2 ).mul( u.dt )
 							.mul( float( 1.4 ).sub( dotv.mul( 0.4 ) ) ),
 					);
 
@@ -336,8 +380,8 @@ export class AntSimulation {
 				};
 
 				// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
-				// (une fourmi paniquée détale : +45 % de vitesse)
-				const stepLen = u.moveSpeed.mul( u.dt ).mul( panic.mul( 0.45 ).add( 1 ) );
+				// (panique ou charge : +45 % de vitesse)
+				const stepLen = u.moveSpeed.mul( u.dt ).mul( urgency.mul( 0.45 ).add( 1 ) );
 				const nSub = clamp( ceil( stepLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
 				const subLen = stepLen.div( nSub.toFloat() );
 
@@ -479,7 +523,8 @@ export class AntSimulation {
 
 			}
 
-			const center = textureLoad( readTex, c ).xy;
+			const center4 = textureLoad( readTex, c );
+			const center = center4.xy;
 			const blurred = sum.xy.div( 9 );
 
 			const pher = mix( center, blurred, clamp( u.diffuse.mul( u.dt ), 0, 1 ) ).toVar();
@@ -520,8 +565,16 @@ export class AntSimulation {
 			const foodVis = min( foodHere.toFloat().div( 12 ), 1 );
 			const halo = clamp( max( sum.z.div( 9 ).mul( u.haloSpread ), foodVis ), 0, 1 );
 
-			// packing : B = nourriture (+) / mur (−), A = halo
-			const bPacked = select( wallHere.greaterThan( uint( 0 ) ), float( - 1 ), foodVis );
+			// alarme : injection (max) puis évanouissement rapide, sans diffusion
+			const aDep = atomicLoad( alarm.element( i ) );
+			atomicStore( alarm.element( i ), uint( 0 ) );
+			const alarmV = clamp( max(
+				clamp( center4.z, 0, 1 ).sub( u.alarmDecay.mul( u.dt ) ),
+				aDep.toFloat().div( FIXED ),
+			), 0, 1 );
+
+			// packing : B = alarme (+) / mur (−), A = halo
+			const bPacked = select( wallHere.greaterThan( uint( 0 ) ), float( - 1 ), alarmV );
 
 			textureStore( writeTex, uvec2( ix, iy ), vec4( pher.x, pher.y, bPacked, halo ) );
 

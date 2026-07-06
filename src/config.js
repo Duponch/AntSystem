@@ -61,9 +61,10 @@ export const params = {
 	brushRadius: 10,                   // texels
 	foodAmount: 1,                     // unités par bille : 1 = prise → disparue
 
-	// Prédateurs
+	// Prédateurs et défense
 	spiderCount: 1,                    // araignées (0 = désactivé)
 	spiderAggro: 0.5,                  // agressivité (détection, vitesse, cadence)
+	soldierRatio: 0.12,                // part de soldates (chargent au lieu de fuir)
 
 	// Affichage
 	trailIntensity: 1.0,
@@ -98,6 +99,7 @@ export const gfx = {
 	groundColorB: '#4a5c3a',           // mousse claire
 	antColor: '#16120e',
 	antAccentColor: '#4a5578',         // yeux / antennes
+	soldierColor: '#5a2716',           // caste soldate
 	anthillColor: '#7a5230',           // marron terre
 	foodColor: '#ff9d3a',
 

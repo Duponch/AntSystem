@@ -8,7 +8,7 @@
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, texture, uniform, positionWorld,
+	Fn, texture, uniform, positionWorld, time, sin,
 	vec3, float, color, mix, clamp, smoothstep, length, pow, mx_noise_float,
 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -35,13 +35,12 @@ export function makeFieldSampler( sim, uvNode ) {
 
 }
 
-// Champ packé : B (f.z) = nourriture (+) / mur (−) ; A (f.w) = halo lumineux.
+// Champ packé : B (f.z) = alarme (+) / mur (−) ; A (f.w) = halo lumineux.
 
 // Albédo du sol en un point (worldXZ vec2, f = échantillon vec4 du champ).
 export function groundAlbedo( worldXZ, f ) {
 
 	const wallM = smoothstep( 0.2, 0.8, f.z.negate() ).mul( uShowWalls );
-	const foodM = clamp( f.z, 0, 1 );
 
 	// mousse : deux verts mélangés par un bruit organique multi-échelle
 	const patches = mx_noise_float( worldXZ.mul( 0.055 ) ).mul( 0.5 ).add( 0.5 );
@@ -56,8 +55,6 @@ export function groundAlbedo( worldXZ, f ) {
 	col.mulAssign( vignette );
 
 	col.assign( mix( col, color( 0x4a453c ), wallM ) );  // murs/terre
-	// (la nourriture n'est plus peinte au sol : de vraies billes 3D la portent)
-	void foodM;
 
 	return col;
 
@@ -67,7 +64,6 @@ export function groundAlbedo( worldXZ, f ) {
 export function groundEmissive( f ) {
 
 	const wallM = smoothstep( 0.2, 0.8, f.z.negate() ).mul( uShowWalls );
-	const foodM = clamp( f.z, 0, 1 );
 	const halo = clamp( f.w, 0, 1 );
 
 	// contraste réglable : gamma bas = les pistes faibles (fourmis lointaines
@@ -75,16 +71,22 @@ export function groundEmissive( f ) {
 	const home = vec3( 0.05, 0.4, 1.0 ).mul( pow( clamp( f.x, 0, 1 ), uTrailGamma ) ).mul( 0.45 );
 	const food = vec3( 1.0, 0.33, 0.05 ).mul( pow( clamp( f.y, 0, 1 ), uTrailGamma ) ).mul( 0.9 );
 
-	const trails = home.add( food ).mul( uTrail )
-		.mul( float( 1 ).sub( wallM ) )
-		.mul( float( 1 ).sub( foodM.mul( 0.85 ) ) );
+	const trails = home.add( food ).mul( uTrail ).mul( float( 1 ).sub( wallM ) );
 
 	// halo au sol autour des billes (fondu exponentiel diffusé par la grille)
 	const glow = uFoodColor
 		.mul( halo.mul( halo ).mul( uHaloStrength ) )
 		.mul( float( 1 ).sub( wallM ) );
 
-	return trails.add( glow );
+	// alarme : lueur rouge pulsante là où la colonie a paniqué / combat
+	const alarmM = clamp( f.z, 0, 1 );
+	const alarmGlow = vec3( 1.0, 0.12, 0.06 )
+		.mul( pow( alarmM, 1.6 ) )
+		.mul( sin( time.mul( 5 ) ).mul( 0.2 ).add( 0.8 ) )
+		.mul( 0.9 )
+		.mul( float( 1 ).sub( wallM ) );
+
+	return trails.add( glow ).add( alarmGlow );
 
 }
 

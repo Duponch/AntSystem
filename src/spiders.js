@@ -34,7 +34,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		idle: gltf.animations.find( ( a ) => a.name.includes( 'Idle' ) ),
 		walk: gltf.animations.find( ( a ) => a.name.includes( 'Walk' ) ),
 		attack: gltf.animations.find( ( a ) => a.name.includes( 'Attack' ) ),
+		death: gltf.animations.find( ( a ) => a.name.includes( 'Death' ) ),
 	};
+
+	const MAX_HP = 100;
 
 	// ------------------------------------------------------------------
 	const spiders = [];
@@ -63,9 +66,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			idle: mixer.clipAction( clips.idle ),
 			walk: mixer.clipAction( clips.walk ),
 			attack: mixer.clipAction( clips.attack ),
+			death: mixer.clipAction( clips.death ),
 		};
 		actions.attack.setLoop( THREE.LoopOnce );
 		actions.attack.clampWhenFinished = true;
+		actions.death.setLoop( THREE.LoopOnce );
+		actions.death.clampWhenFinished = true;
 
 		const a0 = ( i / MAX_SPIDERS ) * Math.PI * 2 + 0.9;
 
@@ -78,6 +84,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			heading: Math.random() * Math.PI * 2,
 			target: new THREE.Vector2(),
 			killActive: 0,
+			hp: MAX_HP,
+			lastBites: 0,
+			biteWindow: 0,
 		} );
 
 		group.add( root );
@@ -121,6 +130,37 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		} catch { /* device occupé */ } finally {
 
 			polling = false;
+
+		}
+
+	}
+
+	// --- morsures des soldates : compteurs stats[3..6], relevés ~2×/s ---
+	let dmgAccum = 0;
+	let dmgPolling = false;
+
+	async function pollDamage() {
+
+		if ( dmgPolling ) return;
+		dmgPolling = true;
+
+		try {
+
+			const buf = await renderer.getArrayBufferAsync( sim.stats.value );
+			const d = new Uint32Array( buf );
+
+			for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+
+				const bites = d[ 3 + i ] || 0;
+				const delta = Math.max( 0, bites - spiders[ i ].lastBites );  // reset → 0
+				spiders[ i ].lastBites = bites;
+				spiders[ i ].biteWindow = delta;
+
+			}
+
+		} catch { /* device occupé */ } finally {
+
+			dmgPolling = false;
 
 		}
 
@@ -186,7 +226,82 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		sp.t -= dt;
 		sp.killActive = 0;
 
-		if ( sp.state === 'idle' ) {
+		// dégâts des soldates : usure, retraite sous la pression, mort
+		if ( sp.biteWindow > 0 && sp.state !== 'death' && sp.state !== 'respawn' ) {
+
+			sp.hp -= sp.biteWindow * 0.006;
+			const pressed = sp.biteWindow > 110;
+			sp.biteWindow = 0;
+
+			if ( sp.hp <= 0 ) {
+
+				sp.state = 'death';
+				sp.t = ( clips.death ? clips.death.duration : 1.5 ) + 1.6;
+				play( sp, 'death', 0.1, 1 );
+				return;
+
+			}
+
+			if ( pressed && sp.state !== 'attack' ) {
+
+				// trop de morsures : elle décroche et détale loin du nid
+				sp.state = 'retreat';
+				sp.t = 3.5;
+
+			}
+
+		}
+
+		if ( sp.state === 'death' ) {
+
+			if ( sp.t <= 0 ) {
+
+				sp.state = 'respawn';
+				sp.t = 20;
+				sp.root.visible = false;
+
+			}
+
+			sp.mixer.update( dt );
+			return;
+
+		}
+
+		if ( sp.state === 'respawn' ) {
+
+			if ( sp.t <= 0 ) {
+
+				const a = Math.random() * Math.PI * 2;
+				sp.pos.set( Math.cos( a ) * ( WORLD / 2 - 10 ), Math.sin( a ) * ( WORLD / 2 - 10 ) );
+				sp.hp = MAX_HP;
+				sp.state = 'idle';
+				sp.t = 2;
+				sp.root.visible = true;
+				play( sp, 'idle', 0 );
+
+			}
+
+			return;
+
+		}
+
+		if ( sp.state === 'retreat' ) {
+
+			// cap opposé au nid, à toute vitesse
+			turnToward( sp, sp.pos.x * 3, sp.pos.y * 3, 4.5 * dt );
+			steerClear( sp );
+			sp.pos.x += Math.cos( sp.heading ) * 5.2 * dt;
+			sp.pos.y += Math.sin( sp.heading ) * 5.2 * dt;
+			play( sp, 'walk', 0.12, 2.1 );
+
+			if ( sp.t <= 0 ) {
+
+				sp.state = 'idle';
+				sp.t = 3 + Math.random() * 3;
+
+			}
+
+		} else if ( sp.state === 'idle' ) {
 
 			play( sp, 'idle' );
 
@@ -276,6 +391,15 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 				pollAccum = 0;
 				pollAnt();
+
+			}
+
+			dmgAccum += simDt;
+
+			if ( dmgAccum > 0.45 && count > 0 ) {
+
+				dmgAccum = 0;
+				pollDamage();
 
 			}
 
