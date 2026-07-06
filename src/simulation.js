@@ -61,7 +61,13 @@ export class AntSimulation {
 			ballSpacing: uniform( gfx.foodBallSpacing ),  // texels entre billes de nourriture
 			haloSpread: uniform( gfx.haloSpread ),        // portée du halo lumineux
 			seed: uniform( 0 ),                           // graine de run (banc d'essai)
+			spiderCount: uniform( 0 ),                    // prédateurs actifs
+			fleeRadius: uniform( 35 ),                    // rayon de panique (texels)
 		};
+
+		// araignées : (x, y grille, frappe en cours 0/1, rayon de mort en texels)
+		this._spiderVecs = Array.from( { length: 4 }, () => new THREE.Vector4() );
+		u.spiders = uniformArray( this._spiderVecs );
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
 		// A = (cx, cy, demi-longueur, demi-largeur) en texels ; B = (axe.x, axe.y, type, 0)
@@ -106,7 +112,7 @@ export class AntSimulation {
 
 		this._brushQueue = [];
 		this._readingStats = false;
-		this.statsData = { delivered: 0, picked: 0 };
+		this.statsData = { delivered: 0, picked: 0, eaten: 0 };
 
 		// nœuds TSL texture(...) qui affichent le champ (sol, herbe…) :
 		// leur .value doit suivre le ping-pong à chaque étape
@@ -199,6 +205,42 @@ export class AntSimulation {
 				const timer = min( a.w.add( u.dt ), 600 ).toVar();
 				const carrying = st.equal( uint( 1 ) ).toVar();
 
+				// --- menace : araignées (panique, fuite, prédation) ---
+				const panic = float( 0 ).toVar();
+				const fleeDir = vec2( 0 ).toVar();
+
+				Loop( { start: int( 0 ), end: u.spiderCount.toInt(), type: 'int', condition: '<' }, ( { i: si } ) => {
+
+					const sp = u.spiders.element( si );
+					const away = pos.sub( sp.xy );
+					const dSp = max( length( away ), 0.001 );
+
+					If( dSp.lessThan( u.fleeRadius ), () => {
+
+						const w = float( 1 ).sub( dSp.div( u.fleeRadius ) );
+						panic.assign( max( panic, w ) );
+						fleeDir.addAssign( away.div( dSp ).mul( w ) );
+
+						// frappe : la fourmi est croquée — une remplaçante sort du nid
+						// (le portage en cours est perdu)
+						If( sp.z.greaterThan( 0.5 ).and( dSp.lessThan( sp.w ) ), () => {
+
+							const rr = sqrt( hash( iseed.add( uint( 0xB5297A4D ) ) ) );
+							const ra = hash( iseed.add( uint( 0x68E31DA4 ) ) ).mul( PI2 );
+							pos.assign( u.nest.add( vec2( cos( ra ), sin( ra ) ).mul( rr.mul( u.nestRadius.mul( 0.7 ) ) ) ) );
+							ang.assign( ra );
+							st.assign( uint( 0 ) );
+							timer.assign( 0 );
+							panic.assign( 0 );
+							fleeDir.assign( vec2( 0 ) );
+							atomicAdd( stats.element( 2 ), uint( 1 ) );
+
+						} );
+
+					} );
+
+				} );
+
 				// --- capteurs : 3 cônes de 3×3 texels sur la carte recherchée ---
 				// (canal B du champ : nourriture si > 0, mur si < 0 ; A = halo, ignoré)
 				const sense = ( angleOffset ) => {
@@ -261,6 +303,20 @@ export class AntSimulation {
 				const wander = u.wander.mul( select( carrying, 0.5, 1 ) );
 				ang.addAssign( r2.sub( 0.5 ).mul( 2 ).mul( wander ).mul( u.dt ) );
 
+				// panique : virage prononcé vers la direction de fuite (sans atan)
+				If( panic.greaterThan( 0.01 ), () => {
+
+					const dirv = vec2( cos( ang ), sin( ang ) );
+					const crossZ = dirv.x.mul( fleeDir.y ).sub( dirv.y.mul( fleeDir.x ) );
+					const dotv = dirv.x.mul( fleeDir.x ).add( dirv.y.mul( fleeDir.y ) );
+					const turn = select( crossZ.greaterThanEqual( 0 ), float( 1 ), float( - 1 ) );
+					ang.addAssign(
+						turn.mul( panic ).mul( u.steer ).mul( 2.2 ).mul( u.dt )
+							.mul( float( 1.4 ).sub( dotv.mul( 0.4 ) ) ),
+					);
+
+				} );
+
 				// --- déplacement + rebond sur murs / bords (réflexion par axe) ---
 				// une fourmi enterrée sous un mur fraîchement peint ignore les murs
 				// (mais pas les bords) le temps d'en sortir
@@ -280,7 +336,8 @@ export class AntSimulation {
 				};
 
 				// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
-				const stepLen = u.moveSpeed.mul( u.dt );
+				// (une fourmi paniquée détale : +45 % de vitesse)
+				const stepLen = u.moveSpeed.mul( u.dt ).mul( panic.mul( 0.45 ).add( 1 ) );
 				const nSub = clamp( ceil( stepLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
 				const subLen = stepLen.div( nSub.toFloat() );
 
@@ -374,10 +431,12 @@ export class AntSimulation {
 				// plus « frais » (atomicMax), pas une accumulation : le gradient vers
 				// la source reste net même sous très fort trafic, aucune saturation.
 				// exploratrice (0) → canal maison (0) ; porteuse (1) → canal nourriture (1)
+				// la peur coupe le dépôt : pas de piste fiable près d'un prédateur —
+				// la colonie apprend d'elle-même à contourner la zone
 				const freshness = clamp(
 					exp( u.fade.negate().mul( timer ) ).mul( u.depositRate.div( 12 ) ),
 					0, 1,
-				).mul( FIXED ).toUint();
+				).mul( float( 1 ).sub( panic.mul( 0.85 ) ) ).mul( FIXED ).toUint();
 
 				If( freshness.greaterThan( uint( 0 ) ), () => {
 
@@ -623,7 +682,7 @@ export class AntSimulation {
 
 		this.cur = 0;
 		this._brushQueue.length = 0;
-		this.statsData = { delivered: 0, picked: 0 };
+		this.statsData = { delivered: 0, picked: 0, eaten: 0 };
 		await this.init();
 
 	}
@@ -796,7 +855,7 @@ export class AntSimulation {
 
 		const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
 		const data = new Uint32Array( buffer );
-		return { delivered: data[ 0 ], picked: data[ 1 ] };
+		return { delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ] };
 
 	}
 
@@ -809,7 +868,7 @@ export class AntSimulation {
 
 			const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
 			const data = new Uint32Array( buffer );
-			this.statsData = { delivered: data[ 0 ], picked: data[ 1 ] };
+			this.statsData = { delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ] };
 
 		} finally {
 

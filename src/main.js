@@ -18,6 +18,7 @@ import { createFoodBalls } from './graphics/foodballs.js';
 import { createDebugCones } from './graphics/debugcones.js';
 import { createBench } from './bench.js';
 import { createEditor } from './editor.js';
+import { createSpiders } from './spiders.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -104,6 +105,8 @@ async function main() {
 	sim.setSavedWalls( localStorage.getItem( 'antsystem-walls-v1' ) );
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
+
+	const spiders = await createSpiders( { scene, sim, renderer, props } );
 
 	const godrays = createGodrays( renderer, scene, camera, sky );
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
@@ -192,6 +195,7 @@ async function main() {
 		}
 
 		ants.tick( simDt, camera );
+		spiders.update( simDt );
 		sky.update( camera );
 		grass.update( camera, rawDt );
 		cinematic.update( rawDt );
@@ -218,7 +222,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

@@ -53,6 +53,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => sim.u.sensorDist.value = v );
 	fBehavior.close();
 
+	const fPredators = gui.addFolder( '🕷 Prédateurs' );
+	fPredators.add( params, 'spiderCount', 0, 3, 1 ).name( 'Araignées' );
+	fPredators.add( params, 'spiderAggro', 0, 1, 0.05 ).name( 'Agressivité' );
+	fPredators.close();
+
 	const fPher = gui.addFolder( 'Phéromones' );
 	fPher.add( params, 'depositRate', 0, 40, 0.5 ).name( 'Dépôt' )
 		.onChange( ( v ) => sim.u.depositRate.value = v );
@@ -518,9 +523,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	function updateOverlay( stats, fps ) {
 
 		const carrying = Math.max( 0, stats.picked - stats.delivered );
+		const eaten = stats.eaten || 0;
 		overlay.innerHTML =
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
+			( params.spiderCount > 0 ? `🕷 ${eaten} croquées · ` : '' ) +
 			`${params.antCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
 			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
 			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +

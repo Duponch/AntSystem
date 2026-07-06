@@ -61,6 +61,10 @@ export const params = {
 	brushRadius: 10,                   // texels
 	foodAmount: 1,                     // unités par bille : 1 = prise → disparue
 
+	// Prédateurs
+	spiderCount: 1,                    // araignées (0 = désactivé)
+	spiderAggro: 0.5,                  // agressivité (détection, vitesse, cadence)
+
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
