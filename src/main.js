@@ -8,7 +8,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { params, gfx } from './config.js';
 import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
-import { createEnvironment } from './environment.js';
+import { createEnvironment, uShowWalls, uTrailGamma } from './environment.js';
 import { createSky } from './graphics/sky.js';
 import { createGrass } from './graphics/grass.js';
 import { createProps } from './graphics/props.js';
@@ -111,10 +111,43 @@ async function main() {
 	const cones = createDebugCones( scene, sim );
 	const editor = createEditor( { scene, camera, renderer, controls, props, sim, ground: env.ground } );
 
+	// --- musique d'ambiance (l'autoplay attend le premier geste utilisateur) ---
+	const musicEl = new Audio( '/music.ogg' );
+	musicEl.loop = true;
+	musicEl.volume = gfx.musicVolume;
+
+	const music = {
+		set( on ) {
+
+			if ( on ) musicEl.play().catch( () => { /* déclenché au prochain geste */ } );
+			else musicEl.pause();
+
+		},
+		setVolume( v ) {
+
+			musicEl.volume = v;
+
+		},
+	};
+
+	if ( gfx.music ) {
+
+		const once = () => {
+
+			if ( gfx.music ) musicEl.play().catch( () => {} );
+			window.removeEventListener( 'pointerdown', once );
+
+		};
+
+		window.addEventListener( 'pointerdown', once );
+		musicEl.play().catch( () => {} );
+
+	}
+
 	// --- interface ---
 	const ui = createUI( {
 		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
-		godrays, cinematic, bench, controls, camera, renderer,
+		godrays, cinematic, bench, music, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -185,7 +218,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

@@ -14,7 +14,7 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, uniform, uv, hash, instanceIndex, positionLocal, time, varyingProperty,
-	float, uint, vec2, vec3, sin, cos, floor, length, smoothstep, transformNormalToView,
+	float, uint, vec2, vec3, sin, cos, floor, length, smoothstep, mix, transformNormalToView,
 } from 'three/tsl';
 
 import { WORLD, gfx } from '../config.js';
@@ -33,6 +33,7 @@ export function createGrass( scene, sim ) {
 		windStrength: uniform( 0.8 ),
 		windGust: uniform( 0 ),
 		cam: uniform( new THREE.Vector2() ),
+		chaos: uniform( gfx.grassChaos ),   // 0 = uniforme, 1 = delta maximal
 	};
 
 	// --- géométrie d'un brin : quad effilé + penché (4 sommets, 2 triangles) ---
@@ -81,12 +82,24 @@ export function createGrass( scene, sim ) {
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bz.abs() ) ) )
 			.mul( smoothstep( 3.6, 5.2, length( root ) ) );
 
-		const height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 ).mul( u.height ).mul( mask );
-		const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 ).mul( u.width ).mul( mask );
+		// irrégularité : le chaos élargit les écarts de taille et couche les
+		// brins dans des directions aléatoires (mêmes hash, coût négligeable)
+		const hVar = hash( instanceIndex.add( uint( 7 ) ) ).sub( 0.5 ).mul( 2 ).mul( u.chaos );
+		const wVar = hash( instanceIndex.add( uint( 91 ) ) ).sub( 0.5 ).mul( 2 ).mul( u.chaos );
+
+		const height = hash( instanceIndex.add( uint( 43 ) ) ).mul( 0.36 ).add( 0.32 )
+			.mul( hVar.mul( 0.6 ).add( 1 ) ).mul( u.height ).mul( mask );
+		const width = hash( instanceIndex.add( uint( 59 ) ) ).mul( 0.55 ).add( 0.72 )
+			.mul( wVar.mul( 0.45 ).add( 1 ) ).mul( u.width ).mul( mask );
 
 		const lx = positionLocal.x.mul( width );
 		const ly = positionLocal.y.mul( height );
 		const lz = positionLocal.z.mul( width );
+
+		// penchaison aléatoire supplémentaire (pointe éparpillée)
+		const leanA = hash( instanceIndex.add( uint( 83 ) ) ).mul( 6.28318530718 );
+		const leanM = hash( instanceIndex.add( uint( 57 ) ) ).mul( u.chaos ).mul( 0.5 )
+			.mul( bladeT.mul( bladeT ) ).mul( height );
 
 		// balancement en espace monde le long du vent (base plantée, pointe souple)
 		// (le saut de phase au recyclage est invisible : le bord est masqué)
@@ -98,9 +111,9 @@ export function createGrass( scene, sim ) {
 		const rz = lz.mul( c ).sub( lx.mul( s ) );
 
 		return vec3(
-			bx.add( rx ).add( u.windDir.x.mul( sway ) ),
+			bx.add( rx ).add( u.windDir.x.mul( sway ) ).add( cos( leanA ).mul( leanM ) ),
 			ly.add( 0.02 ),
-			bz.add( rz ).add( u.windDir.y.mul( sway ) ),
+			bz.add( rz ).add( u.windDir.y.mul( sway ) ).add( sin( leanA ).mul( leanM ) ),
 		);
 
 	} )();
@@ -110,7 +123,17 @@ export function createGrass( scene, sim ) {
 	const rootUv = rootVar.div( WORLD ).add( 0.5 );
 	const fieldNode = makeFieldSampler( sim, rootUv );
 
-	material.colorNode = Fn( () => groundAlbedo( rootVar, fieldNode ) )();
+	material.colorNode = Fn( () => {
+
+		const base = groundAlbedo( rootVar, fieldNode );
+
+		// chaos : teintes plus dispersées + brins secs jaunis épars
+		const tint = hash( instanceIndex.add( uint( 71 ) ) ).sub( 0.5 ).mul( u.chaos ).mul( 0.55 ).add( 1 );
+		const dry = hash( instanceIndex.add( uint( 63 ) ) ).mul( u.chaos ).mul( 0.45 );
+
+		return mix( base.mul( tint ), base.mul( vec3( 1.25, 1.05, 0.55 ) ), dry );
+
+	} )();
 	material.emissiveNode = Fn( () => groundEmissive( fieldNode ) )();
 
 	// normale strictement verticale : éclairé exactement comme le sol

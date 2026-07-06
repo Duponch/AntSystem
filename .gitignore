@@ -1,3 +1,5 @@
 node_modules/
 dist/
 .DS_Store
+# source audio brute (85 Mo) — l'app utilise public/music.ogg
+public/music.wav

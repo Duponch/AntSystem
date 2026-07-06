@@ -9,7 +9,7 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, texture, uniform, positionWorld,
-	vec3, float, color, mix, clamp, smoothstep, length, mx_noise_float,
+	vec3, float, color, mix, clamp, smoothstep, length, pow, mx_noise_float,
 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -17,6 +17,9 @@ import { WORLD, NEST, GRID, params, gfx } from './config.js';
 
 // uniforms partagés sol/herbe (réglés par l'UI)
 export const uTrail = uniform( params.trailIntensity );
+export const uTrailGamma = uniform( gfx.trailGamma );
+// zones de mur visibles seulement en mode pinceau / éditeur
+export const uShowWalls = uniform( 0 );
 export const uGroundA = uniform( new THREE.Color( gfx.groundColorA ) );
 export const uGroundB = uniform( new THREE.Color( gfx.groundColorB ) );
 export const uFoodColor = uniform( new THREE.Color( gfx.foodColor ) );
@@ -37,7 +40,7 @@ export function makeFieldSampler( sim, uvNode ) {
 // Albédo du sol en un point (worldXZ vec2, f = échantillon vec4 du champ).
 export function groundAlbedo( worldXZ, f ) {
 
-	const wallM = smoothstep( 0.2, 0.8, f.z.negate() );
+	const wallM = smoothstep( 0.2, 0.8, f.z.negate() ).mul( uShowWalls );
 	const foodM = clamp( f.z, 0, 1 );
 
 	// mousse : deux verts mélangés par un bruit organique multi-échelle
@@ -63,13 +66,14 @@ export function groundAlbedo( worldXZ, f ) {
 // Émissif du sol : pistes de phéromones + billes luminescentes avec halo.
 export function groundEmissive( f ) {
 
-	const wallM = smoothstep( 0.2, 0.8, f.z.negate() );
+	const wallM = smoothstep( 0.2, 0.8, f.z.negate() ).mul( uShowWalls );
 	const foodM = clamp( f.z, 0, 1 );
 	const halo = clamp( f.w, 0, 1 );
 
-	// quadratique : les pistes structurées ressortent, le voile diffus s'éteint
-	const home = vec3( 0.05, 0.4, 1.0 ).mul( f.x.mul( f.x ) ).mul( 0.45 );
-	const food = vec3( 1.0, 0.33, 0.05 ).mul( f.y.mul( f.y ) ).mul( 0.9 );
+	// contraste réglable : gamma bas = les pistes faibles (fourmis lointaines
+	// du nid, dépôt affaibli) restent visibles ; haut = seules les autoroutes
+	const home = vec3( 0.05, 0.4, 1.0 ).mul( pow( clamp( f.x, 0, 1 ), uTrailGamma ) ).mul( 0.45 );
+	const food = vec3( 1.0, 0.33, 0.05 ).mul( pow( clamp( f.y, 0, 1 ), uTrailGamma ) ).mul( 0.9 );
 
 	const trails = home.add( food ).mul( uTrail )
 		.mul( float( 1 ).sub( wallM ) )

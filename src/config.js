@@ -54,7 +54,9 @@ export const params = {
 	evaporation: 0.012,                // décroissance linéaire par seconde
 	diffusion: 0.25,
 
-	// Outils
+	// Outils — le pinceau ne s'active qu'en « mode pinceau » (les murs ne
+	// sont visibles que dans ce mode ou dans l'éditeur)
+	brushMode: false,
 	tool: 'nourriture',                // 'nourriture' | 'mur' | 'gomme'
 	brushRadius: 10,                   // texels
 	foodAmount: 1,                     // unités par bille : 1 = prise → disparue
@@ -80,7 +82,12 @@ export const gfx = {
 	grassWidth: 0.85,
 	grassRadius: 45,
 	grassWind: 1.0,
+	grassChaos: 0.0,                   // irrégularité des brins (0 = uniforme, 1 = chaos)
 	grassShadows: false,
+
+	// Audio
+	music: false,
+	musicVolume: 0.45,
 
 	// Couleurs
 	groundColorA: '#2b3a21',           // mousse sombre (sol ET herbe)
@@ -98,6 +105,9 @@ export const gfx = {
 	haloStrength: 0.7,                 // halo au sol : intensité
 	haloSize: 1.0,                     // halo lumineux (billboard) : taille
 	haloIntensity: 1.0,                // halo lumineux : intensité
+
+	// Pistes
+	trailGamma: 1.7,                   // contraste des pistes (1 = faibles visibles)
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis
@@ -141,6 +151,7 @@ if ( saved ) {
 
 	params.paused = false;
 	params.cinematic = false;
+	params.brushMode = false;
 
 	// migration : une bille = UNE unité, littéralement prise du sol
 	// (les anciennes sauvegardes portaient 12-30 unités par bille)

@@ -4,13 +4,13 @@ import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
 import { params, gfx, worldToGrid, MAX_ANTS, TEXEL, saveSettings, clearSettings } from './config.js';
-import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength } from './environment.js';
+import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
 import { CATALOG } from './graphics/props.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, controls, camera, renderer, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -64,7 +64,16 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => sim.u.diffuse.value = v );
 	fPher.close();
 
-	const fTools = gui.addFolder( 'Outils (clic gauche)' );
+	// les murs ne sont affichés qu'en mode pinceau ou dans l'éditeur
+	function syncWalls() {
+
+		uShowWalls.value = ( params.brushMode || editor.enabled ) ? 1 : 0;
+
+	}
+
+	const fTools = gui.addFolder( 'Outils' );
+	const brushCtrl = fTools.add( params, 'brushMode' ).name( '✏️ Mode pinceau (B)' )
+		.onChange( () => syncWalls() );
 	fTools.add( params, 'tool', Object.keys( TOOL_MODES ) ).name( 'Outil' );
 	fTools.add( params, 'brushRadius', 4, 40, 1 ).name( 'Taille pinceau' );
 	// (1 bille = 1 unité, littéralement prise du sol — plus de stock caché)
@@ -72,6 +81,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const fDisplay = gui.addFolder( 'Affichage' );
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
 		.onChange( ( v ) => env.uTrail.value = v );
+	fDisplay.add( gfx, 'trailGamma', 0.6, 2.5, 0.05 ).name( 'Contraste pistes' )
+		.onChange( ( v ) => uTrailGamma.value = v );
+	fDisplay.add( gfx, 'music' ).name( '🎵 Musique' ).onChange( ( v ) => music.set( v ) );
+	fDisplay.add( gfx, 'musicVolume', 0, 1, 0.01 ).name( 'Volume' )
+		.onChange( ( v ) => music.setVolume( v ) );
 	// l'animation reste proportionnelle à la vitesse ; ceci règle le rapport
 	fDisplay.add( params, 'walkAnim', 0.2, 4, 0.05 ).name( 'Calibrage animation' );
 	fDisplay.add( params, 'shadows' ).name( 'Ombres' ).onChange( ( v ) => {
@@ -178,6 +192,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fGrass.add( gfx, 'grassRadius', 15, 90, 1 ).name( 'Rayon du tapis' );
 	fGrass.add( gfx, 'grassWind', 0, 1, 0.02 ).name( 'Vent' )
 		.onChange( ( v ) => grass.u.wind.value = v );
+	fGrass.add( gfx, 'grassChaos', 0, 1, 0.01 ).name( 'Irrégularité' )
+		.onChange( ( v ) => grass.u.chaos.value = v );
 	fGrass.add( gfx, 'grassShadows' ).name( 'Ombres des brins' )
 		.onChange( ( v ) => grass.setShadows( v ) );
 
@@ -205,6 +221,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const edToggle = fEdit.add( edState, 'enabled' ).name( 'Activer' ).onChange( ( v ) => {
 
 		editor.setEnabled( v );
+		syncWalls();
 		renderer.domElement.style.cursor = v ? 'default' : 'crosshair';
 		overlayFlash( v
 			? '🛠 Éditeur : clic = sélectionner · glisser = déplacer'
@@ -333,7 +350,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	function updateBrushCursor( event ) {
 
-		if ( editor.enabled || params.cinematic ) {
+		if ( ! params.brushMode || editor.enabled || params.cinematic ) {
 
 			brushCursor.visible = false;
 			return;
@@ -418,7 +435,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	dom.addEventListener( 'pointerdown', ( e ) => {
 
-		if ( e.button !== 0 || editor.enabled ) return;
+		if ( e.button !== 0 || editor.enabled || ! params.brushMode ) return;
 		painting = true;
 		lastStamp = null;
 		stampAt( e );
@@ -457,12 +474,20 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		if ( e.key === ' ' ) {
 
 			params.paused = ! params.paused;
-			gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 			e.preventDefault();
 
-		} else if ( e.key === '1' ) params.tool = 'nourriture';
-		else if ( e.key === '2' ) params.tool = 'mur';
-		else if ( e.key === '3' ) params.tool = 'gomme';
+		} else if ( e.key === 'b' || e.key === 'B' ) {
+
+			params.brushMode = ! params.brushMode;
+			syncWalls();
+
+		} else if ( e.key === '1' || e.key === '2' || e.key === '3' ) {
+
+			params.tool = [ 'nourriture', 'mur', 'gomme' ][ + e.key - 1 ];
+			params.brushMode = true;      // choisir un outil active le pinceau
+			syncWalls();
+
+		}
 
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
@@ -497,8 +522,9 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
 			`${params.antCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
-			`<span style="opacity:.65">Clic gauche : ${params.tool} · Clic droit : orbite · ` +
-			`Clic molette : déplacer · Molette : zoom · Espace : pause · 1/2/3 : outils</span>`;
+			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
+			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +
+			`Espace : pause · 1/2/3 : outils</span>`;
 
 	}
 
