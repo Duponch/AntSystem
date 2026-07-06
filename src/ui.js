@@ -3,12 +3,14 @@
 import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-import { params, gfx, worldToGrid, MAX_ANTS, saveSettings, clearSettings } from './config.js';
+import { params, gfx, worldToGrid, MAX_ANTS, TEXEL, saveSettings, clearSettings } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength } from './environment.js';
+import { CATALOG } from './graphics/props.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
+const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, bench, controls, camera, renderer, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -30,6 +32,7 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 
 		sim.u.antCount.value = v;
 		ants.setCount( v );
+		cones.setCount( v );
 		applyAntShadows();
 
 	} );
@@ -64,8 +67,7 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 	const fTools = gui.addFolder( 'Outils (clic gauche)' );
 	fTools.add( params, 'tool', Object.keys( TOOL_MODES ) ).name( 'Outil' );
 	fTools.add( params, 'brushRadius', 4, 40, 1 ).name( 'Taille pinceau' );
-	fTools.add( params, 'foodAmount', 4, 64, 1 ).name( 'Qté nourriture' )
-		.onChange( () => foodballs.refresh() );
+	// (1 bille = 1 unité, littéralement prise du sol — plus de stock caché)
 
 	const fDisplay = gui.addFolder( 'Affichage' );
 	fDisplay.add( params, 'trailIntensity', 0, 3, 0.05 ).name( 'Intensité pistes' )
@@ -82,6 +84,8 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 	const cineCtrl = fDisplay.add( params, 'cinematic' ).name( '🎬 Caméra cinématique' )
 		.onChange( ( v ) => cinematic.setEnabled( v ) );
 	cinematic.bindController( cineCtrl );
+	fDisplay.add( gfx, 'debugCones' ).name( '🔍 Cônes de vision (debug)' )
+		.onChange( ( v ) => cones.setVisible( v ) );
 	fDisplay.close();
 	applyAntShadows();
 
@@ -194,6 +198,56 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 
 	fGfx.close();
 
+	// --- éditeur de décor ---
+	const fEdit = gui.addFolder( '🛠 Éditeur de décor' );
+	const edState = { enabled: false, model: 'Tree_07', rotation: 0, scale: 1 };
+
+	const edToggle = fEdit.add( edState, 'enabled' ).name( 'Activer' ).onChange( ( v ) => {
+
+		editor.setEnabled( v );
+		renderer.domElement.style.cursor = v ? 'default' : 'crosshair';
+		overlayFlash( v
+			? '🛠 Éditeur : clic = sélectionner · glisser = déplacer'
+			: 'Éditeur désactivé' );
+
+	} );
+
+	fEdit.add( edState, 'model', Object.keys( CATALOG ) ).name( 'Modèle' );
+	fEdit.add( { place: () => {
+
+		if ( ! edState.enabled ) {
+
+			edState.enabled = true;
+			editor.setEnabled( true );
+			edToggle.updateDisplay();
+
+		}
+
+		editor.startPlacing( edState.model );
+		overlayFlash( `➕ Cliquez sur la carte pour poser « ${edState.model} »` );
+
+	} }, 'place' ).name( '➕ Placer (puis clic carte)' );
+
+	const edRot = fEdit.add( edState, 'rotation', 0, 360, 1 ).name( 'Rotation (°)' )
+		.onChange( ( v ) => editor.applyToSelection( { yaw: v * Math.PI / 180 } ) );
+	const edScale = fEdit.add( edState, 'scale', 0.2, 40, 0.1 ).name( 'Taille' )
+		.onChange( ( v ) => editor.applyToSelection( { scale: v } ) );
+	fEdit.add( { del: () => editor.deleteSelection() }, 'del' ).name( '🗑 Supprimer la sélection' );
+	fEdit.close();
+
+	// le panneau reflète l'objet sélectionné
+	editor.bindOnSelect( ( sel ) => {
+
+		if ( ! sel ) return;
+		const p = sel.entry.placements[ sel.index ];
+		edState.rotation = Math.round( ( ( p.yaw || 0 ) * 180 / Math.PI ) % 360 + 360 ) % 360;
+		edState.scale = p.scale;
+		edRot.updateDisplay();
+		edScale.updateDisplay();
+		overlayFlash( `Sélection : ${sel.entry.model}` );
+
+	} );
+
 	// --- banc d'essai statistique ---
 	const fBench = gui.addFolder( '🧪 Banc d\'essai' );
 	const benchCfg = { runs: 5, seconds: 90 };
@@ -214,10 +268,16 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 
 		saveSettings();
 
+		if ( props.isEdited() ) {
+
+			localStorage.setItem( 'antsystem-decor-v1', JSON.stringify( props.exportDoc() ) );
+
+		}
+
 		try {
 
 			localStorage.setItem( 'antsystem-walls-v1', await sim.readWallsBase64() );
-			overlayFlash( '💾 Réglages et murs sauvegardés' );
+			overlayFlash( '💾 Réglages, décor et murs sauvegardés' );
 
 		} catch {
 
@@ -231,6 +291,7 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 
 		clearSettings();
 		localStorage.removeItem( 'antsystem-walls-v1' );
+		localStorage.removeItem( 'antsystem-decor-v1' );
 		location.reload();
 
 	} }, 'reset' ).name( '♻️ Réglages par défaut' );
@@ -255,6 +316,51 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 	let painting = false;
 	let lastStamp = null;
 	let paintedThisFrame = false;
+
+	// --- curseur du pinceau : cercle au sol de la taille du pinceau ---
+	const brushCursor = new THREE.Mesh(
+		new THREE.RingGeometry( 0.92, 1, 48 ).rotateX( - Math.PI / 2 ),
+		new THREE.MeshBasicNodeMaterial( {
+			color: TOOL_COLORS[ params.tool ], transparent: true, opacity: 0.9,
+			depthWrite: false, fog: false,
+		} ),
+	);
+	brushCursor.position.y = 0.05;
+	brushCursor.renderOrder = 4;
+	brushCursor.visible = false;
+	scene.add( brushCursor );
+	renderer.domElement.style.cursor = 'crosshair';
+
+	function updateBrushCursor( event ) {
+
+		if ( editor.enabled || params.cinematic ) {
+
+			brushCursor.visible = false;
+			return;
+
+		}
+
+		const rect = renderer.domElement.getBoundingClientRect();
+		pointer.set(
+			( ( event.clientX - rect.left ) / rect.width ) * 2 - 1,
+			- ( ( event.clientY - rect.top ) / rect.height ) * 2 + 1,
+		);
+		raycaster.setFromCamera( pointer, camera );
+		const hit = raycaster.intersectObject( env.ground, false )[ 0 ];
+
+		if ( ! hit ) {
+
+			brushCursor.visible = false;
+			return;
+
+		}
+
+		brushCursor.position.set( hit.point.x, 0.05, hit.point.z );
+		brushCursor.scale.setScalar( params.brushRadius * TEXEL );
+		brushCursor.material.color.set( TOOL_COLORS[ params.tool ] );
+		brushCursor.visible = true;
+
+	}
 
 	function stampAt( event ) {
 
@@ -312,7 +418,7 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 
 	dom.addEventListener( 'pointerdown', ( e ) => {
 
-		if ( e.button !== 0 ) return;
+		if ( e.button !== 0 || editor.enabled ) return;
 		painting = true;
 		lastStamp = null;
 		stampAt( e );
@@ -320,7 +426,9 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 	} );
 	dom.addEventListener( 'pointermove', ( e ) => {
 
-		if ( ! painting ) return;
+		updateBrushCursor( e );
+
+		if ( ! painting || editor.enabled ) return;
 
 		// pointerup raté (perte de focus, sortie de fenêtre…) : on s'auto-répare
 		if ( ( e.buttons & 1 ) === 0 ) {
@@ -331,6 +439,11 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 		}
 
 		stampAt( e );
+
+	} );
+	dom.addEventListener( 'pointerleave', () => {
+
+		brushCursor.visible = false;
 
 	} );
 	window.addEventListener( 'pointerup', stopPainting );

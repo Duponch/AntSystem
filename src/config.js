@@ -99,6 +99,9 @@ export const gfx = {
 	haloSize: 1.0,                     // halo lumineux (billboard) : taille
 	haloIntensity: 1.0,                // halo lumineux : intensité
 
+	// Débogage
+	debugCones: false,                 // cônes de vision des fourmis
+
 	// Performances (LOD des fourmis)
 	lodDist0: 16,                      // rayon plein détail (unités monde)
 	lodDist1: 42,                      // distance d'animation — au-delà : silhouette figée
@@ -138,6 +141,10 @@ if ( saved ) {
 
 	params.paused = false;
 	params.cinematic = false;
+
+	// migration : une bille = UNE unité, littéralement prise du sol
+	// (les anciennes sauvegardes portaient 12-30 unités par bille)
+	params.foodAmount = 1;
 
 }
 

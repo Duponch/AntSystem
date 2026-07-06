@@ -15,7 +15,9 @@ import { createProps } from './graphics/props.js';
 import { createGodrays } from './graphics/godrays.js';
 import { createCinematic } from './graphics/cinematic.js';
 import { createFoodBalls } from './graphics/foodballs.js';
+import { createDebugCones } from './graphics/debugcones.js';
 import { createBench } from './bench.js';
+import { createEditor } from './editor.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -79,10 +81,19 @@ async function main() {
 	const sim = new AntSimulation( renderer );
 	const sky = createSky( scene );
 
+	// décor édité sauvegardé (sinon génération procédurale)
+	let decorDoc = null;
+
+	try {
+
+		decorDoc = JSON.parse( localStorage.getItem( 'antsystem-decor-v1' ) ) || null;
+
+	} catch { /* document illisible : on repart du procédural */ }
+
 	// sol/fourmilière + décor + fourmis en parallèle (chargements de fichiers)
 	const [ env, props, ants ] = await Promise.all( [
 		createEnvironment( scene, sim ),
-		createProps( scene ),
+		createProps( scene, decorDoc ),
 		createAnts( sim ),
 	] );
 	const grass = createGrass( scene, sim );
@@ -97,10 +108,13 @@ async function main() {
 	const godrays = createGodrays( renderer, scene, camera, sky );
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
 	const bench = createBench( { sim } );
+	const cones = createDebugCones( scene, sim );
+	const editor = createEditor( { scene, camera, renderer, controls, props, sim, ground: env.ground } );
 
 	// --- interface ---
 	const ui = createUI( {
-		sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, bench, controls, camera, renderer,
+		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
+		godrays, cinematic, bench, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -171,7 +185,7 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

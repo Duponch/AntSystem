@@ -547,7 +547,10 @@ export class AntSimulation {
 									const b8 = b.add( vec2( 8 ) );          // graines positives
 									const jx = hash( b8.x.mul( 127.1 ).add( b8.y.mul( 311.7 ) ) );
 									const jy = hash( b8.x.mul( 269.5 ).add( b8.y.mul( 183.3 ) ) );
-									const center = b.add( vec2( 0.1 ) ).add( vec2( jx, jy ).mul( 0.8 ) ).mul( P );
+									// jitter borné à ±0.25·P : deux centres adjacents sont
+									// toujours séparés d'au moins 0.5·P — jamais de billes
+									// imbriquées (le rayon visuel est plafonné en dessous)
+									const center = b.add( vec2( 0.25 ) ).add( vec2( jx, jy ).mul( 0.5 ) ).mul( P );
 									const cell = floor( center );
 
 									// ce texel est-il LA cellule de la bille, et la bille dans le pinceau ?

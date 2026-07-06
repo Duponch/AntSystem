@@ -17,7 +17,7 @@ import {
 	float, uint, vec2, vec3, floor, length, min, clamp, pow, select, cross, normalize, smoothstep,
 } from 'three/tsl';
 
-import { GRID, WORLD, gfx, params } from '../config.js';
+import { GRID, WORLD, TEXEL, gfx, params } from '../config.js';
 import { uFoodColor, uFoodGlow } from '../environment.js';
 
 export function createFoodBalls( scene, sim ) {
@@ -46,15 +46,19 @@ export function createFoodBalls( scene, sim ) {
 		const b8 = bloc.add( vec2( 8 ) );
 		const jx = hash( b8.x.mul( 127.1 ).add( b8.y.mul( 311.7 ) ) );
 		const jy = hash( b8.x.mul( 269.5 ).add( b8.y.mul( 183.3 ) ) );
-		const center = bloc.add( vec2( 0.1 ) ).add( vec2( jx, jy ).mul( 0.8 ) ).mul( u.spacing );
+		// MÊME jitter borné que le pinceau : séparation mini 0.5·P garantie
+		const center = bloc.add( vec2( 0.25 ) ).add( vec2( jx, jy ).mul( 0.5 ) ).mul( u.spacing );
 
 		const cell = floor( center );
 		const idx = cell.y.toInt().mul( GRID ).add( cell.x.toInt() );
 		const stock = foodRead.element( idx ).toFloat();
 
+		// rayon visuel plafonné sous la demi-séparation : chevauchement impossible
+		const radius = min( u.ballSize, u.spacing.mul( TEXEL * 0.22 ) );
+
 		// échelle : pleine → 0, en racine cubique (fond de bille persistant)
 		const fill = clamp( stock.div( u.foodRef ), 0, 1 );
-		const scale = u.ballSize.mul( pow( fill, 0.34 ) ).mul( select( stock.greaterThan( 0.5 ), 1, 0 ) );
+		const scale = radius.mul( pow( fill, 0.34 ) ).mul( select( stock.greaterThan( 0.5 ), 1, 0 ) );
 
 		const world = vec3(
 			center.x.div( GRID ).sub( 0.5 ).mul( WORLD ),

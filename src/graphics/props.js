@@ -16,6 +16,29 @@ import { WORLD, GRID, worldToGrid, gfx } from '../config.js';
 
 const T = GRID / WORLD;   // texels par unité monde
 
+// catalogue des modèles plaçables par l'éditeur de décor
+export const CATALOG = {
+	Tree_01: { fit: 'height', category: 'trees', defaultScale: 18 },
+	Tree_02: { fit: 'height', category: 'trees', defaultScale: 26 },
+	Tree_06: { fit: 'height', category: 'trees', defaultScale: 17 },
+	Tree_07: { fit: 'height', category: 'trees', defaultScale: 20 },
+	Tree_08: { fit: 'height', category: 'trees', defaultScale: 16 },
+	Log_01: { fit: 'length', category: 'obstacles', defaultScale: 12 },
+	Log_02: { fit: 'length', category: 'obstacles', defaultScale: 9 },
+	Branch: { fit: 'length', category: 'obstacles', defaultScale: 6 },
+	Stump_01: { fit: 'height', category: 'obstacles', defaultScale: 1.6 },
+	BigRock_03: { fit: 'height', category: 'obstacles', defaultScale: 3.4 },
+	Rock_01: { fit: 'footprint', category: 'rocks', defaultScale: 0.8 },
+	Rock_02: { fit: 'footprint', category: 'rocks', defaultScale: 0.8 },
+	Rock_03: { fit: 'footprint', category: 'rocks', defaultScale: 0.8 },
+	Rock_04: { fit: 'footprint', category: 'rocks', defaultScale: 0.8 },
+	Rock_05: { fit: 'footprint', category: 'rocks', defaultScale: 0.8 },
+	Mushroom_01: { fit: 'height', category: 'mushrooms', defaultScale: 1.0 },
+	Mushroom_03: { fit: 'height', category: 'mushrooms', defaultScale: 0.9 },
+	Plant_01: { fit: 'footprint', category: 'plants', defaultScale: 2.6 },
+	Plant_02: { fit: 'footprint', category: 'plants', defaultScale: 2.6 },
+};
+
 // ---------------------------------------------------------------------------
 // Composition de la clairière (coordonnées monde, terrain ±80)
 // ---------------------------------------------------------------------------
@@ -55,7 +78,7 @@ function mulberry32( seed ) {
 
 // ---------------------------------------------------------------------------
 
-export async function createProps( scene ) {
+export async function createProps( scene, savedDoc = null ) {
 
 	// --- atlas partagé (réglages anti-bleeding du projet source) ---
 	const atlas = await new THREE.TextureLoader().loadAsync( '/assets/Texture_01.png' );
@@ -128,7 +151,9 @@ export async function createProps( scene ) {
 	// --- placement instancié, avec registre par catégorie (échelles UI) ---
 	const group = new THREE.Group();
 	const dummy = new THREE.Object3D();
-	const registry = [];   // { mesh, placements, category }
+	const registry = [];   // { mesh, placements, category, model, fit }
+	const sizes = new Map();
+	let edited = false;
 
 	const CATEGORY_KEY = {
 		trees: 'scaleTrees', obstacles: 'scaleObstacles',
@@ -149,22 +174,34 @@ export async function createProps( scene ) {
 
 		} );
 
+		entry.mesh.count = entry.placements.length;
 		entry.mesh.instanceMatrix.needsUpdate = true;
+		entry.mesh.computeBoundingSphere();
+
+	}
+
+	function makeMesh( geo, capacity ) {
+
+		const mesh = new THREE.InstancedMesh( geo, material, capacity );
+		mesh.castShadow = true;
+		mesh.receiveShadow = true;
+		return mesh;
 
 	}
 
 	async function addInstances( name, fit, placements, category ) {
 
-		const { geo } = await loadUnitGeo( name, fit );
-		const mesh = new THREE.InstancedMesh( geo, material, placements.length );
-		const entry = { mesh, placements, category };
+		const { geo, size } = await loadUnitGeo( name, fit );
+		sizes.set( name, size );
+
+		// marge de capacité : l'éditeur peut ajouter sans réallouer
+		const mesh = makeMesh( geo, placements.length + 24 );
+		const entry = { mesh, placements, category, model: name, fit };
 		writeMatrices( entry );
 
-		mesh.castShadow = true;
-		mesh.receiveShadow = true;
 		group.add( mesh );
 		registry.push( entry );
-		return mesh;
+		return entry;
 
 	}
 
@@ -177,6 +214,89 @@ export async function createProps( scene ) {
 		}
 
 	}
+
+	// ------------------------------------------------------------------
+	// API de l'éditeur de décor
+	// ------------------------------------------------------------------
+	async function addPlacement( model, placement ) {
+
+		const info = CATALOG[ model ];
+		let entry = registry.find( ( e ) => e.model === model );
+
+		if ( ! entry ) {
+
+			entry = await addInstances( model, info.fit, [ placement ], info.category );
+
+		} else if ( entry.placements.length >= entry.mesh.instanceMatrix.count ) {
+
+			// capacité pleine : mesh réalloué en double
+			group.remove( entry.mesh );
+			entry.mesh.dispose();
+			entry.mesh = makeMesh( entry.mesh.geometry, entry.placements.length * 2 + 24 );
+			group.add( entry.mesh );
+			entry.placements.push( placement );
+			writeMatrices( entry );
+
+		} else {
+
+			entry.placements.push( placement );
+			writeMatrices( entry );
+
+		}
+
+		edited = true;
+		return { entry, index: entry.placements.length - 1 };
+
+	}
+
+	function updatePlacement( entry, index, patch ) {
+
+		Object.assign( entry.placements[ index ], patch );
+		writeMatrices( entry );
+		edited = true;
+
+	}
+
+	function removePlacement( entry, index ) {
+
+		entry.placements.splice( index, 1 );
+		writeMatrices( entry );
+		edited = true;
+
+	}
+
+	function exportDoc() {
+
+		return registry
+			.filter( ( e ) => e.placements.length > 0 )
+			.map( ( e ) => ( {
+				model: e.model,
+				fit: e.fit,
+				category: e.category,
+				placements: e.placements.map( ( p ) => ( {
+					x: + p.x.toFixed( 2 ), z: + p.z.toFixed( 2 ),
+					yaw: + ( p.yaw || 0 ).toFixed( 3 ), scale: + p.scale.toFixed( 2 ),
+				} ) ),
+			} ) );
+
+	}
+
+	// --- décor : document sauvegardé (éditeur) OU génération procédurale ---
+	if ( savedDoc ) {
+
+		for ( const d of savedDoc ) {
+
+			await addInstances( d.model, d.fit, d.placements, d.category );
+
+		}
+
+	} else {
+
+		await buildProcedural();
+
+	}
+
+	async function buildProcedural() {
 
 	// positions de référence définies pour une carte de 160 : on les met à
 	// l'échelle de la carte réelle (les TAILLES d'objets, elles, ne bougent pas)
@@ -320,61 +440,66 @@ export async function createProps( scene ) {
 	await addInstances( 'Plant_01', 'footprint', ferns.filter( ( _, i ) => i % 2 === 0 ), 'plants' );
 	await addInstances( 'Plant_02', 'footprint', ferns.filter( ( _, i ) => i % 2 === 1 ), 'plants' );
 
+	}   // fin buildProcedural
+
 	scene.add( group );
 
 	// --- empreintes physiques pour la grille de murs (coordonnées texels) ---
-	// dérivées de l'encombrement réel × échelles de catégorie (recalculables)
-	const allTrees = [ ...innerTrees, ...heroTrees ];
-
-	for ( const list of ring.values() ) {
-
-		for ( const t of list ) {
-
-			if ( Math.max( Math.abs( t.x ), Math.abs( t.z ) ) < half - 2 ) allTrees.push( t );
-
-		}
-
-	}
-
+	// dérivées du REGISTRE (procédural comme édité) : encombrement mesuré ×
+	// échelle posée × échelle de catégorie
 	function computeWallStamps() {
 
 		const stamps = [];
 		const oScale = gfx.scaleObstacles || 1;
 		const tScale = gfx.scaleTrees || 1;
+		const inMap = ( p ) => Math.max( Math.abs( p.x ), Math.abs( p.z ) ) < WORLD / 2 - 2;
 
-		for ( const o of obstacles ) {
+		for ( const e of registry ) {
 
-			const size = obstacleSizes.get( o.model );
-			const g = worldToGrid( o.x, o.z );
-			const footX = size.x * o.scale * oScale;
-			const footZ = size.z * o.scale * oScale;
+			if ( e.category === 'obstacles' ) {
 
-			if ( Math.max( footX, footZ ) / Math.min( footX, footZ ) > 1.3 ) {
+				const size = sizes.get( e.model );
 
-				// empreinte oblongue : rectangle orienté, axe = longueur Z du modèle
-				// en coordonnées grille (gx = x monde, gy = z monde)
-				stamps.push( {
-					type: 1, cx: g.x, cy: g.y,
-					hw: ( footZ / 2 ) * 0.95 * T, hh: ( footX / 2 ) * 0.9 * T,
-					ax: Math.sin( o.yaw ), ay: Math.cos( o.yaw ),
-				} );
+				for ( const p of e.placements ) {
 
-			} else {
+					if ( ! inMap( p ) ) continue;
+					const g = worldToGrid( p.x, p.z );
+					const footX = size.x * p.scale * oScale;
+					const footZ = size.z * p.scale * oScale;
 
-				stamps.push( {
-					type: 0, cx: g.x, cy: g.y,
-					hw: ( ( footX + footZ ) / 4 ) * 0.95 * T, hh: 0, ax: 1, ay: 0,
-				} );
+					if ( Math.max( footX, footZ ) / Math.min( footX, footZ ) > 1.3 ) {
+
+						// empreinte oblongue : rectangle orienté, axe = longueur Z
+						// du modèle en grille (gx = x monde, gy = z monde)
+						stamps.push( {
+							type: 1, cx: g.x, cy: g.y,
+							hw: ( footZ / 2 ) * 0.95 * T, hh: ( footX / 2 ) * 0.9 * T,
+							ax: Math.sin( p.yaw || 0 ), ay: Math.cos( p.yaw || 0 ),
+						} );
+
+					} else {
+
+						stamps.push( {
+							type: 0, cx: g.x, cy: g.y,
+							hw: ( ( footX + footZ ) / 4 ) * 0.95 * T, hh: 0, ax: 1, ay: 0,
+						} );
+
+					}
+
+				}
+
+			} else if ( e.category === 'trees' ) {
+
+				for ( const p of e.placements ) {
+
+					if ( ! inMap( p ) ) continue;
+					const g = worldToGrid( p.x, p.z );
+					const r = Math.max( 1.0, 0.05 * p.scale * tScale );
+					stamps.push( { type: 0, cx: g.x, cy: g.y, hw: r * T, hh: 0, ax: 1, ay: 0 } );
+
+				}
 
 			}
-
-		}
-
-		for ( const t of allTrees ) {
-
-			const g = worldToGrid( t.x, t.z );
-			const r = Math.max( 1.0, 0.05 * t.scale * tScale );
-			stamps.push( { type: 0, cx: g.x, cy: g.y, hw: r * T, hh: 0, ax: 1, ay: 0 } );
 
 		}
 
@@ -382,6 +507,17 @@ export async function createProps( scene ) {
 
 	}
 
-	return { group, wallStamps: computeWallStamps(), computeWallStamps, setCategoryScale };
+	return {
+		group,
+		registry,
+		wallStamps: computeWallStamps(),
+		computeWallStamps,
+		setCategoryScale,
+		addPlacement,
+		updatePlacement,
+		removePlacement,
+		exportDoc,
+		isEdited: () => edited,
+	};
 
 }
