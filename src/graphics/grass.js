@@ -131,6 +131,7 @@ export function createGrass( scene, sim ) {
 	// --- vent animé (errance lente + rafales) ---
 	let windAngle = 0.6;
 	let windTime = 0;
+	const fwd = new THREE.Vector3();
 
 	function update( camera, dt ) {
 
@@ -140,7 +141,14 @@ export function createGrass( scene, sim ) {
 		u.windStrength.value = 0.75 + 0.35 * Math.sin( windTime * 0.4 );
 		u.windGust.value = Math.max( 0, Math.sin( windTime * 0.9 ) * Math.sin( windTime * 0.23 ) );
 
-		u.cam.value.set( camera.position.x, camera.position.z );
+		// disque décalé DEVANT la caméra : les brins couvrent ce qu'on regarde
+		// au lieu d'être calculés pour moitié dans le dos
+		camera.getWorldDirection( fwd );
+		const ahead = gfx.grassRadius * 0.45;
+		u.cam.value.set(
+			camera.position.x + fwd.x * ahead,
+			camera.position.z + fwd.z * ahead,
+		);
 		u.radius.value = gfx.grassRadius;
 
 		// densité : pleine près du sol, 12 % vu de très haut

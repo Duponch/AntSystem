@@ -99,6 +99,11 @@ export const gfx = {
 	haloSize: 1.0,                     // halo lumineux (billboard) : taille
 	haloIntensity: 1.0,                // halo lumineux : intensité
 
+	// Performances (LOD des fourmis)
+	lodDist0: 16,                      // rayon plein détail (unités monde)
+	lodDist1: 42,                      // distance d'animation — au-delà : silhouette figée
+	lodBudget: 3000,                   // fourmis plein détail max (rétrogradées ensuite)
+
 	// Échelles du décor
 	scaleTrees: 1.0,
 	scaleObstacles: 1.0,

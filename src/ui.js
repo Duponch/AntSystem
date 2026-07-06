@@ -145,6 +145,11 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 	fFood.add( gfx, 'haloStrength', 0, 2.5, 0.05 ).name( 'Halo au sol : intensité' )
 		.onChange( ( v ) => uHaloStrength.value = v );
 
+	const fPerf = fGfx.addFolder( 'Performances' );
+	fPerf.add( gfx, 'lodDist0', 6, 40, 1 ).name( 'Plein détail (u)' );
+	fPerf.add( gfx, 'lodDist1', 20, 100, 1 ).name( 'Distance d\'animation (u)' );
+	fPerf.add( gfx, 'lodBudget', 500, 12000, 100 ).name( 'Budget plein détail' );
+
 	const fScales = fGfx.addFolder( 'Tailles du décor' );
 	const rescale = ( cat, restamp ) => () => {
 

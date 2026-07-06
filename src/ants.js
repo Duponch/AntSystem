@@ -17,7 +17,7 @@ import {
 	attribute, positionLocal, cameraPosition,
 	vec2, vec3, vec4, mat3, float, int, ivec2, uint,
 	cos, sin, fract, floor, mix, hash, select, min, abs, normalize, cross, smoothstep, uv,
-	textureLoad, atomicAdd, atomicStore,
+	textureLoad, atomicAdd, atomicStore, atomicLoad,
 } from 'three/tsl';
 
 import { loadAntVAT, buildLodGeometry } from './vat.js';
@@ -55,8 +55,10 @@ export async function createAnts( sim ) {
 		tanX: uniform( 1 ),
 		tanY: uniform( 1 ),
 		far: uniform( 400 ),
-		lod0: uniform( LOD_DIST[ 0 ] ),
-		lod1: uniform( LOD_DIST[ 1 ] ),
+		lod0: uniform( gfx.lodDist0 || LOD_DIST[ 0 ] ),
+		lod1: uniform( gfx.lodDist1 || LOD_DIST[ 1 ] ),
+		budget0: uniform( gfx.lodBudget ),        // plein détail max
+		budget1: uniform( gfx.lodBudget * 4 ),    // LOD intermédiaire max
 	};
 
 	const uPhase = uniform( 0 );
@@ -95,17 +97,65 @@ export async function createAnts( sim ) {
 
 			If( visible, () => {
 
-				const lod = select( depth.lessThan( u.lod0 ), uint( 0 ),
-					select( depth.lessThan( u.lod1 ), uint( 1 ), uint( 2 ) ) );
+				// niveau souhaité par distance, puis RÉTROGRADATION si le budget
+				// du niveau est plein : le pire cas reste borné quel que soit le zoom
+				const lodV = select( depth.lessThan( u.lod0 ), uint( 0 ),
+					select( depth.lessThan( u.lod1 ), uint( 1 ), uint( 2 ) ) ).toVar();
+				const placed = uint( 0 ).toVar();
 
-				const slot = atomicAdd( indirectNode.element( lod.mul( 5 ).add( 1 ) ), uint( 1 ) ).toVar();
-				lodList.element( lod.mul( uint( MAX_ANTS ) ).add( slot ) ).assign( instanceIndex );
+				If( lodV.equal( uint( 0 ) ), () => {
+
+					const s = atomicAdd( indirectNode.element( uint( 1 ) ), uint( 1 ) ).toVar();
+
+					If( s.toFloat().lessThan( u.budget0 ), () => {
+
+						lodList.element( s ).assign( instanceIndex );
+						placed.assign( uint( 1 ) );
+
+					} ).Else( () => {
+
+						lodV.assign( uint( 1 ) );
+
+					} );
+
+				} );
+
+				If( placed.equal( uint( 0 ) ).and( lodV.equal( uint( 1 ) ) ), () => {
+
+					const s = atomicAdd( indirectNode.element( uint( 6 ) ), uint( 1 ) ).toVar();
+
+					If( s.toFloat().lessThan( u.budget1 ), () => {
+
+						lodList.element( uint( MAX_ANTS ).add( s ) ).assign( instanceIndex );
+						placed.assign( uint( 1 ) );
+
+					} );
+
+				} );
+
+				If( placed.equal( uint( 0 ) ), () => {
+
+					const s = atomicAdd( indirectNode.element( uint( 11 ) ), uint( 1 ) ).toVar();
+					lodList.element( uint( MAX_ANTS * 2 ).add( s ) ).assign( instanceIndex );
+
+				} );
 
 			} );
 
 		} );
 
 	} )().compute( MAX_ANTS );
+
+	// les compteurs dépassent les budgets (les fourmis en trop sont replacées
+	// ailleurs) : on tronque les instanceCount avant le draw
+	const kFinalize = Fn( () => {
+
+		const word = instanceIndex.mul( 5 ).add( 1 );
+		const budget = select( instanceIndex.equal( uint( 0 ) ), u.budget0, u.budget1 );
+		const count = atomicLoad( indirectNode.element( word ) ).toVar();
+		atomicStore( indirectNode.element( word ), min( count.toFloat(), budget ).toUint() );
+
+	} )().compute( 2 );
 
 	// ------------------------------------------------------------------
 	// Transformation d'une fourmi (partagée corps/grain/halo)
@@ -141,7 +191,10 @@ export async function createAnts( sim ) {
 	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
 	const uAccentColor = uniform( new THREE.Color( gfx.antAccentColor ) );
 
-	function makeBodyMaterial( lodBase ) {
+	// animMode : 0 = interpolation lisse, 1 = frame la plus proche (toujours
+	// animée, sans mélange), 2 = pose figée (au-delà de la distance d'animation,
+	// une fourmi fait ~3 px : invisible, et moitié moins de lectures de texture)
+	function makeBodyMaterial( lodBase, animMode ) {
 
 		const material = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
 		const base = uniform( lodBase );
@@ -156,16 +209,34 @@ export async function createAnts( sim ) {
 				select( vatIdx.lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ),
 			);
 
-			// phase de marche accumulée + décalage par fourmi
-			const cycle = uPhase.add( hash( antId.add( uint( 1013 ) ) ) );
-			const ff = fract( cycle ).mul( framesF );
-			const f0 = floor( ff ).toInt();
-			const f1 = f0.add( 1 ).mod( int( vat.frames ) );
-			const w = fract( ff );
+			let animated;
 
-			const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
-			const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
-			const animated = mix( p0, p1, w );
+			if ( animMode === 2 ) {
+
+				animated = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+
+			} else {
+
+				// phase de marche accumulée + décalage par fourmi
+				const cycle = uPhase.add( hash( antId.add( uint( 1013 ) ) ) );
+				const ff = fract( cycle ).mul( framesF );
+				const f0 = floor( ff ).toInt();
+
+				if ( animMode === 1 ) {
+
+					animated = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
+
+				} else {
+
+					const f1 = f0.add( 1 ).mod( int( vat.frames ) );
+					const w = fract( ff );
+					const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
+					const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
+					animated = mix( p0, p1, w );
+
+				}
+
+			}
 
 			return rot.mul( animated ).add( world );
 
@@ -192,7 +263,7 @@ export async function createAnts( sim ) {
 		igeo.instanceCount = 1;                       // le vrai compte vit sur GPU
 		igeo.setIndirect( indirectAttr, k * 20 );     // offset en octets
 
-		const mesh = new THREE.Mesh( igeo, makeBodyMaterial( k * MAX_ANTS ) );
+		const mesh = new THREE.Mesh( igeo, makeBodyMaterial( k * MAX_ANTS, k ) );
 		mesh.frustumCulled = false;
 		mesh.castShadow = true;
 		mesh.receiveShadow = true;
@@ -312,9 +383,14 @@ export async function createAnts( sim ) {
 			u.tanY.value = fovTmp.tan( ( camera.fov * Math.PI / 180 ) / 2 );
 			u.tanX.value = u.tanY.value * camera.aspect;
 			u.far.value = camera.far;
+			u.lod0.value = gfx.lodDist0;
+			u.lod1.value = gfx.lodDist1;
+			u.budget0.value = gfx.lodBudget;
+			u.budget1.value = gfx.lodBudget * 4;
 
 			renderer.compute( kReset );
 			renderer.compute( kClassify );
+			renderer.compute( kFinalize );
 
 		},
 	};
