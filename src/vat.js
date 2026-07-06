@@ -121,6 +121,11 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute( 'position', new THREE.BufferAttribute( position, 3 ) );
+	// colonne VAT de chaque sommet (identité pour le maillage plein ;
+	// les LOD décimés pointent vers les colonnes de leurs représentants)
+	const vatIndex = new Float32Array( totalVerts );
+	for ( let i = 0; i < totalVerts; i ++ ) vatIndex[ i ] = i;
+	geometry.setAttribute( 'vatIndex', new THREE.BufferAttribute( vatIndex, 1 ) );
 	geometry.setIndex( new THREE.BufferAttribute( index, 1 ) );
 
 	const bounds = {
@@ -132,5 +137,92 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 
 	// counts[0] = sommets du corps (1er matériau), counts[1] = yeux/antennes
 	return { texture, geometry, frames, totalVerts, counts, bounds, cycleDuration: clip.duration };
+
+}
+
+// ---------------------------------------------------------------------------
+// LOD par clustering : les sommets sont regroupés par cellule (taille en
+// unités monde du modèle normalisé), chaque cluster garde UN représentant qui
+// pointe vers SA colonne VAT (attribut vatIndex) — même texture d'animation,
+// topologie réduite, triangles dégénérés éliminés.
+// ---------------------------------------------------------------------------
+export function buildLodGeometry( vat, cellSize ) {
+
+	const pos = vat.geometry.attributes.position.array;
+	const srcIndex = vat.geometry.index.array;
+	const nV = vat.totalVerts;
+
+	// cluster de chaque sommet
+	const clusterKey = new Array( nV );
+	const clusters = new Map();       // clé → { sum: [x,y,z], members: [] }
+
+	for ( let i = 0; i < nV; i ++ ) {
+
+		const key =
+			Math.round( pos[ i * 3 ] / cellSize ) + ',' +
+			Math.round( pos[ i * 3 + 1 ] / cellSize ) + ',' +
+			Math.round( pos[ i * 3 + 2 ] / cellSize );
+		clusterKey[ i ] = key;
+
+		let c = clusters.get( key );
+		if ( ! c ) clusters.set( key, c = { sx: 0, sy: 0, sz: 0, members: [] } );
+		c.sx += pos[ i * 3 ]; c.sy += pos[ i * 3 + 1 ]; c.sz += pos[ i * 3 + 2 ];
+		c.members.push( i );
+
+	}
+
+	// représentant = le membre le plus proche du centroïde
+	const repOf = new Int32Array( nV );
+	const newIdOf = new Map();        // vertex représentant → id compacté
+	const reps = [];
+
+	for ( const c of clusters.values() ) {
+
+		const n = c.members.length;
+		const cx = c.sx / n, cy = c.sy / n, cz = c.sz / n;
+		let best = c.members[ 0 ], bd = Infinity;
+
+		for ( const m of c.members ) {
+
+			const d = ( pos[ m * 3 ] - cx ) ** 2 + ( pos[ m * 3 + 1 ] - cy ) ** 2 + ( pos[ m * 3 + 2 ] - cz ) ** 2;
+			if ( d < bd ) { bd = d; best = m; }
+
+		}
+
+		newIdOf.set( best, reps.length );
+		reps.push( best );
+		for ( const m of c.members ) repOf[ m ] = best;
+
+	}
+
+	// index décimé (triangles dégénérés éliminés)
+	const outIndex = [];
+
+	for ( let t = 0; t < srcIndex.length; t += 3 ) {
+
+		const a = repOf[ srcIndex[ t ] ], b = repOf[ srcIndex[ t + 1 ] ], c = repOf[ srcIndex[ t + 2 ] ];
+		if ( a === b || b === c || a === c ) continue;
+		outIndex.push( newIdOf.get( a ), newIdOf.get( b ), newIdOf.get( c ) );
+
+	}
+
+	const outPos = new Float32Array( reps.length * 3 );
+	const outVat = new Float32Array( reps.length );
+
+	reps.forEach( ( src, i ) => {
+
+		outPos[ i * 3 ] = pos[ src * 3 ];
+		outPos[ i * 3 + 1 ] = pos[ src * 3 + 1 ];
+		outPos[ i * 3 + 2 ] = pos[ src * 3 + 2 ];
+		outVat[ i ] = src;
+
+	} );
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute( 'position', new THREE.BufferAttribute( outPos, 3 ) );
+	geometry.setAttribute( 'vatIndex', new THREE.BufferAttribute( outVat, 1 ) );
+	geometry.setIndex( new THREE.BufferAttribute( new Uint16Array( outIndex ), 1 ) );
+
+	return { geometry, triangles: outIndex.length / 3, vertices: reps.length };
 
 }

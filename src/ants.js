@@ -1,39 +1,121 @@
-// Rendu des fourmis : maillage rigué baké en VAT (voir vat.js), instancié et
-// transformé dans le vertex shader depuis les buffers de la simulation.
-// Le cycle de marche est lu dans la texture VAT avec une phase par instance,
-// cadencé par le temps de SIMULATION (la pause fige la démarche) et par la
-// vitesse de déplacement (les fourmis trottinent d'autant plus vite).
+// Rendu des fourmis 100 % GPU-driven :
+//
+//   VAT (cycle de marche baké, voir vat.js)
+//   + LOD à 3 niveaux (plein / décimé / silhouette) par clustering
+//   + frustum culling PAR FOURMI et classement par distance dans un compute
+//   + draws INDIRECTS : le compute écrit les instanceCount, compacte les
+//     listes d'indices — le CPU n'apprend jamais combien de fourmis se
+//     dessinent, il n'y a ni readback ni réallocation.
+//
+// Chaque mesh LOD k lit son record indirect (5 × u32 à l'octet k*20) et
+// remappe instanceIndex (slot compacté, firstInstance=0) → id de fourmi via
+// la liste lodList[k*MAX + slot].
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, instanceIndex, vertexIndex, positionLocal, uniform, varyingProperty,
-	vec2, vec3, mat3, float, int, ivec2, uint, cos, sin, fract, floor, mix, hash,
-	textureLoad, uv, select, cameraPosition, cross, normalize, smoothstep,
+	Fn, If, instanceIndex, uniform, varyingProperty, storage, instancedArray,
+	attribute, positionLocal, cameraPosition,
+	vec2, vec3, vec4, mat3, float, int, ivec2, uint,
+	cos, sin, fract, floor, mix, hash, select, min, abs, normalize, cross, smoothstep, uv,
+	textureLoad, atomicAdd, atomicStore,
 } from 'three/tsl';
 
-import { loadAntVAT } from './vat.js';
-import { GRID, WORLD, params, gfx } from './config.js';
+import { loadAntVAT, buildLodGeometry } from './vat.js';
+import { GRID, WORLD, MAX_ANTS, params, gfx } from './config.js';
+
+const LOD_DIST = [ 16, 42 ];          // limites LOD0→1 et LOD1→2 (unités monde)
+const CULL_MARGIN = 1.6;              // rayon de sécurité autour d'une fourmi
 
 export async function createAnts( sim ) {
 
 	const vat = await loadAntVAT( '/AntRigged.glb', { frames: 20, targetLength: 0.95 } );
 
-	// phase de marche accumulée côté CPU (dans [0,1) : pas de saut quand la
-	// fréquence change, pas de perte de précision f32 en session longue)
+	// trois niveaux de détail partageant la MÊME texture d'animation
+	const lod1 = buildLodGeometry( vat, 0.045 );
+	const lod2 = buildLodGeometry( vat, 0.13 );
+	const lodGeos = [ vat.geometry, lod1.geometry, lod2.geometry ];
+	console.info(
+		`AntSystem LOD : ${vat.geometry.index.count / 3} / ${lod1.triangles} / ${lod2.triangles} triangles`,
+	);
+
+	// ------------------------------------------------------------------
+	// Buffers du pilotage GPU
+	// ------------------------------------------------------------------
+	// records indirects : [indexCount, instanceCount, firstIndex, baseVertex, firstInstance] × 3
+	const indirectArray = new Uint32Array( 15 );
+	for ( let k = 0; k < 3; k ++ ) indirectArray[ k * 5 ] = lodGeos[ k ].index.count;
+	const indirectAttr = new THREE.IndirectStorageBufferAttribute( indirectArray, 1 );
+
+	const indirectNode = storage( indirectAttr, 'uint', 15 ).toAtomic();
+	const lodList = instancedArray( 3 * MAX_ANTS, 'uint' );
+
+	// uniforms de classement (mis à jour chaque frame depuis la caméra)
+	const u = {
+		view: uniform( new THREE.Matrix4() ),
+		tanX: uniform( 1 ),
+		tanY: uniform( 1 ),
+		far: uniform( 400 ),
+		lod0: uniform( LOD_DIST[ 0 ] ),
+		lod1: uniform( LOD_DIST[ 1 ] ),
+	};
+
 	const uPhase = uniform( 0 );
 	let phaseAcc = 0;
 
 	const texel = WORLD / GRID;
 	const framesF = float( vat.frames );
 
-	// --- transformation par instance, partagée par le corps et le grain ---
-	const instanceTransform = () => {
+	// ------------------------------------------------------------------
+	// Kernels : remise à zéro des compteurs puis classement/compaction
+	// ------------------------------------------------------------------
+	const kReset = Fn( () => {
 
-		const a = sim.antData.element( instanceIndex );
+		atomicStore( indirectNode.element( instanceIndex.mul( 5 ).add( 1 ) ), uint( 0 ) );
+
+	} )().compute( 3 );
+
+	const kClassify = Fn( () => {
+
+		If( instanceIndex.toFloat().lessThan( sim.u.antCount ), () => {
+
+			const a = sim.antData.element( instanceIndex );
+			const world = vec3(
+				a.x.mul( texel ).sub( WORLD / 2 ),
+				0.3,
+				a.y.mul( texel ).sub( WORLD / 2 ),
+			);
+
+			// test de frustum en espace vue (marge = rayon d'une fourmi)
+			const v = u.view.mul( vec4( world, 1 ) );
+			const depth = v.z.negate();
+			const visible = depth.greaterThan( - CULL_MARGIN )
+				.and( depth.lessThan( u.far ) )
+				.and( abs( v.x ).lessThan( depth.mul( u.tanX ).add( CULL_MARGIN ) ) )
+				.and( abs( v.y ).lessThan( depth.mul( u.tanY ).add( CULL_MARGIN ) ) );
+
+			If( visible, () => {
+
+				const lod = select( depth.lessThan( u.lod0 ), uint( 0 ),
+					select( depth.lessThan( u.lod1 ), uint( 1 ), uint( 2 ) ) );
+
+				const slot = atomicAdd( indirectNode.element( lod.mul( 5 ).add( 1 ) ), uint( 1 ) ).toVar();
+				lodList.element( lod.mul( uint( MAX_ANTS ) ).add( slot ) ).assign( instanceIndex );
+
+			} );
+
+		} );
+
+	} )().compute( MAX_ANTS );
+
+	// ------------------------------------------------------------------
+	// Transformation d'une fourmi (partagée corps/grain/halo)
+	// ------------------------------------------------------------------
+	const antTransform = ( antId ) => {
+
+		const a = sim.antData.element( antId );
 		const gp = a.xy;
 		const angle = a.z;
 
-		// grille (cos a, sin a) → monde XZ ; le modèle regarde +Z → lacet = π/2 − angle
 		const yaw = float( Math.PI / 2 ).sub( angle );
 		const c = cos( yaw );
 		const s = sin( yaw );
@@ -53,61 +135,81 @@ export async function createAnts( sim ) {
 
 	};
 
-	// --- corps : sommets lus dans la VAT (deux frames interpolées) ---
-	const bodyGeo = new THREE.InstancedBufferGeometry();
-	bodyGeo.index = vat.geometry.index;
-	bodyGeo.attributes = vat.geometry.attributes;
-	bodyGeo.instanceCount = params.antCount;
-
-	const bodyMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
-
-	// couleurs corps / yeux-antennes : drapeau par plage de sommets (les deux
-	// primitives du GLB sont concaténées dans la VAT) → un mix, coût nul
+	// ------------------------------------------------------------------
+	// Corps : 3 meshes indirects (matériaux jumeaux → même pipeline en cache)
+	// ------------------------------------------------------------------
 	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
 	const uAccentColor = uniform( new THREE.Color( gfx.antAccentColor ) );
 
-	bodyMat.positionNode = Fn( () => {
+	function makeBodyMaterial( lodBase ) {
 
-		const { rot, world } = instanceTransform();
+		const material = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
+		const base = uniform( lodBase );
 
-		varyingProperty( 'float', 'vAntAccent' ).assign(
-			select( vertexIndex.lessThan( uint( vat.counts[ 0 ] ) ), 0, 1 ),
-		);
+		material.positionNode = Fn( () => {
 
-		// phase de marche accumulée + décalage par fourmi
-		const cycle = uPhase.add( hash( instanceIndex.add( uint( 1013 ) ) ) );
-		const ff = fract( cycle ).mul( framesF );
-		const f0 = floor( ff ).toInt();
-		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
-		const w = fract( ff );
+			const antId = lodList.element( base.toUint().add( instanceIndex ) );
+			const { rot, world } = antTransform( antId );
 
-		const p0 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), f0 ) ).xyz;
-		const p1 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), f1 ) ).xyz;
-		const animated = mix( p0, p1, w );
+			const vatIdx = attribute( 'vatIndex', 'float' ).toInt();
+			varyingProperty( 'float', 'vAntAccent' ).assign(
+				select( vatIdx.lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ),
+			);
 
-		return rot.mul( animated ).add( world );
+			// phase de marche accumulée + décalage par fourmi
+			const cycle = uPhase.add( hash( antId.add( uint( 1013 ) ) ) );
+			const ff = fract( cycle ).mul( framesF );
+			const f0 = floor( ff ).toInt();
+			const f1 = f0.add( 1 ).mod( int( vat.frames ) );
+			const w = fract( ff );
 
-	} )();
+			const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
+			const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
+			const animated = mix( p0, p1, w );
 
-	bodyMat.colorNode = Fn( () => {
+			return rot.mul( animated ).add( world );
 
-		return mix( uBodyColor, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
+		} )();
 
-	} )();
+		material.colorNode = Fn( () => {
 
-	const body = new THREE.Mesh( bodyGeo, bodyMat );
-	body.frustumCulled = false;
-	body.castShadow = true;
-	body.receiveShadow = true;
+			return mix( uBodyColor, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
 
-	// --- grain de nourriture porté (échelle 0 quand la fourmi n'a rien) ---
+		} )();
+
+		return material;
+
+	}
+
+	const group = new THREE.Group();
+	const bodies = [];
+
+	for ( let k = 0; k < 3; k ++ ) {
+
+		const igeo = new THREE.InstancedBufferGeometry();
+		igeo.index = lodGeos[ k ].index;
+		igeo.attributes = lodGeos[ k ].attributes;
+		igeo.instanceCount = 1;                       // le vrai compte vit sur GPU
+		igeo.setIndirect( indirectAttr, k * 20 );     // offset en octets
+
+		const mesh = new THREE.Mesh( igeo, makeBodyMaterial( k * MAX_ANTS ) );
+		mesh.frustumCulled = false;
+		mesh.castShadow = true;
+		mesh.receiveShadow = true;
+		group.add( mesh );
+		bodies.push( mesh );
+
+	}
+
+	// ------------------------------------------------------------------
+	// Grain porté + halo luciole (géométrie triviale : pilotés par antCount)
+	// ------------------------------------------------------------------
 	const grainGeo = new THREE.InstancedBufferGeometry();
 	const ico = new THREE.IcosahedronGeometry( 0.1, 0 );
 	grainGeo.index = ico.index;
 	grainGeo.attributes = ico.attributes;
 	grainGeo.instanceCount = params.antCount;
 
-	// apparence « luciole » : bille rougeoyante, assortie à la nourriture au sol
 	const grainMat = new THREE.MeshStandardNodeMaterial( {
 		color: new THREE.Color( gfx.foodColor ),
 		emissive: new THREE.Color( gfx.foodColor ),
@@ -117,7 +219,7 @@ export async function createAnts( sim ) {
 
 	grainMat.positionNode = Fn( () => {
 
-		const { rot, world } = instanceTransform();
+		const { rot, world } = antTransform( instanceIndex );
 		const carrying = sim.antState.element( instanceIndex ).toFloat();
 		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) );
 
@@ -127,11 +229,10 @@ export async function createAnts( sim ) {
 
 	const grain = new THREE.Mesh( grainGeo, grainMat );
 	grain.frustumCulled = false;
-	// pas d'ombre pour un grain de 8 cm sous la lune
 
-	// --- halo luciole du grain porté (billboard additif, échelle 0 sinon) ---
 	const uGrainHalo = uniform( gfx.haloSize );
 	const uGrainHaloIntensity = uniform( gfx.haloIntensity );
+	const uHaloColor = uniform( grainMat.emissive );
 
 	const haloGeo = new THREE.InstancedBufferGeometry();
 	const haloQuad = new THREE.PlaneGeometry( 1, 1 );
@@ -149,7 +250,7 @@ export async function createAnts( sim ) {
 
 	haloMat.positionNode = Fn( () => {
 
-		const { rot, world } = instanceTransform();
+		const { rot, world } = antTransform( instanceIndex );
 		const carrying = sim.antState.element( instanceIndex ).toFloat();
 		const center = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) ).add( world );
 
@@ -164,9 +265,6 @@ export async function createAnts( sim ) {
 
 	} )();
 
-	// même objet Color que grainMat.emissive : suit le sélecteur de l'UI
-	const uHaloColor = uniform( grainMat.emissive );
-
 	haloMat.colorNode = Fn( () => {
 
 		const d = uv().sub( vec2( 0.5, 0.5 ) ).length().mul( 2 );
@@ -178,34 +276,45 @@ export async function createAnts( sim ) {
 	const grainHalo = new THREE.Mesh( haloGeo, haloMat );
 	grainHalo.frustumCulled = false;
 
-	const group = new THREE.Group();
-	group.add( body, grain, grainHalo );
+	group.add( grain, grainHalo );
+
+	// ------------------------------------------------------------------
+	const renderer = sim.renderer;
+	const fovTmp = { tan: Math.tan };
 
 	return {
 		group,
-		bodyMat,
 		grainMat,
 		uBodyColor,
 		uAccentColor,
 		uGrainHalo,
 		uGrainHaloIntensity,
+		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },
 		setCount( n ) {
 
-			bodyGeo.instanceCount = n;
 			grainGeo.instanceCount = n;
 			haloGeo.instanceCount = n;
 
 		},
 		setShadows( on ) {
 
-			body.castShadow = on;
+			for ( const b of bodies ) b.castShadow = on;
 
 		},
-		// à appeler chaque frame avec le dt de SIMULATION (0 si pause)
-		tick( simDt ) {
+		// chaque frame : phase de marche + classement LOD/frustum
+		tick( simDt, camera ) {
 
 			phaseAcc = ( phaseAcc + simDt * params.moveSpeed * params.walkAnim * 0.14 ) % 1;
 			uPhase.value = phaseAcc;
+
+			camera.updateMatrixWorld();
+			u.view.value.copy( camera.matrixWorldInverse );
+			u.tanY.value = fovTmp.tan( ( camera.fov * Math.PI / 180 ) / 2 );
+			u.tanX.value = u.tanY.value * camera.aspect;
+			u.far.value = camera.far;
+
+			renderer.compute( kReset );
+			renderer.compute( kClassify );
 
 		},
 	};

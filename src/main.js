@@ -15,6 +15,7 @@ import { createProps } from './graphics/props.js';
 import { createGodrays } from './graphics/godrays.js';
 import { createCinematic } from './graphics/cinematic.js';
 import { createFoodBalls } from './graphics/foodballs.js';
+import { createBench } from './bench.js';
 import { createUI } from './ui.js';
 
 async function main() {
@@ -29,7 +30,8 @@ async function main() {
 	// --- renderer ---
 	const renderer = new THREE.WebGPURenderer( { antialias: true } );
 	renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
-	renderer.setSize( window.innerWidth, window.innerHeight );
+	// jamais 0×0 (fenêtre cachée/minimisée) : une swapchain vide invalide tout
+	renderer.setSize( Math.max( 2, window.innerWidth ), Math.max( 2, window.innerHeight ) );
 	renderer.toneMapping = THREE.ACESFilmicToneMapping;
 	renderer.toneMappingExposure = 1.35;
 	renderer.shadowMap.enabled = params.shadows;
@@ -94,10 +96,11 @@ async function main() {
 
 	const godrays = createGodrays( renderer, scene, camera, sky );
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
+	const bench = createBench( { sim } );
 
 	// --- interface ---
 	const ui = createUI( {
-		sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, controls, camera, renderer,
+		sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, bench, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
@@ -141,7 +144,7 @@ async function main() {
 
 		}
 
-		ants.tick( simDt );
+		ants.tick( simDt, camera );
 		sky.update( camera );
 		grass.update( camera, rawDt );
 		cinematic.update( rawDt );
@@ -168,14 +171,25 @@ async function main() {
 	} );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench };
+
+	// banc d'essai automatique : ?bench=5x90
+	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );
+
+	if ( benchMatch ) {
+
+		setTimeout( () => bench.run( { runs: + benchMatch[ 1 ], seconds: + benchMatch[ 2 ] } ), 800 );
+
+	}
 
 	window.addEventListener( 'resize', () => {
 
-		camera.aspect = window.innerWidth / window.innerHeight;
+		const w = Math.max( 2, window.innerWidth );
+		const h = Math.max( 2, window.innerHeight );
+		camera.aspect = w / h;
 		camera.updateProjectionMatrix();
 		renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
-		renderer.setSize( window.innerWidth, window.innerHeight );
+		renderer.setSize( w, h );
 
 	} );
 

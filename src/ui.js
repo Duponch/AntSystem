@@ -8,7 +8,7 @@ import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength } from './envi
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 
-export function createUI( { sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, controls, camera, renderer, onReset } ) {
+export function createUI( { sim, ants, env, sky, grass, props, foodballs, godrays, cinematic, bench, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -188,6 +188,21 @@ export function createUI( { sim, ants, env, sky, grass, props, foodballs, godray
 		.onChange( ( v ) => godrays.uIntensity.value = v );
 
 	fGfx.close();
+
+	// --- banc d'essai statistique ---
+	const fBench = gui.addFolder( '🧪 Banc d\'essai' );
+	const benchCfg = { runs: 5, seconds: 90 };
+	fBench.add( benchCfg, 'runs', 1, 20, 1 ).name( 'Essais' );
+	fBench.add( benchCfg, 'seconds', 30, 300, 15 ).name( 'Durée sim (s)' );
+	fBench.add( { go: async () => {
+
+		overlayFlash( `🧪 ${benchCfg.runs} essais de ${benchCfg.seconds}s en cours…` );
+		const s = await bench.run( benchCfg );
+		overlayFlash( `🧪 ${s.deliveredMean} ± ${s.deliveredSd} livrées en ${benchCfg.seconds}s` +
+			` (${s.perAntPerMin}/fourmi/min) — détails en console (F12)` );
+
+	} }, 'go' ).name( '▶ Lancer' );
+	fBench.close();
 
 	// --- persistance (réglages + grille de murs ajustée à la main) ---
 	gui.add( { save: async () => {

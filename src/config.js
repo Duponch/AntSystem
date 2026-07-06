@@ -36,32 +36,34 @@ export const NEST = {
 export const params = {
 	// Colonie
 	antCount: 869,                     // clin d'œil à la vidéo
-	simSpeed: 4,
+	simSpeed: 1,
 	paused: false,
 
-	// Comportement (unités : texels et radians par seconde)
-	moveSpeed: 5,
-	steerStrength: 6,
-	wanderStrength: 1.6,
+	// Comportement — config « D » validée au banc d'essai :
+	// 51 % de taux de retour à 300 s (contre 9 % pour l'ancien réglage)
+	moveSpeed: 15,
+	steerStrength: 8,
+	wanderStrength: 1.0,
 	sensorAngleDeg: 30,
-	sensorDist: 14,
+	sensorDist: 12,
 
-	// Phéromones (très persistantes : les pistes structurent la colonie)
+	// Phéromones : sémantique de fraîcheur (atomicMax) → évaporation lente
+	// sans saturation ; la diffusion reste douce (elle érode les pistes fines)
 	depositRate: 12,
-	fade: 0.005,                       // k du fondu exp(-k·temps_depuis_source)
-	evaporation: 0.01,                 // décroissance linéaire par seconde
-	diffusion: 1.2,
+	fade: 0.025,                       // k du fondu exp(-k·temps_depuis_source)
+	evaporation: 0.012,                // décroissance linéaire par seconde
+	diffusion: 0.25,
 
 	// Outils
 	tool: 'nourriture',                // 'nourriture' | 'mur' | 'gomme'
-	brushRadius: 8,                    // texels
-	foodAmount: 12,                    // unités par cellule
+	brushRadius: 10,                   // texels
+	foodAmount: 1,                     // unités par bille : 1 = prise → disparue
 
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
 	// calibrage animation : rapport entre fréquence de foulée et vitesse
-	walkAnim: 2.9,
+	walkAnim: 1.0,
 	cinematic: false,
 };
 
@@ -89,7 +91,7 @@ export const gfx = {
 	foodColor: '#ff9d3a',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
-	foodBallSpacing: 5,                // texels entre billes
+	foodBallSpacing: 4,                // texels entre billes
 	foodBallRadius: 0.16,              // rayon VISUEL d'une bille (unités monde)
 	foodGlow: 1.4,                     // brillance des billes
 	haloSpread: 0.93,                  // halo au sol : portée (diffusion)

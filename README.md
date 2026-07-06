@@ -36,7 +36,13 @@ Tout l'état vit sur le GPU ; le CPU ne fait qu'orchestrer les passes de calcul 
 
 2. **Passe grille** (une invocation par texel, 1024²) — diffusion 3×3 + évaporation linéaire, injection des dépôts accumulés, marqueurs permanents (le nid sature la carte maison, la nourriture sature la carte nourriture), puis écriture dans une paire de textures `rgba16float` en ping-pong qui sert à la fois aux capteurs et à l'affichage.
 
-3. **Rendu** — la fourmi riguée et animée dans Blender (11 os, cycle de marche tripode) est bakée en **VAT** (Vertex Animation Texture) au chargement : le vertex shader instancié lit deux frames de la texture et interpole, avec une phase par fourmi — le skinning ne coûte rien, même à 65 536 instances. Le `positionNode` lit directement les buffers de simulation (zéro aller-retour CPU), les ombres suivent automatiquement, et l'absence de normales déclenche le flat shading dérivé des positions déformées. Le sol affiche le champ de phéromones en émissif (bleu = maison, orange = nourriture).
+   Le dépôt suit une **sémantique de fraîcheur** (à la Pezzza) : la valeur du champ est `exp(-k·temps_depuis_source)` du visiteur le plus récent (`atomicMax`), pas une accumulation — le gradient vers la source reste net sous n'importe quel trafic, sans saturation.
+
+3. **Rendu** — la fourmi riguée et animée dans Blender (17 os, genoux articulés, cycle tripode) est bakée en **VAT** (Vertex Animation Texture) au chargement, puis décimée en 3 niveaux de détail (2000/452/93 triangles) par clustering, tous branchés sur la même texture d'animation. Chaque frame, un compute classe chaque fourmi (frustum + distance) dans des listes compactées et écrit les **draws indirects** : le GPU décide seul combien d'instances de chaque LOD se dessinent, sans readback CPU. Résultat mesuré : **65 536 fourmis en ~4 ms/frame**. Le sol affiche le champ de phéromones en émissif (bleu = maison, orange = nourriture).
+
+## Banc d'essai
+
+Le dossier **🧪 Banc d'essai** (ou l'URL `?bench=5x90`, ou `__antsys.bench.run(...)` en console) enchaîne N simulations headless à graines différentes et rapporte livraisons, ramassages et **taux de retour** (moyenne ± écart-type, courbes par points de contrôle en console). `__antsys.bench.compare([...])` confronte plusieurs jeux de paramètres. Les défauts actuels (config « D ») en sont issus : taux de retour ×5.5 par rapport au réglage précédent.
 
 ## Graphismes (nuit cozy low-poly)
 

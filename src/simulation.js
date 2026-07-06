@@ -17,20 +17,21 @@ import {
 	Fn, If, Loop, uniform, uniformArray, instancedArray, instanceIndex,
 	float, int, uint, vec2, vec3, vec4, ivec2, uvec2,
 	exp, cos, sin, sqrt, floor, ceil, max, min, clamp, mix, length, select,
-	atomicAdd, atomicSub, atomicLoad, atomicStore,
+	atomicAdd, atomicSub, atomicLoad, atomicStore, atomicMax,
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
 import { GRID, MAX_ANTS, FIXED, NEST, params, gfx } from './config.js';
 
 // gisements de départ (partagés avec la caméra cinématique)
+// (1 bille = 1 unité : zones élargies pour offrir ~15-25 billes chacune)
 export const SEED_BLOBS = [
-	{ angle: 0.5, dist: 250, radius: 6 },
-	{ angle: 2.0, dist: 320, radius: 8 },
-	{ angle: 2.6, dist: 200, radius: 5 },
-	{ angle: 3.7, dist: 270, radius: 5 },
-	{ angle: 4.4, dist: 300, radius: 7 },
-	{ angle: 5.1, dist: 360, radius: 8 },
+	{ angle: 0.5, dist: 250, radius: 9 },
+	{ angle: 2.0, dist: 320, radius: 12 },
+	{ angle: 2.6, dist: 200, radius: 8 },
+	{ angle: 3.7, dist: 270, radius: 8 },
+	{ angle: 4.4, dist: 300, radius: 10 },
+	{ angle: 5.1, dist: 360, radius: 11 },
 ];
 
 export class AntSimulation {
@@ -59,6 +60,7 @@ export class AntSimulation {
 			obstacleCount: uniform( 0 ),
 			ballSpacing: uniform( gfx.foodBallSpacing ),  // texels entre billes de nourriture
 			haloSpread: uniform( gfx.haloSpread ),        // portée du halo lumineux
+			seed: uniform( 0 ),                           // graine de run (banc d'essai)
 		};
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
@@ -139,14 +141,14 @@ export class AntSimulation {
 			// reinitFrom > 0 : seules les fourmis nouvellement activées repartent du nid
 			If( instanceIndex.toFloat().greaterThanEqual( u.reinitFrom ), () => {
 
-				const i = instanceIndex.toFloat();
-				const around = hash( i.add( 0.17 ) ).mul( PI2 );
-				const radius = sqrt( hash( i.add( 5.31 ) ) ).mul( u.nestRadius.mul( 0.8 ) );
+				const i = instanceIndex.add( u.seed.toUint().mul( uint( 2654435761 ) ) );
+				const around = hash( i.add( uint( 17 ) ) ).mul( PI2 );
+				const radius = sqrt( hash( i.add( uint( 531 ) ) ) ).mul( u.nestRadius.mul( 0.8 ) );
 
 				antData.element( instanceIndex ).assign( vec4(
 					u.nest.x.add( cos( around ).mul( radius ) ),
 					u.nest.y.add( sin( around ).mul( radius ) ),
-					hash( i.add( 9.23 ) ).mul( PI2 ),
+					hash( i.add( uint( 923 ) ) ).mul( PI2 ),
 					0,
 				) );
 				antState.element( instanceIndex ).assign( uint( 0 ) );
@@ -185,8 +187,10 @@ export class AntSimulation {
 
 			If( instanceIndex.toFloat().lessThan( u.antCount ), () => {
 
-				// graine entière par fourmi et par frame (hash() tronque les flottants)
-				const iseed = instanceIndex.add( frameId.mul( uint( 0x9E3779B9 ) ) );
+				// graine entière par fourmi, par frame et par run (hash() tronque les flottants)
+				const iseed = instanceIndex
+					.add( frameId.mul( uint( 0x9E3779B9 ) ) )
+					.add( u.seed.toUint().mul( uint( 2654435761 ) ) );
 				const a = antData.element( instanceIndex );
 				const st = antState.element( instanceIndex );
 
@@ -251,9 +255,11 @@ export class AntSimulation {
 
 				} );
 
-				// errance permanente
+				// errance permanente — réduite quand on porte : la porteuse s'engage
+				// sur la piste au lieu de zigzaguer (asymétrie des modèles de référence)
 				const r2 = hash( iseed.add( uint( 0x85EBCA6B ) ) );
-				ang.addAssign( r2.sub( 0.5 ).mul( 2 ).mul( u.wander ).mul( u.dt ) );
+				const wander = u.wander.mul( select( carrying, 0.5, 1 ) );
+				ang.addAssign( r2.sub( 0.5 ).mul( 2 ).mul( wander ).mul( u.dt ) );
 
 				// --- déplacement + rebond sur murs / bords (réflexion par axe) ---
 				// une fourmi enterrée sous un mur fraîchement peint ignore les murs
@@ -363,16 +369,19 @@ export class AntSimulation {
 
 				} );
 
-				// --- dépôt de phéromone, atténué par le temps depuis la source ---
+				// --- dépôt de phéromone : sémantique de FRAÎCHEUR (Pezzza) ---
+				// la valeur du champ = exp(-fade·temps_depuis_source) du visiteur le
+				// plus « frais » (atomicMax), pas une accumulation : le gradient vers
+				// la source reste net même sous très fort trafic, aucune saturation.
 				// exploratrice (0) → canal maison (0) ; porteuse (1) → canal nourriture (1)
-				const amount = u.depositRate
-					.mul( exp( u.fade.negate().mul( timer ) ) )
-					.mul( u.dt )
-					.mul( FIXED ).toUint();
+				const freshness = clamp(
+					exp( u.fade.negate().mul( timer ) ).mul( u.depositRate.div( 12 ) ),
+					0, 1,
+				).mul( FIXED ).toUint();
 
-				If( amount.greaterThan( uint( 0 ) ), () => {
+				If( freshness.greaterThan( uint( 0 ) ), () => {
 
-					atomicAdd( deposit.element( ci.mul( 2 ).add( st.toInt() ) ), amount );
+					atomicMax( deposit.element( ci.mul( 2 ).add( st.toInt() ) ), freshness );
 
 				} );
 
@@ -417,12 +426,13 @@ export class AntSimulation {
 			const pher = mix( center, blurred, clamp( u.diffuse.mul( u.dt ), 0, 1 ) ).toVar();
 			pher.assign( max( pher.sub( u.evap.mul( u.dt ) ), vec2( 0 ) ) );
 
-			// injection des dépôts accumulés (et remise à zéro de l'accumulateur)
+			// injection des dépôts : le champ prend la fraîcheur maximale vue
+			// (rafraîchissement, pas accumulation) puis l'accumulateur est vidé
 			const d0 = atomicLoad( deposit.element( i.mul( 2 ) ) );
 			const d1 = atomicLoad( deposit.element( i.mul( 2 ).add( 1 ) ) );
 			atomicStore( deposit.element( i.mul( 2 ) ), uint( 0 ) );
 			atomicStore( deposit.element( i.mul( 2 ).add( 1 ) ), uint( 0 ) );
-			pher.addAssign( vec2( d0.toFloat(), d1.toFloat() ).div( FIXED ) );
+			pher.assign( max( pher, vec2( d0.toFloat(), d1.toFloat() ).div( FIXED ) ) );
 
 			// marqueurs permanents : la nourriture sature G, le nid sature R
 			const foodHere = atomicLoad( food.element( i ) );
@@ -777,6 +787,15 @@ export class AntSimulation {
 	// ----------------------------------------------------------------------
 	// Statistiques (lecture GPU → CPU, non bloquante)
 	// ----------------------------------------------------------------------
+
+	// lecture directe, sans garde de concurrence (banc d'essai)
+	async readStatsDirect() {
+
+		const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
+		const data = new Uint32Array( buffer );
+		return { delivered: data[ 0 ], picked: data[ 1 ] };
+
+	}
 
 	async readStats() {
 
