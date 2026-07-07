@@ -23,10 +23,12 @@ import { loadVATMulti } from './vat.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
-const MOUTH_OFFSET_WORLD = 1.4;        // la bouche/crochets : décalée vers l'AVANT du corps
-const BITE_RADIUS_WORLD = 1.8;         // zone de morsure autour de la bouche (avant du corps)
-const COMBAT_RANGE = 6.0;              // corps→proie estimé : bascule en morsure lente + anim d'attaque
+const MOUTH_OFFSET_WORLD = 1.2;        // la bouche/crochets : décalée vers l'AVANT du corps
+const GRAPPLE_RANGE = 5.5;             // corps→proie estimé : « au contact » → ralentit et mord (anim d'attaque)
+const CONSUME_MULT = 3.0;              // la zone de dévoration est plus large que celle de morsure
 const MAX_HP = 100;
+// modes diffusés au noyau (sectorA.z) : 0 rien, 1 morsure, 2 dévoration
+const MODE_NONE = 0, MODE_BITE = 1, MODE_EAT = 2;
 const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
 const T = GRID / WORLD;
 const SAMPLE = 1024;                   // fourmis échantillonnées pour la détection
@@ -127,6 +129,22 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	scene.add( mesh );
 
 	// ------------------------------------------------------------------
+	// Marqueur de DÉBOGAGE : sphère jaune fluo à la bouche de chaque araignée,
+	// rayon = zone de crochets réelle (params.biteRadius). Permet de VOIR où la
+	// morsure agit et à quel instant elle touche une fourmi. Matériau non éclairé
+	// (toneMapped=false) → jaune franc quelles que soient les lumières.
+	let showMouthDebug = !! gfx.debugMouth;
+	const markerMat = new THREE.MeshBasicNodeMaterial( { color: new THREE.Color( 0xeaff00 ), transparent: true, opacity: 0.55 } );
+	markerMat.toneMapped = false;
+	markerMat.depthWrite = false;
+	const markerMesh = new THREE.InstancedMesh( new THREE.SphereGeometry( 1, 10, 8 ), markerMat, MAX_SPIDERS );
+	markerMesh.frustumCulled = false;
+	markerMesh.count = 0;
+	markerMesh.visible = showMouthDebug;
+	scene.add( markerMesh );
+	const _mMarker = new THREE.Matrix4();
+
+	// ------------------------------------------------------------------
 	// État CPU par araignée
 	// ------------------------------------------------------------------
 	const spiders = [];
@@ -147,7 +165,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			target: new THREE.Vector2(),
 			detectTimer: Math.random() * 0.4,
 			lostT: 0,
-			killActive: 0,
+			biteMode: MODE_NONE,       // 0 rien / 1 morsure / 2 dévoration (diffusé au noyau)
+			feedTimer: 0,              // décompte de dévoration
+			alarm: 0,                  // pression d'alarme locale ressentie (0..1, lissée)
+			lastKills: 0,              // compteur cumulé de proies tuées (delta → dévoration)
 			hp: MAX_HP,
 			lastBites: 0,
 			biteWindow: 0,
@@ -203,16 +224,22 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	}
 
+	// Les lectures GPU (getArrayBufferAsync) ne sont PAS sûres en parallèle dans
+	// three (les mappings concurrents se corrompent → lectures à zéro). Un seul
+	// verrou partagé sérialise TOUS les relevés (échantillon de fourmis + dégâts/
+	// alarme/kills) : si un relevé est en cours, les autres passent leur tour.
+	let readbackBusy = false;
+	let manualPoll = false;   // tests headless : coupe les relevés internes (pilotés à la main)
+
 	// --- échantillonnage d'un lot de fourmis (16 Ko ~1×/0,6 s) ---
 	const antSample = new Float32Array( SAMPLE * 2 );  // x, z monde
 	let sampleN = 0;
 	let pollAccum = 0;
-	let polling = false;
 
 	async function pollAnts() {
 
-		if ( polling ) return;
-		polling = true;
+		if ( readbackBusy ) return;
+		readbackBusy = true;
 
 		try {
 
@@ -241,7 +268,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} catch { /* device occupé */ } finally {
 
-			polling = false;
+			readbackBusy = false;
 
 		}
 
@@ -281,29 +308,53 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	// --- morsures des soldates : buffer par araignée, relevé ~2×/s ---
 	let dmgAccum = 0;
-	let dmgPolling = false;
+	// nombre de fourmis paniquées « autour » qui sature l'alarme (→ fuite)
+	const ALARM_SATURATION = 7;
 
 	async function pollDamage() {
 
-		if ( dmgPolling ) return;
-		dmgPolling = true;
+		if ( readbackBusy ) return;
+		readbackBusy = true;
 
 		try {
 
-			const buf = await renderer.getArrayBufferAsync( sim.spiderDamage.value );
-			const d = new Uint32Array( buf );
+			// 3 tampons par araignée : morsures des soldates (cumulé), pression
+			// d'alarme instantanée, proies tuées (cumulé → delta = « je viens de tuer »).
+			// Lectures SÉQUENTIELLES : getArrayBufferAsync n'est pas sûr en parallèle
+			// (les mappings concurrents se corrompent → lectures à zéro).
+			const d = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderDamage.value ) );
+			const al = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderAlarm.value ) );
+			const kl = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderKills.value ) );
+			const kp = new Float32Array( await renderer.getArrayBufferAsync( sim.spiderKillPos.value ) );
 
 			for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
 
-				const delta = Math.max( 0, ( d[ i ] || 0 ) - spiders[ i ].lastBites );
-				spiders[ i ].lastBites = d[ i ] || 0;
-				spiders[ i ].biteWindow = delta;
+				const sp = spiders[ i ];
+
+				const delta = Math.max( 0, ( d[ i ] || 0 ) - sp.lastBites );
+				sp.lastBites = d[ i ] || 0;
+				sp.biteWindow = delta;
+
+				// alarme instantanée (virgule fixe FIXED=1024) → 0..1 lissé
+				const alarmNorm = Math.min( 1, ( al[ i ] || 0 ) / 1024 / ALARM_SATURATION );
+				sp.alarm += ( alarmNorm - sp.alarm ) * 0.5;
+
+				// proies tuées depuis le dernier relevé → passe à la dévoration, sur le
+				// lieu de la mise à mort (position monde du cadavre)
+				sp.newKills = Math.max( 0, ( kl[ i ] || 0 ) - sp.lastKills );
+				sp.lastKills = kl[ i ] || 0;
+				if ( sp.newKills > 0 ) {
+
+					const cw = gridToWorld( kp[ i * 2 ], kp[ i * 2 + 1 ] );
+					sp.killX = cw.x; sp.killY = cw.z;
+
+				}
 
 			}
 
 		} catch { /* device occupé */ } finally {
 
-			dmgPolling = false;
+			readbackBusy = false;
 
 		}
 
@@ -366,7 +417,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		const aggro = params.spiderAggro;
 		const detect = 20 + 30 * aggro;
 		sp.t -= dt;
-		sp.killActive = 0;
+		sp.biteMode = MODE_NONE;
 
 		// dégâts : usure, retraite sous la pression, mort
 		if ( sp.biteWindow > 0 && sp.state !== 'death' && sp.state !== 'respawn' ) {
@@ -391,6 +442,18 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.t = 3.5;
 
 			}
+
+		}
+
+		// FUITE D'ALARME (biologie : un prédateur solitaire décroche quand la colonie
+		// s'affole — trop risqué de se faire encercler). Elle bat en retraite et
+		// attend, à distance, que la phéromone d'alarme se dissipe avant de retenter.
+		if ( sp.alarm > params.alarmFleeThreshold
+			&& sp.state !== 'death' && sp.state !== 'respawn' && sp.state !== 'retreat' ) {
+
+			sp.state = 'retreat';
+			sp.t = params.alarmWait;
+			sp.feedTimer = 0;
 
 		}
 
@@ -426,7 +489,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			sp.pos.y += Math.sin( sp.heading ) * 5.2 * dt;
 			play( sp, 'walk', 0.12, 2.1 );
 
-			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 3 + Math.random() * 3; }
+			// ne repart que si le délai est écoulé ET l'alarme retombée
+			if ( sp.t <= 0 && sp.alarm < params.alarmFleeThreshold * 0.5 ) {
+
+				sp.state = 'idle'; sp.t = 3 + Math.random() * 3;
+
+			}
 
 		} else if ( sp.state === 'idle' ) {
 
@@ -474,54 +542,89 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'hunt' ) {
 
-			// suivi VIVANT : on ré-accroche la fourmi échantillonnée la plus proche
-			// à chaque frame — sert au PILOTAGE et à l'ANIMATION, jamais à décider
-			// la morsure (l'échantillon CPU ne voit que 64 fourmis et rate presque
-			// toujours celle réellement sous la bouche).
+			// TRAQUE + MORSURE : l'araignée FONCE dans le groupe (mouvement continu,
+			// jamais un saut), crochets armés. C'est le NOYAU qui, de ses pattes
+			// (large zone), IMMOBILISE la proie qui passe sous elle, puis la MORD à la
+			// bouche (petite zone, « sur » elle — jamais au bout d'une patte) →
+			// envenimation graduée → mort après quelques morsures. Plonger tout droit
+			// dans le groupe (au lieu d'orbiter une cible) est ce qui amène réellement
+			// la bouche sur une fourmi : une proie isolée fuit, mais saisie elle ralentit.
 			const near = findNearest( sp, detect * 1.6 );
 			if ( near ) { sp.target.copy( nearest ); sp.lostT = 0; }
 			else sp.lostT = ( sp.lostT || 0 ) + dt;
 
-			const bodyToPrey = near
-				? Math.hypot( sp.target.x - sp.pos.x, sp.target.y - sp.pos.y )
-				: 1e9;
-			// « au contact » (estimation) : on ralentit en morsure lente + anim
-			// d'attaque, au lieu de foncer. Sinon on approche (plus vite que la fuite).
-			const biting = bodyToPrey < COMBAT_RANGE;
+			const bodyToPrey = near ? Math.hypot( sp.target.x - sp.pos.x, sp.target.y - sp.pos.y ) : 1e9;
+			const close = bodyToPrey < GRAPPLE_RANGE;   // au contact → morsure
 
-			turnToward( sp, sp.target.x, sp.target.y, ( biting ? 3.0 : 4.0 ) * dt );
+			turnToward( sp, sp.target.x, sp.target.y, ( close ? 2.6 : 4.2 ) * dt );
 			steerClear( sp );
 
 			const workerFlee = ( params.moveSpeed / T ) * 1.45;
-			// La proie PANIQUE et fuit : si l'araignée ralentit trop au contact, elle
-			// ne comble jamais les derniers centimètres (la bouche asymptote sans
-			// jamais toucher). Il faut rester nettement plus rapide que la fuite pour
-			// FRANCHIR la bulle de panique et poser la bouche — sans pour autant
-			// bondir. Morsure un peu plus lente que l'approche (contrôle), jamais un creep.
-			const speed = biting
-				? Math.max( 5, workerFlee * 1.3 )
-				: Math.max( 4.5 + aggro * 2.5, workerFlee * 1.5 );
+			// LOIN : fonce (×1,7 la fuite) pour franchir la bulle de panique et poser
+			// la bouche. AU CONTACT : RALENTIT et s'attarde sur la proie saisie (que le
+			// noyau immobilise) pour la MORDRE PLUSIEURS FOIS — sinon l'araignée
+			// traverse le groupe en ne mordant chaque fourmi qu'une fois (venin=1) sans
+			// jamais cumuler la dose létale. Rester dessus = envenimation → mort.
+			const speed = close
+				? Math.max( 1.6, workerFlee * 0.55 )
+				: Math.max( 4.5 + aggro * 2.5, workerFlee * 1.7 );
 			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
 			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
 
-			// CROCHETS ARMÉS pendant toute la traque : c'est le NOYAU (qui voit
-			// TOUTES les fourmis) qui tue celles entrant dans la petite zone de
-			// bouche — jamais les pattes. On NE gate PAS la mise à mort sur
-			// l'échantillon CPU épars (64 fourmis / des centaines) : il rate presque
-			// toujours celle réellement sous la bouche, et avec beaucoup de fourmis
-			// l'araignée ne « verrait » jamais de proche → zéro morsure. Armer en
-			// continu ne tue rien tant que la bouche n'atteint pas une fourmi
-			// (rayon biteR ≈ 1,7 u) : l'arme n'est visible qu'au contact réel.
-			// L'anim d'attaque, elle, ne joue qu'au contact ESTIMÉ (biting).
-			sp.killActive = 1;
-			play( sp, biting ? 'attack' : 'walk', 0.1, biting ? 1.15 : 1.8 );
+			sp.biteMode = MODE_BITE;
+			play( sp, close ? 'attack' : 'walk', 0.1, close ? 1.15 : 1.8 );
 
-			if ( ( sp.lostT || 0 ) > 1.2 ) {
+			if ( sp.newKills > 0 ) {
+
+				// le noyau signale une mise à mort par CETTE araignée → dévoration
+				sp.newKills = 0;
+				sp.state = 'feed';
+				sp.feedTimer = params.eatDuration;
+				play( sp, 'attack', 0.1, 0.7 );
+
+			} else if ( ( sp.lostT || 0 ) > 1.2 ) {
 
 				// plus aucune proie en vue depuis longtemps → on abandonne
 				sp.state = 'idle'; sp.t = 1 + Math.random() * 2;
 
 			}
+
+		} else if ( sp.state === 'feed' ) {
+
+			// DÉVORATION : l'araignée rejoint le lieu de la mise à mort et se met SUR
+			// le cadavre (bouche dessus), puis reste quasi immobile (digestion externe,
+			// anim d'attaque = mêmes gestes de crochets). Le cadavre disparaît (husk)
+			// en fin de repas. Une alarme forte l'interrompt (gérée en tête).
+			sp.feedTimer -= dt;
+
+			const dcx = ( sp.killX || sp.pos.x ) - sp.pos.x;
+			const dcy = ( sp.killY || sp.pos.y ) - sp.pos.y;
+			const dCorpse = Math.hypot( dcx, dcy );
+
+			// marge franche entre « marche vers le cadavre » et « en place » : sinon
+			// l'araignée se fige pile à la frontière (jeu flottant) et n'entre jamais
+			// dans la dévoration
+			if ( dCorpse > MOUTH_OFFSET_WORLD + 0.6 ) {
+
+				// marche droit sur le cadavre (bouche = avant du corps → on l'amène
+				// juste sous les crochets)
+				sp.heading = Math.atan2( dcy, dcx );
+				const step = Math.min( dCorpse - MOUTH_OFFSET_WORLD, 5 * dt );
+				sp.pos.x += Math.cos( sp.heading ) * step;
+				sp.pos.y += Math.sin( sp.heading ) * step;
+				play( sp, 'walk', 0.1, 1.6 );
+
+			} else {
+
+				// en place, SUR le cadavre : anim de dévoration (le cadavre reste
+				// visible pendant le repas) ; dans les derniers instants, mode
+				// consommation → le noyau fait disparaître le husk (zone élargie)
+				play( sp, 'attack', 0.08, 0.6 );
+				if ( sp.feedTimer < 0.5 ) sp.biteMode = MODE_EAT;
+
+			}
+
+			if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + Math.random() * 1.2; }
 
 		}
 
@@ -552,7 +655,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const sx1 = Math.min( 7, Math.floor( ( g.x + reach ) / SECTOR_TX ) );
 			const sy0 = Math.max( 0, Math.floor( ( g.y - reach ) / SECTOR_TX ) );
 			const sy1 = Math.min( 7, Math.floor( ( g.y + reach ) / SECTOR_TX ) );
-			const biteR = BITE_RADIUS_WORLD * T * sp.scaleVar;
+			// zone de crochets (texels) — élargie en dévoration pour rattraper le
+			// cadavre même si l'araignée s'est légèrement décalée de la mise à mort
+			const mult = sp.biteMode === MODE_EAT ? CONSUME_MULT : 1;
+			const biteR = params.biteRadius * mult * T * sp.scaleVar;
 
 			for ( let sy = sy0; sy <= sy1; sy ++ ) {
 
@@ -563,7 +669,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 					const cy = ( sy + 0.5 ) * SECTOR_TX;
 					const d = ( g.x - cx ) ** 2 + ( g.y - cy ) ** 2;
 
-					// A = (centre x, centre y, killActive, rayon de morsure)
+					// A = (centre x, centre y, mode 0/1/2, rayon de crochets)
 					// B = (id, dist² au centre du secteur, bouche x, bouche y)
 					// garde les 2 araignées les plus proches du centre du secteur
 					if ( sim._sectorA[ base ].w === 0 || d < sim._sectorB[ base ].y ) {
@@ -571,12 +677,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 						// décale l'occupant 0 vers le slot 1
 						sim._sectorA[ base + 1 ].copy( sim._sectorA[ base ] );
 						sim._sectorB[ base + 1 ].copy( sim._sectorB[ base ] );
-						sim._sectorA[ base ].set( g.x, g.y, sp.killActive, biteR );
+						sim._sectorA[ base ].set( g.x, g.y, sp.biteMode, biteR );
 						sim._sectorB[ base ].set( sp.id, d, gm.x, gm.y );
 
 					} else if ( sim._sectorA[ base + 1 ].w === 0 || d < sim._sectorB[ base + 1 ].y ) {
 
-						sim._sectorA[ base + 1 ].set( g.x, g.y, sp.killActive, biteR );
+						sim._sectorA[ base + 1 ].set( g.x, g.y, sp.biteMode, biteR );
 						sim._sectorB[ base + 1 ].set( sp.id, d, gm.x, gm.y );
 
 					}
@@ -595,17 +701,23 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		uSpiderColor,
 		uSpiderAccent,
 		reset: resetSpiders,
+		setMouthVisible( v ) { showMouthDebug = !! v; markerMesh.visible = showMouthDebug; },
+		// hooks de débogage (tests headless : pollAnts/pollDamage sont async et ne
+		// résolvent pas dans une boucle synchrone → on les awaite à la main)
+		_dbg: { spiders, pollAnts, pollDamage, sampleN: () => sampleN, setManualPoll( v ) { manualPoll = !! v; } },
 		update( simDt ) {
 
 			const count = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
 
-			if ( count > 0 ) {
+			if ( count > 0 && ! manualPoll ) {
 
 				pollAccum += simDt;
 				if ( pollAccum > 0.3 ) { pollAccum = 0; pollAnts(); }
 
+				// morsures/alarme/mises à mort relevées assez souvent pour que la
+				// bascule vers la dévoration soit réactive après une mise à mort
 				dmgAccum += simDt;
-				if ( dmgAccum > 0.45 ) { dmgAccum = 0; pollDamage(); }
+				if ( dmgAccum > 0.2 ) { dmgAccum = 0; pollDamage(); }
 
 			}
 
@@ -628,6 +740,21 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				aPose.setXYZW( render, sp.pos.x, sp.pos.y, theta, sp.scaleVar );
 				aAnim.setXYZW( render, sp.clip, sp.phase, sp.prevClip, sp.prevPhase );
 				aBlend.setX( render, sp.blend );
+
+				// marqueur de bouche : sphère au point de morsure, rayon = zone réelle
+				if ( showMouthDebug ) {
+
+					const r = params.biteRadius * sp.scaleVar;
+					_mMarker.makeScale( r, r, r );
+					_mMarker.setPosition(
+						sp.pos.x + Math.cos( sp.heading ) * MOUTH_OFFSET_WORLD,
+						0.4,
+						sp.pos.y + Math.sin( sp.heading ) * MOUTH_OFFSET_WORLD,
+					);
+					markerMesh.setMatrixAt( render, _mMarker );
+
+				}
+
 				render ++;
 
 			}
@@ -637,6 +764,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			aPose.needsUpdate = true;
 			aAnim.needsUpdate = true;
 			aBlend.needsUpdate = true;
+
+			markerMesh.count = showMouthDebug ? render : 0;
+			markerMesh.visible = showMouthDebug && render > 0;
+			if ( showMouthDebug ) markerMesh.instanceMatrix.needsUpdate = true;
 
 			buildSectors( count );
 			sim.u.spiderCount.value = count;

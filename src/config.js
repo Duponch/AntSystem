@@ -68,6 +68,17 @@ export const params = {
 	soldierRatio: 0.12,                // part de soldates (chargent au lieu de fuir)
 	fleeRadius: 35,                    // rayon de peur des fourmis (texels)
 
+	// Prédation (calibrée sur la biologie : morsure → envenimation graduée →
+	// paralysie croissante → mort après quelques morsures → dévoration)
+	biteRadius: 0.85,                  // zone de crochets (unités monde) — petite : « sur » la fourmi, pas au bout de la patte
+	bitesToKill: 2,                    // morsures cumulées avant la mort (2-3)
+	biteInterval: 0.55,                // s entre deux morsures d'une même araignée
+	paralysisFactor: 0.35,             // vitesse d'une fourmi après 1 morsure (× vitesse normale)
+	venomRecovery: 0.25,               // dissipation du venin /s (guérison si l'araignée décroche)
+	eatDuration: 3.0,                  // s de dévoration (araignée immobile) avant disparition du cadavre
+	alarmFleeThreshold: 0.45,          // pression d'alarme locale qui fait fuir l'araignée (0..1)
+	alarmWait: 6.0,                    // s d'attente à distance avant de retenter
+
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
@@ -121,6 +132,7 @@ export const gfx = {
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis
+	debugMouth: false,                 // marqueur jaune fluo de la bouche des araignées
 
 	// Performances (LOD des fourmis)
 	lodDist0: 16,                      // rayon plein détail (unités monde)

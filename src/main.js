@@ -31,7 +31,20 @@ async function main() {
 	}
 
 	// --- renderer ---
-	const renderer = new THREE.WebGPURenderer( { antialias: true } );
+	// le noyau fourmis lit/écrit >8 storage buffers (limite WebGPU par défaut) :
+	// on demande le maximum de l'adaptateur (souvent 16), borné pour ne jamais
+	// dépasser ce qu'il supporte — sinon requestDevice échouerait.
+	let requiredLimits;
+
+	try {
+
+		const adapter = await navigator.gpu.requestAdapter();
+		const maxSB = adapter && adapter.limits ? adapter.limits.maxStorageBuffersPerShaderStage : 8;
+		requiredLimits = { maxStorageBuffersPerShaderStage: Math.min( 16, maxSB || 8 ) };
+
+	} catch { /* adaptateur indisponible : on laisse les limites par défaut */ }
+
+	const renderer = new THREE.WebGPURenderer( { antialias: true, requiredLimits } );
 	renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
 	// jamais 0×0 (fenêtre cachée/minimisée) : une swapchain vide invalide tout
 	renderer.setSize( Math.max( 2, window.innerWidth ), Math.max( 2, window.innerHeight ) );

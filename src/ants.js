@@ -248,11 +248,20 @@ export async function createAnts( sim ) {
 
 			}
 
+			// envenimation : la marche se fige progressivement (paralysie) ; un
+			// varying porte la charge de venin (0..1) pour teinter le corps
+			const venom = sim.antVenom.element( antId ).clamp( 0, 1 );
+			animated = mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, venom );
+			varyingProperty( 'float', 'vVenom' ).assign( venom );
+
 			// cadavre (état 2) : pose figée retournée sur le dos, posée au sol
 			const dead = sim.antState.element( antId ).equal( uint( 2 ) );
 			varyingProperty( 'float', 'vDead' ).assign( select( dead, 1, 0 ) );
 
-			const local = animated.mul( bodyScale ).toVar();
+			// dévorée (état 3) : le cadavre a été mangé → sommet dégénéré, invisible
+			const consumed = sim.antState.element( antId ).equal( uint( 3 ) );
+
+			const local = animated.mul( bodyScale ).mul( select( consumed, float( 0 ), float( 1 ) ) ).toVar();
 
 			If( dead, () => {
 
@@ -274,7 +283,9 @@ export async function createAnts( sim ) {
 		material.colorNode = Fn( () => {
 
 			const body = mix( uBodyColor, uSoldierColor, varyingProperty( 'float', 'vSoldier' ).mul( 0.85 ) );
-			const col = mix( body, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
+			const col = mix( body, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) ).toVar();
+			// envenimée : teinte blafarde proportionnelle à la charge de venin
+			col.assign( mix( col, vec3( 0.55, 0.78, 0.66 ), varyingProperty( 'float', 'vVenom' ).mul( 0.7 ) ) );
 			// cadavre : couleur assombrie / grisée
 			return col.mul( mix( float( 1 ), float( 0.5 ), varyingProperty( 'float', 'vDead' ) ) );
 

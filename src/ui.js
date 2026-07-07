@@ -60,6 +60,22 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => sim.u.fleeRadius.value = v );
 	fPredators.add( params, 'soldierRatio', 0, 0.3, 0.01 ).name( 'Part de soldates' )
 		.onChange( ( v ) => sim.u.soldierRatio.value = v );
+
+	// --- prédation : morsure « sur » la proie → envenimation → mort → dévoration ---
+	fPredators.add( params, 'biteRadius', 0.3, 3, 0.05 ).name( 'Zone de crochets (u)' );
+	fPredators.add( params, 'bitesToKill', 1, 5, 1 ).name( 'Morsures fatales' )
+		.onChange( ( v ) => sim.u.bitesToKill.value = v );
+	fPredators.add( params, 'biteInterval', 0.1, 2, 0.05 ).name( 'Cadence morsure (s)' )
+		.onChange( ( v ) => sim.u.biteInterval.value = v );
+	fPredators.add( params, 'paralysisFactor', 0.05, 1, 0.05 ).name( 'Vitesse envenimée (×)' )
+		.onChange( ( v ) => sim.u.paralysisFactor.value = v );
+	fPredators.add( params, 'venomRecovery', 0, 2, 0.05 ).name( 'Guérison venin (/s)' )
+		.onChange( ( v ) => sim.u.venomRecovery.value = v );
+	fPredators.add( params, 'eatDuration', 0.5, 8, 0.5 ).name( 'Durée du repas (s)' );
+	fPredators.add( params, 'alarmFleeThreshold', 0, 1, 0.05 ).name( 'Seuil de fuite (alarme)' );
+	fPredators.add( params, 'alarmWait', 1, 15, 0.5 ).name( 'Attente après fuite (s)' );
+	fPredators.add( gfx, 'debugMouth' ).name( '🔍 Marqueur de bouche (debug)' )
+		.onChange( ( v ) => spiders.setMouthVisible( v ) );
 	fPredators.close();
 
 	const fPher = gui.addFolder( 'Phéromones' );
@@ -534,10 +550,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 		const carrying = Math.max( 0, stats.picked - stats.delivered );
 		const eaten = stats.eaten || 0;
+		const devoured = stats.devoured || 0;
 		overlay.innerHTML =
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
-			( params.spiderCount > 0 ? `🕷 ${eaten} croquées · ` : '' ) +
+			( params.spiderCount > 0 ? `🕷 ${eaten} tuées (${devoured} dévorées) · ` : '' ) +
 			`${params.antCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
 			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
 			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +

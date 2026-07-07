@@ -65,6 +65,11 @@ export class AntSimulation {
 			fleeRadius: uniform( params.fleeRadius ),     // rayon de panique (texels)
 			soldierRatio: uniform( params.soldierRatio ), // part de soldates dans la colonie
 			alarmDecay: uniform( 0.35 ),                  // évanouissement de l'alarme (/s)
+			// prédation : envenimation graduée
+			bitesToKill: uniform( params.bitesToKill ),        // morsures cumulées → mort
+			biteInterval: uniform( params.biteInterval ),      // s entre deux morsures
+			paralysisFactor: uniform( params.paralysisFactor ), // vitesse après 1 morsure
+			venomRecovery: uniform( params.venomRecovery ),    // dissipation du venin /s
 		};
 
 		// menace par SECTEURS (grille 8×8, 2 araignées les plus proches par secteur) :
@@ -78,6 +83,14 @@ export class AntSimulation {
 
 		// morsures des soldates, cumulées par araignée (relu par le CPU ~2×/s)
 		this.spiderDamage = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
+		// pression d'alarme ressentie par CHAQUE araignée (fourmis paniquées autour) :
+		// fait fuir le prédateur ; et proies tuées par CHAQUE araignée (→ passe à la
+		// dévoration). Cumulés, relus par delta côté CPU comme spiderDamage.
+		this.spiderAlarm = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
+		this.spiderKills = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
+		// position (grille) de la dernière proie tuée par CHAQUE araignée → le
+		// prédateur va s'y placer pour dévorer le cadavre (dernier écrivain gagne)
+		this.spiderKillPos = instancedArray( MAX_SPIDERS, 'vec2' );
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
 		// A = (cx, cy, demi-longueur, demi-largeur) en texels ; B = (axe.x, axe.y, type, 0)
@@ -96,13 +109,16 @@ export class AntSimulation {
 		// --- état GPU ---
 		// fourmis : x, y (grille), angle, temps depuis la dernière source
 		this.antData = instancedArray( MAX_ANTS, 'vec4' );
-		this.antState = instancedArray( MAX_ANTS, 'uint' );        // 0 exploratrice, 1 porteuse
+		this.antState = instancedArray( MAX_ANTS, 'uint' );        // 0 exploratrice, 1 porteuse, 2 cadavre, 3 dévorée
+		// envenimation (mono-écrivain : chaque fourmi possède son élément, pas d'atomique)
+		this.antVenom = instancedArray( MAX_ANTS, 'float' );       // charge de venin (0 = saine ; ≥ bitesToKill = morte)
+		this.antBiteClock = instancedArray( MAX_ANTS, 'float' );   // s depuis la dernière morsure (cadence + guérison)
 
 		this.deposit = instancedArray( GRID * GRID * 2, 'uint' ).toAtomic(); // accumulateur virgule fixe
 		this.alarm = instancedArray( GRID * GRID, 'uint' ).toAtomic();       // phéromone d'alarme
 		this.food = instancedArray( GRID * GRID, 'uint' ).toAtomic();        // unités de nourriture
 		this.wall = instancedArray( GRID * GRID, 'uint' );                   // 0/1
-		// [0] livrées, [1] ramassées, [2] croquées, [3..6] morsures par araignée
+		// [0] livrées, [1] ramassées, [2] tuées (mortes de morsures), [3] dévorées
 		this.stats = instancedArray( 8, 'uint' ).toAtomic();
 
 		// --- textures ping-pong du champ de phéromones ---
@@ -147,7 +163,7 @@ export class AntSimulation {
 	_buildKernels() {
 
 		const u = this.u;
-		const { antData, antState, deposit, alarm, food, wall, stats, spiderDamage } = this;
+		const { antData, antState, antVenom, antBiteClock, deposit, alarm, food, wall, stats, spiderDamage, spiderAlarm, spiderKills, spiderKillPos } = this;
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
 
@@ -170,6 +186,8 @@ export class AntSimulation {
 					0,
 				) );
 				antState.element( instanceIndex ).assign( uint( 0 ) );
+				antVenom.element( instanceIndex ).assign( float( 0 ) );
+				antBiteClock.element( instanceIndex ).assign( float( 0 ) );
 
 			} );
 
@@ -202,6 +220,18 @@ export class AntSimulation {
 		this.kClearSpiderDamage = Fn( () => {
 
 			atomicStore( spiderDamage.element( instanceIndex ), uint( 0 ) );
+			atomicStore( spiderAlarm.element( instanceIndex ), uint( 0 ) );
+			atomicStore( spiderKills.element( instanceIndex ), uint( 0 ) );
+
+		} )().compute( MAX_SPIDERS );
+
+		// pression d'alarme = valeur INSTANTANÉE (remise à zéro chaque frame avant
+		// le noyau fourmis) : elle reflète la peur ambiante autour de l'araignée à
+		// l'instant t, et ne peut pas déborder (contrairement à spiderDamage/Kills,
+		// cumulés et relus par delta).
+		this.kClearSpiderAlarm = Fn( () => {
+
+			atomicStore( spiderAlarm.element( instanceIndex ), uint( 0 ) );
 
 		} )().compute( MAX_SPIDERS );
 
@@ -224,74 +254,120 @@ export class AntSimulation {
 				const timer = min( a.w.add( u.dt ), 600 ).toVar();
 				const carrying = st.equal( uint( 1 ) ).toVar();
 
-				// une fourmi morte (état 2) reste un cadavre figé, jamais retraité
-				// (drapeau flottant : 1 = vivante, 0 = cadavre)
-				const alive = select( st.notEqual( uint( 2 ) ), float( 1 ), float( 0 ) ).toVar();
+				// état : 0 exploratrice, 1 porteuse, 2 cadavre, 3 dévorée (disparue).
+				// alive = vivante (drapeau flottant) : cadavres ET dévorées restent figés.
+				const alive = select( st.lessThan( uint( 2 ) ), float( 1 ), float( 0 ) ).toVar();
 
 				// --- caste : soldate (stable par fourmi, même formule que le rendu) ---
 				const soldier = hash( instanceIndex.add( uint( 0xCA57E ) ) ).lessThan( u.soldierRatio ).toVar();
 
+				// envenimation : charge de venin (0 = saine ; ≥ bitesToKill = morte) et
+				// horloge de morsure (s depuis la dernière) — mono-écrivain, pas d'atomique
+				const venom = antVenom.element( instanceIndex ).toVar();
+				const biteClock = antBiteClock.element( instanceIndex ).toVar();
+
 				const panic = float( 0 ).toVar();
 				const rage = float( 0 ).toVar();
 				const fleeDir = vec2( 0 ).toVar();
+				// saisie par les pattes : une araignée qui agrippe (mode morsure) fige
+				// fortement la proie SOUS elle (zone large, pattes), pour que sa bouche
+				// (petite zone) puisse la rejoindre et la mordre. Immobiliser PUIS mordre.
+				const grabbed = float( 0 ).toVar();
 
-				// gardé aussi par spiderCount : sans prédateur, on n'accède JAMAIS aux
-				// secteurs (données potentiellement périmées côté headless/bench)
-				If( alive.greaterThan( 0.5 ).and( u.spiderCount.greaterThan( 0 ) ), () => {
+				// menace + DÉVORATION : accessible aux vivantes ET aux cadavres (état < 3),
+				// jamais aux dévorées. Sans prédateur, on n'accède JAMAIS aux secteurs
+				// (données potentiellement périmées côté headless/bench).
+				If( st.lessThan( uint( 3 ) ).and( u.spiderCount.greaterThan( 0 ) ), () => {
 
-					// --- menace : les 2 araignées du secteur de la fourmi (coût constant
-					// quel que soit le nombre de prédateurs — grille 8×8) ---
+					// --- les 2 araignées du secteur de la fourmi (coût constant quel que
+					// soit le nombre de prédateurs — grille 8×8) ---
 					const sCell = ivec2( pos ).div( int( GRID / 8 ) ).clamp( ivec2( 0 ), ivec2( 7 ) );
 					const sBase = sCell.y.mul( int( 8 ) ).add( sCell.x ).mul( int( 2 ) );
 
 					Loop( { start: int( 0 ), end: int( 2 ), type: 'int', condition: '<' }, ( { i: sk } ) => {
 
-						const sp = u.sectorA.element( sBase.add( sk ) );   // (centre.xy, killActive, rayon morsure)
+						const sp = u.sectorA.element( sBase.add( sk ) );   // (centre.xy, mode 0/1/2, rayon crochets)
 						const sB = u.sectorB.element( sBase.add( sk ) );   // (id, dist², bouche.xy)
 
 						If( sp.w.greaterThan( 0 ), () => {
 
 							const away = pos.sub( sp.xy );
 							const dSp = max( length( away ), 0.001 );
+							const dMouth = length( pos.sub( vec2( sB.z, sB.w ) ) );
+							const spiderId = sB.x.toInt();
 
-							If( dSp.lessThan( u.fleeRadius ), () => {
+							// DÉVORATION (mode 2) : un cadavre sous la bouche d'une araignée
+							// qui mange disparaît (husk consommé, plus rien à l'écran)
+							If( alive.lessThan( 0.5 ).and( st.equal( uint( 2 ) ) )
+								.and( sp.z.greaterThan( 1.5 ) ).and( dMouth.lessThan( sp.w ) ), () => {
+
+								st.assign( uint( 3 ) );
+								atomicAdd( stats.element( 3 ), uint( 1 ) );
+
+							} );
+
+							// réactions des VIVANTES près d'une araignée
+							If( alive.greaterThan( 0.5 ).and( dSp.lessThan( u.fleeRadius ) ), () => {
 
 								const w = float( 1 ).sub( dSp.div( u.fleeRadius ) );
 
 								If( soldier, () => {
 
-									// les soldates CHARGENT : cap sur l'araignée, morsures au contact
-									// du corps (rayon fixe, pas la petite zone de bouche)
+									// soldates : CHARGENT, morsures au contact du corps
 									rage.assign( max( rage, w ) );
 									fleeDir.subAssign( away.div( dSp ).mul( w ) );
 
-									If( alive.greaterThan( 0.5 ).and( dSp.lessThan( float( 13 ) ) ), () => {
+									If( dSp.lessThan( float( 13 ) ), () => {
 
-										const spiderId = sB.x.toInt();
 										atomicAdd( spiderDamage.element( spiderId ), uint( 1 ) );
 
 									} );
 
 								} ).Else( () => {
 
+									// ouvrières : paniquent, fuient — et leur peur nourrit la
+									// pression d'alarme ressentie PAR CETTE araignée (→ fuite)
 									panic.assign( max( panic, w ) );
 									fleeDir.addAssign( away.div( dSp ).mul( w ) );
+									atomicAdd( spiderAlarm.element( spiderId ), w.mul( FIXED ).toUint() );
 
 								} );
 
-								// MORSURE À LA BOUCHE : la fourmi meurt seulement si elle est
-								// dans la petite zone des crochets (avant du corps, sB.zw),
-								// pas dans un rayon centré sur les pattes. L'araignée creep
-								// jusqu'à y amener sa proie. Garde « alive » : pas de double-
-								// comptage si 2 araignées d'un même secteur frappent.
-								const dMouth = length( pos.sub( vec2( sB.z, sB.w ) ) );
+								// SAISIE (mode morsure) : toute fourmi passant PRÈS d'une araignée
+								// qui chasse (rayon du corps/pattes, distance au CENTRE — robuste,
+								// sans viser précisément) est fortement ralentie. L'araignée la fige
+								// sous elle pour que sa BOUCHE (petite zone) la rejoigne et la morde.
+								// La saisie NE TUE PAS : seule la bouche tue (« sur » la fourmi).
+								If( sp.z.greaterThan( 0.5 ).and( sp.z.lessThan( 1.5 ) )
+									.and( dSp.lessThan( u.fleeRadius.mul( 0.85 ) ) ), () => {
 
-								If( alive.greaterThan( 0.5 ).and( sp.z.greaterThan( 0.5 ) ).and( dMouth.lessThan( sp.w ) )
-									.and( hash( iseed.add( uint( 0x2545F491 ) ) ).lessThan( 0.6 ) ), () => {
+									grabbed.assign( 1 );
 
-									st.assign( uint( 2 ) );
-									alive.assign( float( 0 ) );
-									atomicAdd( stats.element( 2 ), uint( 1 ) );
+								} );
+								// ENVENIMATION (mode 1) : tant que la fourmi est SOUS la bouche
+								// (petite zone, avant du corps sB.zw — « sur » elle, pas au bout
+								// d'une patte), le venin s'accumule au rythme d'≈ 1 dose par
+								// biteInterval. Modèle CONTINU : pas besoin de morsures répétées
+								// parfaitement replacées (impossible à viser avec un échantillon
+								// CPU épars) — RESTER sous les crochets suffit, ce que la saisie
+								// (immobilisation) garantit. Au-delà de bitesToKill doses → mort.
+								// La zone d'envenimation est un peu plus large que le point de
+								// bouche pur, pour tolérer le léger jeu de position.
+								If( sp.z.greaterThan( 0.5 ).and( sp.z.lessThan( 1.5 ) )
+									.and( dMouth.lessThan( sp.w.mul( 1.8 ) ) ), () => {
+
+									venom.addAssign( u.dt.div( u.biteInterval ) );
+									biteClock.assign( 0 );
+
+									If( venom.greaterThanEqual( u.bitesToKill ), () => {
+
+										st.assign( uint( 2 ) );
+										alive.assign( float( 0 ) );
+										atomicAdd( stats.element( 2 ), uint( 1 ) );
+										atomicAdd( spiderKills.element( spiderId ), uint( 1 ) );
+										spiderKillPos.element( spiderId ).assign( pos );   // où dévorer
+
+									} );
 
 								} );
 
@@ -306,6 +382,27 @@ export class AntSimulation {
 				// --- reste du comportement, sauté pour les cadavres (fraîchement
 				// tués ou déjà morts) : la fourmi reste figée à sa position ---
 				If( alive.greaterThan( 0.5 ), () => {
+
+				// --- envenimation : l'horloge de morsure avance ; passé ~1,8×
+				// l'intervalle sans nouvelle morsure (araignée décrochée), le venin se
+				// dissipe (guérison). La vitesse de marche chute avec la charge de venin :
+				// 1 morsure → ×paralysisFactor, davantage → quasi immobile. ---
+				biteClock.addAssign( u.dt );
+
+				If( biteClock.greaterThan( u.biteInterval.mul( 1.8 ) ), () => {
+
+					venom.assign( max( venom.sub( u.venomRecovery.mul( u.dt ) ), 0 ) );
+
+				} );
+
+				const paralysis = max(
+					float( 0.06 ),
+					float( 1 ).sub( venom.mul( float( 1 ).sub( u.paralysisFactor ) ) ),
+				).toVar();
+
+				// saisie par les pattes : ralentissement immédiat (immobilisation), même
+				// avant la première morsure — on garde le plus fort des deux effets
+				paralysis.assign( min( paralysis, select( grabbed.greaterThan( 0.5 ), float( 0.22 ), float( 1 ) ) ) );
 
 				// --- phéromone d'alarme : déposée par les paniquées (les soldates
 				// en laissent aussi : elle RECRUTE les autres soldates au combat) ---
@@ -419,8 +516,8 @@ export class AntSimulation {
 				};
 
 				// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
-				// (panique ou charge : +45 % de vitesse)
-				const stepLen = u.moveSpeed.mul( u.dt ).mul( urgency.mul( 0.45 ).add( 1 ) );
+				// (panique ou charge : +45 % de vitesse ; venin : ralentissement)
+				const stepLen = u.moveSpeed.mul( u.dt ).mul( urgency.mul( 0.45 ).add( 1 ) ).mul( paralysis );
 				const nSub = clamp( ceil( stepLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
 				const subLen = stepLen.div( nSub.toFloat() );
 
@@ -531,6 +628,10 @@ export class AntSimulation {
 				ang.assign( ang.sub( floor( ang.div( PI2 ) ).mul( PI2 ) ) );
 
 				a.assign( vec4( pos, ang, timer ) );
+
+				// persistance de l'envenimation (venin, horloge de morsure)
+				antVenom.element( instanceIndex ).assign( venom );
+				antBiteClock.element( instanceIndex ).assign( biteClock );
 
 				} ); // fin If(alive) — reste du comportement
 
@@ -809,6 +910,9 @@ export class AntSimulation {
 	step( dt ) {
 
 		this.u.dt.value = dt;
+		// alarme ressentie par les araignées : instantanée → on la vide avant le
+		// noyau fourmis, qui la re-remplit selon la panique locale de cette frame
+		if ( this.u.spiderCount.value > 0 ) this.renderer.compute( this.kClearSpiderAlarm );
 		this.renderer.compute( this.kAnt[ this.cur ] );
 		this.renderer.compute( this.kGrid[ this.cur ] );
 		this.cur ^= 1;
@@ -963,7 +1067,7 @@ export class AntSimulation {
 
 			const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
 			const data = new Uint32Array( buffer );
-			this.statsData = { delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ] };
+			this.statsData = { delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ], devoured: data[ 3 ] };
 
 		} finally {
 
