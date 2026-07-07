@@ -614,28 +614,45 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const contact = bodyToPrey < ( sp.biting ? CONTACT_ANIM + 1 : CONTACT_ANIM );
 			sp.biting = contact;
 
-			const turnRate = ( contact ? 3.0 : 3.4 ) * dt;
+			const turnRate = ( contact ? 4.5 : 3.4 ) * dt;
 			const turned = turnToward( sp, aimX, aimY, turnRate );
 			steerClear( sp );
-
-			// vitesse : pointe en ligne droite, réduite ∝ virage ; creep lent au contact
-			// pour rester SUR la proie pendant l'envenimation
 			const turnFrac = Math.min( 1, Math.abs( turned ) / ( turnRate + 1e-5 ) );
 			const maxSpeed = contact ? Math.max( 1.3, params.spiderSpeed * 0.22 ) : params.spiderSpeed;
-			const speed = maxSpeed * ( 1 - 0.6 * turnFrac );
-			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
-			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
 
-			sp.biteMode = MODE_BITE;   // hitbox de morsure armée (le noyau ne mord qu'AU CORPS)
-
+			let moveSpeed;
 			if ( contact ) {
 
-				play( sp, 'attack', 0.12, 1.0 );   // morsure : anim d'attaque en boucle
+				// AU CONTACT : avance DIRECTEMENT vers la proie (jamais tangentiel → pas
+				// d'orbite ni de toupie autour d'elle), sans jamais la dépasser
+				const dx = aimX - sp.pos.x, dy = aimY - sp.pos.y, dl = Math.hypot( dx, dy ) || 1e-5;
+				moveSpeed = Math.min( maxSpeed, dl / dt );
+				const step = moveSpeed * dt;
+				sp.pos.x += dx / dl * step;
+				sp.pos.y += dy / dl * step;
 
 			} else {
 
-				// marche : foulée ∝ vitesse × calibrage
-				const stride = Math.max( 0.2, speed / Math.max( 1, params.spiderSpeed ) ) * params.spiderWalkAnim * 1.6;
+				// APPROCHE : le long du cap (courbes douces), RÉDUITE dans les virages et
+				// tant qu'on ne fait pas face à la cible (anti-toupie : pivote avant d'avancer)
+				const toAim = Math.atan2( aimY - sp.pos.y, aimX - sp.pos.x );
+				const facing = Math.max( 0, Math.cos( toAim - sp.heading ) );
+				moveSpeed = maxSpeed * ( 1 - 0.6 * turnFrac ) * facing;
+				sp.pos.x += Math.cos( sp.heading ) * moveSpeed * dt;
+				sp.pos.y += Math.sin( sp.heading ) * moveSpeed * dt;
+
+			}
+
+			sp.biteMode = MODE_BITE;   // hitbox de morsure armée (le noyau ne mord qu'AU CORPS)
+
+			// anim : attaque en boucle au contact ; sinon marche (foulée ∝ vitesse × calibrage)
+			if ( contact ) {
+
+				play( sp, 'attack', 0.12, 1.0 );
+
+			} else {
+
+				const stride = Math.max( 0.2, moveSpeed / Math.max( 1, params.spiderSpeed ) ) * params.spiderWalkAnim * 1.6;
 				play( sp, 'walk', 0.12, stride );
 
 			}
@@ -646,6 +663,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.newKills = 0;
 				sp.state = 'feed';
 				sp.feedTimer = params.eatDuration;
+				sp.feedApproach = 0;
 
 			} else if ( ( sp.lostT || 0 ) > 1.2 ) {
 
@@ -656,36 +674,41 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'feed' ) {
 
-			// DÉVORATION : l'araignée rejoint le lieu de la mise à mort et se met SUR le
-			// cadavre (corps dessus), puis reste quasi immobile (digestion externe, anim
-			// d'attaque en boucle). Le cadavre disparaît (husk) en fin de repas. Une
-			// alarme forte l'interrompt (gérée en tête).
-			sp.feedTimer -= dt;
-
+			// DÉVORATION : l'araignée rejoint le lieu de la mise à mort, se met SUR le
+			// cadavre, puis le dévore un COURT instant (chrono = eatDuration, décompté
+			// UNIQUEMENT une fois sur place — l'approche ne mange pas le temps de repas).
+			// Le cadavre disparaît (husk) en fin de repas. Une alarme forte interrompt.
 			const tx = ( sp.killX == null ) ? sp.pos.x : sp.killX;
 			const ty = ( sp.killY == null ) ? sp.pos.y : sp.killY;
 			const dCorpse = Math.hypot( tx - sp.pos.x, ty - sp.pos.y );
 
 			if ( dCorpse > 1.0 ) {
 
-				// rejoint le cadavre pour se mettre DESSUS (marche fluide)
-				turnToward( sp, tx, ty, 4.0 * dt );
+				// APPROCHE le cadavre (chrono de repas figé). ANTI-TOUPIE : on avance
+				// DIRECTEMENT vers le cadavre (fixe) → la distance décroît toujours,
+				// aucune orbite possible ; le cap pivote juste pour lui faire face.
+				sp.feedApproach = ( sp.feedApproach || 0 ) + dt;
+				turnToward( sp, tx, ty, 6.0 * dt );
 				steerClear( sp );
-				const step = Math.min( dCorpse - 0.8, params.spiderSpeed * 0.6 * dt );
-				sp.pos.x += Math.cos( sp.heading ) * step;
-				sp.pos.y += Math.sin( sp.heading ) * step;
+				const step = Math.min( dCorpse - 0.6, params.spiderSpeed * 0.6 * dt );
+				sp.pos.x += ( tx - sp.pos.x ) / dCorpse * step;
+				sp.pos.y += ( ty - sp.pos.y ) / dCorpse * step;
 				play( sp, 'walk', 0.1, params.spiderWalkAnim * 1.4 );
+
+				// cadavre inatteignable (coincé) → on abandonne au bout de quelques s
+				if ( sp.feedApproach > 4 ) { sp.state = 'idle'; sp.t = 1 + Math.random() * 2; }
 
 			} else {
 
-				// SUR le cadavre : anim de dévoration (le cadavre reste visible pendant
-				// le repas) ; dans les derniers instants, mode consommation → husk effacé
+				// SUR le cadavre : IMMOBILE (cap figé → pas de toupie), anim de dévoration
+				// en boucle ; le chrono du repas tourne ; derniers instants → consommation.
+				sp.feedApproach = 0;
+				sp.feedTimer -= dt;
 				play( sp, 'attack', 0.1, 0.9 );
 				if ( sp.feedTimer < 0.5 ) sp.biteMode = MODE_EAT;
+				if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + Math.random() * 1.2; }
 
 			}
-
-			if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + Math.random() * 1.2; }
 
 		}
 
