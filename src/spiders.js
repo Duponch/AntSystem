@@ -1,131 +1,222 @@
-// Prédateurs : araignées rôdeuses.
+// Prédateurs : araignées rôdeuses — rendu VAT instancié, prêt pour des
+// CENTAINES / MILLIERS d'individus.
 //
-// 1 à 3 individus — à ce volume, un SkinnedMesh classique par araignée avec
-// AnimationMixer (Idle/Walk/Attack du GLB) est l'outil le plus performant
-// (~0,1 ms), le VAT n'aurait de sens qu'à des centaines d'instances.
+// Les 4 clips (Idle/Walk/Attack/Death) sont bakés dans une seule texture
+// (voir loadVATMulti) ; chaque instance porte (clip, phase) × 2 couches + un
+// facteur de fondu → transitions douces comme un AnimationMixer, mais le
+// skinning ne coûte plus rien. La FSM par araignée reste CPU (triviale même à
+// 1024) : guet → déambulation → chasse → frappe, retraite sous les morsures
+// des soldates, mort (clip Death) puis réapparition.
 //
-// Machine à états par araignée : GUET → DÉAMBULATION (évite nid, obstacles,
-// bords) → CHASSE (une fourmi repérée par échantillonnage GPU : 16 octets/s)
-// → FRAPPE (animation Attack, fenêtre de mort brève). Le côté fourmis (fuite,
-// panique, mort/respawn au nid) vit dans le kernel GPU de la simulation.
+// Côté fourmis, la menace passe par une grille de SECTEURS 8×8 : chaque fourmi
+// ne teste que les 2 araignées les plus proches de son secteur — coût constant
+// quel que soit le nombre de prédateurs. Les morsures des soldates
+// s'accumulent dans un buffer GPU par araignée, relu ~2×/s.
 
 import * as THREE from 'three/webgpu';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import {
+	Fn, If, uniform, uniformArray, attribute, vertexIndex, varyingProperty,
+	float, int, uint, vec3, ivec2, mat3, cos, sin, floor, mix, select, textureLoad,
+} from 'three/tsl';
 
-import { GRID, WORLD, NEST, params, gridToWorld, worldToGrid } from './config.js';
+import { loadVATMulti } from './vat.js';
+import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 
-const MAX_SPIDERS = 3;
-const BODY_LENGTH = 3.2;              // unités monde
+const BODY_LENGTH = 3.2;               // unités monde
 const KILL_RADIUS_WORLD = 1.6;
+const MAX_HP = 100;
+const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
+const T = GRID / WORLD;
+const SAMPLE = 1024;                   // fourmis échantillonnées pour la détection
+const WINDOW = 64;                     // fenêtre de recherche par araignée
 
 export async function createSpiders( { scene, sim, renderer, props } ) {
 
-	const gltf = await new GLTFLoader().loadAsync( '/Spider.glb' );
-	gltf.scene.updateMatrixWorld( true );
+	const vat = await loadVATMulti( '/Spider.glb', {
+		clipNames: [ 'Idle', 'Walk', 'Attack', 'Death' ],
+		fps: 16,
+		targetLength: BODY_LENGTH,
+	} );
 
-	// normalisation : longueur du corps ≈ BODY_LENGTH, pattes au sol
-	const box = new THREE.Box3().setFromObject( gltf.scene );
-	const size = new THREE.Vector3();
-	box.getSize( size );
-	const s = BODY_LENGTH / Math.max( size.x, size.z );
-
-	const clips = {
-		idle: gltf.animations.find( ( a ) => a.name.includes( 'Idle' ) ),
-		walk: gltf.animations.find( ( a ) => a.name.includes( 'Walk' ) ),
-		attack: gltf.animations.find( ( a ) => a.name.includes( 'Attack' ) ),
-		death: gltf.animations.find( ( a ) => a.name.includes( 'Death' ) ),
-	};
-
-	const MAX_HP = 100;
+	const clipDur = vat.clipInfos.map( ( c ) => c.duration );
+	const isLoop = [ true, true, false, false ];
 
 	// ------------------------------------------------------------------
-	const spiders = [];
-	const group = new THREE.Group();
-	scene.add( group );
+	// Rendu : un seul mesh instancié, attributs dynamiques par araignée
+	// ------------------------------------------------------------------
+	const aPose = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // x, z, theta, échelle
+	const aAnim = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // clipA, phaseA, clipB, phaseB
+	const aBlend = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS ), 1 );       // poids du clip précédent
+	aPose.setUsage( THREE.DynamicDrawUsage );
+	aAnim.setUsage( THREE.DynamicDrawUsage );
+	aBlend.setUsage( THREE.DynamicDrawUsage );
 
-	for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+	const geo = new THREE.InstancedBufferGeometry();
+	geo.index = vat.geometry.index;
+	geo.setAttribute( 'position', vat.geometry.attributes.position );
+	geo.setAttribute( 'aPose', aPose );
+	geo.setAttribute( 'aAnim', aAnim );
+	geo.setAttribute( 'aBlend', aBlend );
+	geo.instanceCount = 0;
 
-		const root = cloneSkeleton( gltf.scene );
-		root.scale.setScalar( s * ( 0.9 + 0.2 * ( i / MAX_SPIDERS ) ) );
-		root.position.y = - box.min.y * s;
-		root.traverse( ( o ) => {
+	// table des clips : (offset de ligne, nb de frames)
+	// .z = 1 si le clip boucle (Idle/Walk), 0 sinon (Attack/Death tiennent leur dernière frame)
+	const uClips = uniformArray( vat.clipInfos.map( ( c, i ) => new THREE.Vector4( c.offset, c.frames, isLoop[ i ] ? 1 : 0, 0 ) ) );
+	const uSpiderColor = uniform( new THREE.Color( gfx.spiderColor ) );
+	const uSpiderAccent = uniform( new THREE.Color( gfx.spiderAccent ) );
 
-			if ( o.isMesh || o.isSkinnedMesh ) {
+	const material = new THREE.MeshStandardNodeMaterial( { roughness: 0.75, metalness: 0 } );
 
-				o.castShadow = true;
-				o.receiveShadow = true;
-				o.frustumCulled = false;   // squelette animé : bornes CPU fausses
+	const sampleClip = ( clipF, phase ) => {
 
-			}
+		const info = uClips.element( clipF.toInt() );
+		const rf = phase.clamp( 0, 0.999 ).mul( info.y );
+		const f0 = floor( rf );
+		const w = rf.sub( f0 );
+		const r0 = info.x.add( f0 ).toInt();
+		// clip bouclé → frame suivante circulaire ; non bouclé → maintien de la dernière
+		const r1 = info.x.add( select( info.z.greaterThan( 0.5 ), f0.add( 1 ).mod( info.y ), f0.add( 1 ).min( info.y.sub( 1 ) ) ) ).toInt();
+		const p0 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), r0 ) ).xyz;
+		const p1 = textureLoad( vat.texture, ivec2( vertexIndex.toInt(), r1 ) ).xyz;
+		return mix( p0, p1, w );
+
+	};
+
+	material.positionNode = Fn( () => {
+
+		const pose = attribute( 'aPose', 'vec4' );
+		const anim = attribute( 'aAnim', 'vec4' );
+		const blend = attribute( 'aBlend', 'float' );
+
+		varyingProperty( 'float', 'vSpAccent' ).assign(
+			select( vertexIndex.lessThan( uint( vat.counts[ 0 ] ) ), 0, 1 ),
+		);
+
+		const local = sampleClip( anim.x, anim.y ).toVar();
+
+		If( blend.greaterThan( 0.002 ), () => {
+
+			local.assign( mix( local, sampleClip( anim.z, anim.w ), blend ) );
 
 		} );
 
-		const mixer = new THREE.AnimationMixer( root );
-		const actions = {
-			idle: mixer.clipAction( clips.idle ),
-			walk: mixer.clipAction( clips.walk ),
-			attack: mixer.clipAction( clips.attack ),
-			death: mixer.clipAction( clips.death ),
-		};
-		actions.attack.setLoop( THREE.LoopOnce );
-		actions.attack.clampWhenFinished = true;
-		actions.death.setLoop( THREE.LoopOnce );
-		actions.death.clampWhenFinished = true;
+		const c = cos( pose.z );
+		const s = sin( pose.z );
+		const rot = mat3(
+			vec3( c, 0, s.negate() ),
+			vec3( 0, 1, 0 ),
+			vec3( s, 0, c ),
+		);
 
-		const a0 = ( i / MAX_SPIDERS ) * Math.PI * 2 + 0.9;
+		return rot.mul( local.mul( pose.w ) ).add( vec3( pose.x, 0, pose.y ) );
+
+	} )();
+
+	material.colorNode = Fn( () => {
+
+		return mix( uSpiderColor, uSpiderAccent, varyingProperty( 'float', 'vSpAccent' ) );
+
+	} )();
+
+	const mesh = new THREE.Mesh( geo, material );
+	mesh.frustumCulled = false;
+	mesh.castShadow = true;
+	mesh.receiveShadow = true;
+	scene.add( mesh );
+
+	// ------------------------------------------------------------------
+	// État CPU par araignée
+	// ------------------------------------------------------------------
+	const spiders = [];
+
+	for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+
+		const a0 = i * 2.399963; // angle d'or : dispersion homogène
 
 		spiders.push( {
-			root, mixer, actions,
-			current: null,
+			id: i,
 			state: 'idle',
-			t: Math.random() * 2,
-			pos: new THREE.Vector2( Math.cos( a0 ) * 55, Math.sin( a0 ) * 55 ),
+			t: 1 + Math.random() * 3,
+			pos: new THREE.Vector2(
+				Math.cos( a0 ) * ( WORLD * 0.18 + ( i % 11 ) * WORLD * 0.028 ),
+				Math.sin( a0 ) * ( WORLD * 0.18 + ( i % 7 ) * WORLD * 0.036 ),
+			),
 			heading: Math.random() * Math.PI * 2,
 			target: new THREE.Vector2(),
+			detectTimer: Math.random() * 0.4,
 			killActive: 0,
 			hp: MAX_HP,
 			lastBites: 0,
 			biteWindow: 0,
+			scaleVar: 0.85 + Math.random() * 0.3,
+			clip: CLIP.idle,
+			phase: Math.random(),
+			prevClip: CLIP.idle,
+			prevPhase: 0,
+			blend: 0,
+			blendRate: 4,
+			speedScale: 1,
 		} );
-
-		group.add( root );
 
 	}
 
 	function play( sp, name, fade = 0.25, timeScale = 1 ) {
 
-		const next = sp.actions[ name ];
-		if ( sp.current === next ) {
+		const idx = CLIP[ name ];
+		sp.speedScale = timeScale;
+		if ( sp.clip === idx ) return;
 
-			next.timeScale = timeScale;
-			return;
-
-		}
-
-		next.reset().setEffectiveTimeScale( timeScale ).fadeIn( fade ).play();
-		if ( sp.current ) sp.current.fadeOut( fade );
-		sp.current = next;
+		sp.prevClip = sp.clip;
+		sp.prevPhase = sp.phase;
+		sp.blend = 1;
+		sp.blendRate = 1 / Math.max( fade, 0.01 );
+		sp.clip = idx;
+		sp.phase = 0;
 
 	}
 
-	// --- échantillonnage d'une fourmi (16 octets, ~1/s) pour la détection ---
-	const lastAnt = new THREE.Vector2( 1e9, 1e9 );
+	function advanceAnim( sp, dt ) {
+
+		sp.phase += ( dt * sp.speedScale ) / clipDur[ sp.clip ];
+		sp.phase = isLoop[ sp.clip ] ? sp.phase % 1 : Math.min( sp.phase, 0.999 );
+
+		if ( sp.blend > 0 ) {
+
+			sp.prevPhase += dt / clipDur[ sp.prevClip ];
+			sp.prevPhase = isLoop[ sp.prevClip ] ? sp.prevPhase % 1 : Math.min( sp.prevPhase, 0.999 );
+			sp.blend = Math.max( 0, sp.blend - dt * sp.blendRate );
+
+		}
+
+	}
+
+	// --- échantillonnage d'un lot de fourmis (16 Ko ~1×/0,6 s) ---
+	const antSample = new Float32Array( SAMPLE * 2 );  // x, z monde
+	let sampleN = 0;
 	let pollAccum = 0;
 	let polling = false;
 
-	async function pollAnt() {
+	async function pollAnts() {
 
 		if ( polling ) return;
 		polling = true;
 
 		try {
 
-			const idx = Math.floor( Math.random() * params.antCount );
-			const buf = await renderer.getArrayBufferAsync( sim.antData.value, null, idx * 16, 16 );
+			const n = Math.min( SAMPLE, params.antCount );
+			const start = Math.floor( Math.random() * Math.max( 1, params.antCount - n ) );
+			const buf = await renderer.getArrayBufferAsync( sim.antData.value, null, start * 16, n * 16 );
 			const d = new Float32Array( buf );
-			const w = gridToWorld( d[ 0 ], d[ 1 ] );
-			lastAnt.set( w.x, w.z );
+
+			for ( let i = 0; i < n; i ++ ) {
+
+				const w = gridToWorld( d[ i * 4 ], d[ i * 4 + 1 ] );
+				antSample[ i * 2 ] = w.x;
+				antSample[ i * 2 + 1 ] = w.z;
+
+			}
+
+			sampleN = n;
 
 		} catch { /* device occupé */ } finally {
 
@@ -135,7 +226,39 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	}
 
-	// --- morsures des soldates : compteurs stats[3..6], relevés ~2×/s ---
+	// nearest ant sample within a per-spider window (bornée : coût constant)
+	const nearest = new THREE.Vector2();
+
+	function findNearest( sp, maxDist ) {
+
+		if ( sampleN === 0 ) return false;
+
+		let best = maxDist * maxDist;
+		let found = false;
+		const start = ( sp.id * 97 ) % sampleN;
+
+		for ( let k = 0; k < WINDOW; k ++ ) {
+
+			const j = ( start + k ) % sampleN;
+			const dx = antSample[ j * 2 ] - sp.pos.x;
+			const dy = antSample[ j * 2 + 1 ] - sp.pos.y;
+			const d = dx * dx + dy * dy;
+
+			if ( d < best ) {
+
+				best = d;
+				nearest.set( antSample[ j * 2 ], antSample[ j * 2 + 1 ] );
+				found = true;
+
+			}
+
+		}
+
+		return found;
+
+	}
+
+	// --- morsures des soldates : buffer par araignée, relevé ~2×/s ---
 	let dmgAccum = 0;
 	let dmgPolling = false;
 
@@ -146,14 +269,13 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		try {
 
-			const buf = await renderer.getArrayBufferAsync( sim.stats.value );
+			const buf = await renderer.getArrayBufferAsync( sim.spiderDamage.value );
 			const d = new Uint32Array( buf );
 
 			for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
 
-				const bites = d[ 3 + i ] || 0;
-				const delta = Math.max( 0, bites - spiders[ i ].lastBites );  // reset → 0
-				spiders[ i ].lastBites = bites;
+				const delta = Math.max( 0, ( d[ i ] || 0 ) - spiders[ i ].lastBites );
+				spiders[ i ].lastBites = d[ i ] || 0;
 				spiders[ i ].biteWindow = delta;
 
 			}
@@ -166,24 +288,22 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	}
 
-	// --- évitements (nid, obstacles, bords) : direction corrigée ---
+	// --- évitements (nid, obstacles, bords) ---
 	const nestWorld = gridToWorld( NEST.x, NEST.y );
+	const nestV = new THREE.Vector2( nestWorld.x, nestWorld.z );
 	const push = new THREE.Vector2();
 
 	function steerClear( sp ) {
 
 		push.set( 0, 0 );
 
-		// nid : l'araignée n'ose pas approcher la fourmilière
-		const dn = sp.pos.distanceTo( new THREE.Vector2( nestWorld.x, nestWorld.z ) );
-		if ( dn < 12 ) push.add( sp.pos.clone().sub( { x: nestWorld.x, y: nestWorld.z } ).normalize().multiplyScalar( ( 12 - dn ) * 0.4 ) );
+		const dn = sp.pos.distanceTo( nestV );
+		if ( dn < 12 ) push.add( sp.pos.clone().sub( nestV ).normalize().multiplyScalar( ( 12 - dn ) * 0.4 ) );
 
-		// bords de la carte
 		const m = WORLD / 2 - 6;
 		if ( Math.abs( sp.pos.x ) > m ) push.x -= Math.sign( sp.pos.x ) * ( Math.abs( sp.pos.x ) - m ) * 0.5;
 		if ( Math.abs( sp.pos.y ) > m ) push.y -= Math.sign( sp.pos.y ) * ( Math.abs( sp.pos.y ) - m ) * 0.5;
 
-		// obstacles du décor
 		for ( const e of props.registry ) {
 
 			if ( e.category !== 'obstacles' && e.category !== 'trees' ) continue;
@@ -218,7 +338,6 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	}
 
-	// ------------------------------------------------------------------
 	function updateSpider( sp, dt ) {
 
 		const aggro = params.spiderAggro;
@@ -226,7 +345,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		sp.t -= dt;
 		sp.killActive = 0;
 
-		// dégâts des soldates : usure, retraite sous la pression, mort
+		// dégâts : usure, retraite sous la pression, mort
 		if ( sp.biteWindow > 0 && sp.state !== 'death' && sp.state !== 'respawn' ) {
 
 			sp.hp -= sp.biteWindow * 0.006;
@@ -236,7 +355,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( sp.hp <= 0 ) {
 
 				sp.state = 'death';
-				sp.t = ( clips.death ? clips.death.duration : 1.5 ) + 1.6;
+				sp.t = clipDur[ CLIP.death ] + 1.6;
 				play( sp, 'death', 0.1, 1 );
 				return;
 
@@ -244,7 +363,6 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			if ( pressed && sp.state !== 'attack' ) {
 
-				// trop de morsures : elle décroche et détale loin du nid
 				sp.state = 'retreat';
 				sp.t = 3.5;
 
@@ -254,15 +372,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		if ( sp.state === 'death' ) {
 
-			if ( sp.t <= 0 ) {
-
-				sp.state = 'respawn';
-				sp.t = 20;
-				sp.root.visible = false;
-
-			}
-
-			sp.mixer.update( dt );
+			if ( sp.t <= 0 ) { sp.state = 'respawn'; sp.t = 20; }
 			return;
 
 		}
@@ -276,7 +386,6 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.hp = MAX_HP;
 				sp.state = 'idle';
 				sp.t = 2;
-				sp.root.visible = true;
 				play( sp, 'idle', 0 );
 
 			}
@@ -287,49 +396,46 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		if ( sp.state === 'retreat' ) {
 
-			// cap opposé au nid, à toute vitesse
 			turnToward( sp, sp.pos.x * 3, sp.pos.y * 3, 4.5 * dt );
 			steerClear( sp );
 			sp.pos.x += Math.cos( sp.heading ) * 5.2 * dt;
 			sp.pos.y += Math.sin( sp.heading ) * 5.2 * dt;
 			play( sp, 'walk', 0.12, 2.1 );
 
-			if ( sp.t <= 0 ) {
-
-				sp.state = 'idle';
-				sp.t = 3 + Math.random() * 3;
-
-			}
+			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 3 + Math.random() * 3; }
 
 		} else if ( sp.state === 'idle' ) {
 
 			play( sp, 'idle' );
+			sp.detectTimer -= dt;
 
-			if ( sp.t <= 0 ) {
+			if ( sp.detectTimer <= 0 ) {
 
-				sp.state = 'roam';
-				sp.t = 6 + Math.random() * 8;
+				sp.detectTimer = 0.25 + Math.random() * 0.3;
+				if ( findNearest( sp, detect ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); }
 
 			}
 
+			if ( sp.state === 'idle' && sp.t <= 0 ) { sp.state = 'roam'; sp.t = 6 + Math.random() * 8; }
+
 		} else if ( sp.state === 'roam' ) {
 
-			// déambulation : cap qui dérive lentement
 			sp.heading += ( Math.random() - 0.5 ) * 1.6 * dt;
 			steerClear( sp );
-
-			const speed = 1.3;
-			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
-			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
+			sp.pos.x += Math.cos( sp.heading ) * 1.3 * dt;
+			sp.pos.y += Math.sin( sp.heading ) * 1.3 * dt;
 			play( sp, 'walk', 0.25, 0.8 );
 
-			// une fourmi repérée à portée → chasse
-			if ( sp.pos.distanceTo( lastAnt ) < detect ) {
+			sp.detectTimer -= dt;
 
-				sp.state = 'hunt';
-				sp.target.copy( lastAnt );
+			if ( sp.detectTimer <= 0 ) {
 
-			} else if ( sp.t <= 0 ) {
+				sp.detectTimer = 0.25 + Math.random() * 0.3;
+				if ( findNearest( sp, detect ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); }
+
+			}
+
+			if ( sp.state === 'roam' && sp.t <= 0 ) {
 
 				sp.state = 'idle';
 				sp.t = 2.5 + Math.random() * 4 * ( 1 - aggro * 0.7 );
@@ -346,78 +452,141 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
 			play( sp, 'walk', 0.15, 1.7 );
 
+			// ré-accroche périodique sur la fourmi la plus proche
+			sp.detectTimer -= dt;
+
+			if ( sp.detectTimer <= 0 ) {
+
+				sp.detectTimer = 0.3;
+				if ( findNearest( sp, detect * 1.3 ) ) sp.target.copy( nearest );
+
+			}
+
 			if ( sp.pos.distanceTo( sp.target ) < 2.0 ) {
 
 				sp.state = 'attack';
-				sp.t = clips.attack ? clips.attack.duration : 1.0;
+				sp.t = clipDur[ CLIP.attack ];
 				play( sp, 'attack', 0.08, 1 );
 
 			}
 
 		} else if ( sp.state === 'attack' ) {
 
-			// fenêtre de mort au cœur de l'animation
-			const total = clips.attack ? clips.attack.duration : 1.0;
-			const elapsed = total - sp.t;
-			sp.killActive = ( elapsed > total * 0.25 && elapsed < total * 0.7 ) ? 1 : 0;
+			sp.killActive = ( sp.phase > 0.25 && sp.phase < 0.7 ) ? 1 : 0;
 
-			if ( sp.t <= 0 ) {
+			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 1.2 + ( 1 - aggro ) * 2.5; }
 
-				sp.state = 'idle';
-				sp.t = 1.2 + ( 1 - aggro ) * 2.5;
+		}
+
+	}
+
+	// ------------------------------------------------------------------
+	// Grille de secteurs : les 2 araignées les plus proches par secteur
+	// ------------------------------------------------------------------
+	const SECTOR_TX = GRID / 8;
+
+	function buildSectors( count ) {
+
+		for ( let s = 0; s < 128; s ++ ) sim._sectorA[ s ].set( 0, 0, 0, 0 );
+
+		const reach = params.fleeRadius + 12;   // texels d'influence
+
+		for ( let i = 0; i < count; i ++ ) {
+
+			const sp = spiders[ i ];
+			if ( sp.state === 'death' || sp.state === 'respawn' ) continue;
+
+			const g = worldToGrid( sp.pos.x, sp.pos.y );
+			const sx0 = Math.max( 0, Math.floor( ( g.x - reach ) / SECTOR_TX ) );
+			const sx1 = Math.min( 7, Math.floor( ( g.x + reach ) / SECTOR_TX ) );
+			const sy0 = Math.max( 0, Math.floor( ( g.y - reach ) / SECTOR_TX ) );
+			const sy1 = Math.min( 7, Math.floor( ( g.y + reach ) / SECTOR_TX ) );
+			const killR = KILL_RADIUS_WORLD * T * sp.scaleVar;
+
+			for ( let sy = sy0; sy <= sy1; sy ++ ) {
+
+				for ( let sx = sx0; sx <= sx1; sx ++ ) {
+
+					const base = ( sy * 8 + sx ) * 2;
+					const cx = ( sx + 0.5 ) * SECTOR_TX;
+					const cy = ( sy + 0.5 ) * SECTOR_TX;
+					const d = ( g.x - cx ) ** 2 + ( g.y - cy ) ** 2;
+
+					// garde les 2 plus proches du centre du secteur
+					if ( sim._sectorA[ base ].w === 0 || d < sim._sectorB[ base ].y ) {
+
+						// décale l'occupant 0 vers le slot 1
+						sim._sectorA[ base + 1 ].copy( sim._sectorA[ base ] );
+						sim._sectorB[ base + 1 ].copy( sim._sectorB[ base ] );
+						sim._sectorA[ base ].set( g.x, g.y, sp.killActive, killR );
+						sim._sectorB[ base ].set( sp.id, d, 0, 0 );
+
+					} else if ( sim._sectorA[ base + 1 ].w === 0 || d < sim._sectorB[ base + 1 ].y ) {
+
+						sim._sectorA[ base + 1 ].set( g.x, g.y, sp.killActive, killR );
+						sim._sectorB[ base + 1 ].set( sp.id, d, 0, 0 );
+
+					}
+
+				}
 
 			}
 
 		}
 
-		// pose du mesh (le modèle regarde +Z)
-		sp.root.position.x = sp.pos.x;
-		sp.root.position.z = sp.pos.y;
-		sp.root.rotation.y = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
-		sp.mixer.update( dt );
-
 	}
 
 	// ------------------------------------------------------------------
 	return {
-		group,
+		mesh,
+		uSpiderColor,
+		uSpiderAccent,
 		update( simDt ) {
 
-			const count = Math.min( MAX_SPIDERS, params.spiderCount );
+			const count = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
 
-			pollAccum += simDt;
+			if ( count > 0 ) {
 
-			if ( pollAccum > 1.1 - params.spiderAggro * 0.6 && count > 0 ) {
+				pollAccum += simDt;
+				if ( pollAccum > 0.6 ) { pollAccum = 0; pollAnts(); }
 
-				pollAccum = 0;
-				pollAnt();
-
-			}
-
-			dmgAccum += simDt;
-
-			if ( dmgAccum > 0.45 && count > 0 ) {
-
-				dmgAccum = 0;
-				pollDamage();
+				dmgAccum += simDt;
+				if ( dmgAccum > 0.45 ) { dmgAccum = 0; pollDamage(); }
 
 			}
 
-			for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+			let render = 0;
+
+			for ( let i = 0; i < count; i ++ ) {
 
 				const sp = spiders[ i ];
-				const active = i < count;
-				sp.root.visible = active;
 
-				if ( active && simDt > 0 ) updateSpider( sp, simDt );
+				if ( simDt > 0 ) {
 
-				// uniforms GPU : position grille + frappe + rayon de mort
-				const g = active ? worldToGrid( sp.pos.x, sp.pos.y ) : { x: - 1e5, y: - 1e5 };
-				sim._spiderVecs[ i ].set( g.x, g.y, sp.killActive, KILL_RADIUS_WORLD * ( GRID / WORLD ) );
+					updateSpider( sp, simDt );
+					advanceAnim( sp, simDt );
+
+				}
+
+				if ( sp.state === 'respawn' ) continue;
+
+				const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
+				aPose.setXYZW( render, sp.pos.x, sp.pos.y, theta, sp.scaleVar );
+				aAnim.setXYZW( render, sp.clip, sp.phase, sp.prevClip, sp.prevPhase );
+				aBlend.setX( render, sp.blend );
+				render ++;
 
 			}
 
+			geo.instanceCount = render;
+			mesh.visible = render > 0;
+			aPose.needsUpdate = true;
+			aAnim.needsUpdate = true;
+			aBlend.needsUpdate = true;
+
+			buildSectors( count );
 			sim.u.spiderCount.value = count;
+			sim.u.fleeRadius.value = params.fleeRadius;
 
 		},
 	};

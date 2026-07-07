@@ -24,6 +24,7 @@ export const GRID = 1024;              // résolution de la grille (texels)
 export const WORLD = ( saved && saved.gfx && saved.gfx.mapSize ) || 160; // unités monde (au rechargement)
 export const TEXEL = WORLD / GRID;
 export const MAX_ANTS = 65536;
+export const MAX_SPIDERS = 1024;       // prédateurs simultanés (VAT instancié)
 export const FIXED = 1024;             // échelle virgule fixe des dépôts u32
 
 export const NEST = {
@@ -62,9 +63,10 @@ export const params = {
 	foodAmount: 1,                     // unités par bille : 1 = prise → disparue
 
 	// Prédateurs et défense
-	spiderCount: 1,                    // araignées (0 = désactivé)
+	spiderCount: 1,                    // araignées (0 = désactivé, jusqu'à MAX_SPIDERS)
 	spiderAggro: 0.5,                  // agressivité (détection, vitesse, cadence)
 	soldierRatio: 0.12,                // part de soldates (chargent au lieu de fuir)
+	fleeRadius: 35,                    // rayon de peur des fourmis (texels)
 
 	// Affichage
 	trailIntensity: 1.0,
@@ -100,6 +102,8 @@ export const gfx = {
 	antColor: '#16120e',
 	antAccentColor: '#4a5578',         // yeux / antennes
 	soldierColor: '#5a2716',           // caste soldate
+	spiderColor: '#39302a',            // corps de l'araignée (VAT sans matériau GLB)
+	spiderAccent: '#17110c',           // pattes / détail
 	anthillColor: '#7a5230',           // marron terre
 	foodColor: '#ff9d3a',
 

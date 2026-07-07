@@ -3,14 +3,14 @@
 import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-import { params, gfx, worldToGrid, MAX_ANTS, TEXEL, saveSettings, clearSettings } from './config.js';
+import { params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL, saveSettings, clearSettings } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
 import { CATALOG } from './graphics/props.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, controls, camera, renderer, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -54,8 +54,10 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fBehavior.close();
 
 	const fPredators = gui.addFolder( '🕷 Prédateurs & défense' );
-	fPredators.add( params, 'spiderCount', 0, 3, 1 ).name( 'Araignées' );
+	fPredators.add( params, 'spiderCount', 0, MAX_SPIDERS, 1 ).name( 'Araignées' );
 	fPredators.add( params, 'spiderAggro', 0, 1, 0.05 ).name( 'Agressivité' );
+	fPredators.add( params, 'fleeRadius', 10, 90, 1 ).name( 'Rayon de peur' )
+		.onChange( ( v ) => sim.u.fleeRadius.value = v );
 	fPredators.add( params, 'soldierRatio', 0, 0.3, 0.01 ).name( 'Part de soldates' )
 		.onChange( ( v ) => sim.u.soldierRatio.value = v );
 	fPredators.close();
@@ -134,6 +136,10 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => ants.uAccentColor.value.set( v ) );
 	fColors.addColor( gfx, 'soldierColor' ).name( 'Soldates' )
 		.onChange( ( v ) => ants.uSoldierColor.value.set( v ) );
+	fColors.addColor( gfx, 'spiderColor' ).name( 'Araignée' )
+		.onChange( ( v ) => spiders.uSpiderColor.value.set( v ) );
+	fColors.addColor( gfx, 'spiderAccent' ).name( 'Araignée (pattes)' )
+		.onChange( ( v ) => spiders.uSpiderAccent.value.set( v ) );
 	fColors.addColor( gfx, 'anthillColor' ).name( 'Fourmilière' )
 		.onChange( ( v ) => env.anthillMat.color.set( v ) );
 	fColors.addColor( gfx, 'foodColor' ).name( 'Nourriture' ).onChange( ( v ) => {

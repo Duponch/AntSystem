@@ -150,7 +150,7 @@ async function main() {
 	// --- interface ---
 	const ui = createUI( {
 		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
-		godrays, cinematic, bench, music, controls, camera, renderer,
+		godrays, cinematic, bench, music, spiders, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();

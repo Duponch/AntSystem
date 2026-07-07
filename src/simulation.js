@@ -21,7 +21,7 @@ import {
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
-import { GRID, MAX_ANTS, FIXED, NEST, params, gfx } from './config.js';
+import { GRID, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
 
 // gisements de départ (partagés avec la caméra cinématique)
 // (1 bille = 1 unité : zones élargies pour offrir ~15-25 billes chacune)
@@ -62,14 +62,22 @@ export class AntSimulation {
 			haloSpread: uniform( gfx.haloSpread ),        // portée du halo lumineux
 			seed: uniform( 0 ),                           // graine de run (banc d'essai)
 			spiderCount: uniform( 0 ),                    // prédateurs actifs
-			fleeRadius: uniform( 35 ),                    // rayon de panique (texels)
+			fleeRadius: uniform( params.fleeRadius ),     // rayon de panique (texels)
 			soldierRatio: uniform( params.soldierRatio ), // part de soldates dans la colonie
 			alarmDecay: uniform( 0.35 ),                  // évanouissement de l'alarme (/s)
 		};
 
-		// araignées : (x, y grille, frappe en cours 0/1, rayon de mort en texels)
-		this._spiderVecs = Array.from( { length: 4 }, () => new THREE.Vector4() );
-		u.spiders = uniformArray( this._spiderVecs );
+		// menace par SECTEURS (grille 8×8, 2 araignées les plus proches par secteur) :
+		// coût constant côté fourmis quel que soit le nombre de prédateurs.
+		// A = (x, y grille, frappe 0/1, rayon de mort texels ; w=0 → slot vide)
+		// B = (id araignée, dist² au centre du secteur, 0, 0)
+		this._sectorA = Array.from( { length: 128 }, () => new THREE.Vector4() );
+		this._sectorB = Array.from( { length: 128 }, () => new THREE.Vector4() );
+		u.sectorA = uniformArray( this._sectorA );
+		u.sectorB = uniformArray( this._sectorB );
+
+		// morsures des soldates, cumulées par araignée (relu par le CPU ~2×/s)
+		this.spiderDamage = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
 		// A = (cx, cy, demi-longueur, demi-largeur) en texels ; B = (axe.x, axe.y, type, 0)
@@ -139,7 +147,7 @@ export class AntSimulation {
 	_buildKernels() {
 
 		const u = this.u;
-		const { antData, antState, deposit, alarm, food, wall, stats } = this;
+		const { antData, antState, deposit, alarm, food, wall, stats, spiderDamage } = this;
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
 
@@ -191,6 +199,12 @@ export class AntSimulation {
 
 		} )().compute( 8 );
 
+		this.kClearSpiderDamage = Fn( () => {
+
+			atomicStore( spiderDamage.element( instanceIndex ), uint( 0 ) );
+
+		} )().compute( MAX_SPIDERS );
+
 		// ------------------------------------------------------------------
 		// Mise à jour des fourmis (capteurs → pilotage → déplacement → dépôt)
 		// ------------------------------------------------------------------
@@ -210,63 +224,83 @@ export class AntSimulation {
 				const timer = min( a.w.add( u.dt ), 600 ).toVar();
 				const carrying = st.equal( uint( 1 ) ).toVar();
 
+				// une fourmi morte (état 2) reste un cadavre figé, jamais retraité
+				// (drapeau flottant : 1 = vivante, 0 = cadavre)
+				const alive = select( st.notEqual( uint( 2 ) ), float( 1 ), float( 0 ) ).toVar();
+
 				// --- caste : soldate (stable par fourmi, même formule que le rendu) ---
 				const soldier = hash( instanceIndex.add( uint( 0xCA57E ) ) ).lessThan( u.soldierRatio ).toVar();
 
-				// --- menace : araignées (panique et fuite… ou charge des soldates) ---
 				const panic = float( 0 ).toVar();
 				const rage = float( 0 ).toVar();
 				const fleeDir = vec2( 0 ).toVar();
 
-				Loop( { start: int( 0 ), end: u.spiderCount.toInt(), type: 'int', condition: '<' }, ( { i: si } ) => {
+				// gardé aussi par spiderCount : sans prédateur, on n'accède JAMAIS aux
+				// secteurs (données potentiellement périmées côté headless/bench)
+				If( alive.greaterThan( 0.5 ).and( u.spiderCount.greaterThan( 0 ) ), () => {
 
-					const sp = u.spiders.element( si );
-					const away = pos.sub( sp.xy );
-					const dSp = max( length( away ), 0.001 );
+					// --- menace : les 2 araignées du secteur de la fourmi (coût constant
+					// quel que soit le nombre de prédateurs — grille 8×8) ---
+					const sCell = ivec2( pos ).div( int( GRID / 8 ) ).clamp( ivec2( 0 ), ivec2( 7 ) );
+					const sBase = sCell.y.mul( int( 8 ) ).add( sCell.x ).mul( int( 2 ) );
 
-					If( dSp.lessThan( u.fleeRadius ), () => {
+					Loop( { start: int( 0 ), end: int( 2 ), type: 'int', condition: '<' }, ( { i: sk } ) => {
 
-						const w = float( 1 ).sub( dSp.div( u.fleeRadius ) );
+						const sp = u.sectorA.element( sBase.add( sk ) );
 
-						If( soldier, () => {
+						If( sp.w.greaterThan( 0 ), () => {
 
-							// les soldates CHARGENT : cap sur l'araignée, morsures au contact
-							rage.assign( max( rage, w ) );
-							fleeDir.subAssign( away.div( dSp ).mul( w ) );
+							const away = pos.sub( sp.xy );
+							const dSp = max( length( away ), 0.001 );
 
-							If( dSp.lessThan( sp.w.mul( 1.5 ) ), () => {
+							If( dSp.lessThan( u.fleeRadius ), () => {
 
-								atomicAdd( stats.element( si.add( int( 3 ) ) ), uint( 1 ) );
+								const w = float( 1 ).sub( dSp.div( u.fleeRadius ) );
+
+								If( soldier, () => {
+
+									// les soldates CHARGENT : cap sur l'araignée, morsures au contact
+									rage.assign( max( rage, w ) );
+									fleeDir.subAssign( away.div( dSp ).mul( w ) );
+
+									If( alive.greaterThan( 0.5 ).and( dSp.lessThan( sp.w.mul( 1.5 ) ) ), () => {
+
+										const spiderId = u.sectorB.element( sBase.add( sk ) ).x.toInt();
+										atomicAdd( spiderDamage.element( spiderId ), uint( 1 ) );
+
+									} );
+
+								} ).Else( () => {
+
+									panic.assign( max( panic, w ) );
+									fleeDir.addAssign( away.div( dSp ).mul( w ) );
+
+								} );
+
+								// frappe : la fourmi est TUÉE → cadavre figé sur place
+								// (probabilité < 1 : certaines échappent aux crochets). Le
+								// garde « alive » évite qu'une 2e araignée du secteur re-tue
+								// et double-compte une fourmi déjà morte au slot précédent.
+								If( alive.greaterThan( 0.5 ).and( sp.z.greaterThan( 0.5 ) ).and( dSp.lessThan( sp.w ) )
+									.and( hash( iseed.add( uint( 0x2545F491 ) ) ).lessThan( 0.6 ) ), () => {
+
+									st.assign( uint( 2 ) );
+									alive.assign( float( 0 ) );
+									atomicAdd( stats.element( 2 ), uint( 1 ) );
+
+								} );
 
 							} );
-
-						} ).Else( () => {
-
-							panic.assign( max( panic, w ) );
-							fleeDir.addAssign( away.div( dSp ).mul( w ) );
-
-						} );
-
-						// la frappe tue soldates comme ouvrières — une remplaçante
-						// sort du nid (le portage en cours est perdu)
-						If( sp.z.greaterThan( 0.5 ).and( dSp.lessThan( sp.w ) ), () => {
-
-							const rr = sqrt( hash( iseed.add( uint( 0xB5297A4D ) ) ) );
-							const ra = hash( iseed.add( uint( 0x68E31DA4 ) ) ).mul( PI2 );
-							pos.assign( u.nest.add( vec2( cos( ra ), sin( ra ) ).mul( rr.mul( u.nestRadius.mul( 0.7 ) ) ) ) );
-							ang.assign( ra );
-							st.assign( uint( 0 ) );
-							timer.assign( 0 );
-							panic.assign( 0 );
-							rage.assign( 0 );
-							fleeDir.assign( vec2( 0 ) );
-							atomicAdd( stats.element( 2 ), uint( 1 ) );
 
 						} );
 
 					} );
 
 				} );
+
+				// --- reste du comportement, sauté pour les cadavres (fraîchement
+				// tués ou déjà morts) : la fourmi reste figée à sa position ---
+				If( alive.greaterThan( 0.5 ), () => {
 
 				// --- phéromone d'alarme : déposée par les paniquées (les soldates
 				// en laissent aussi : elle RECRUTE les autres soldates au combat) ---
@@ -492,6 +526,8 @@ export class AntSimulation {
 				ang.assign( ang.sub( floor( ang.div( PI2 ) ).mul( PI2 ) ) );
 
 				a.assign( vec4( pos, ang, timer ) );
+
+				} ); // fin If(alive) — reste du comportement
 
 			} );
 
@@ -720,6 +756,7 @@ export class AntSimulation {
 		this.u.reinitFrom.value = 0;
 		await r.computeAsync( this.kClearField );
 		await r.computeAsync( this.kClearStats );
+		await r.computeAsync( this.kClearSpiderDamage );
 		await r.computeAsync( this.kInitAnts );
 
 		// murs : la version ajustée à la main (sauvegardée) prime sur les

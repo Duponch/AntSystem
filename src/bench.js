@@ -13,6 +13,10 @@ export function createBench( { sim, onProgress } ) {
 	async function runOne( { seconds, seed } ) {
 
 		sim.u.seed.value = seed;
+		// banc d'essai = mesure du fourragement pur : pas de prédateur (le kernel
+		// n'accède alors jamais aux secteurs, pilotés par spiders.update hors headless)
+		const savedSpiders = sim.u.spiderCount.value;
+		sim.u.spiderCount.value = 0;
 		await sim.reset();
 
 		const dt = 1 / 60;
@@ -31,6 +35,7 @@ export function createBench( { sim, onProgress } ) {
 
 		}
 
+		sim.u.spiderCount.value = savedSpiders;
 		return checkpoints;
 
 	}

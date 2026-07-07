@@ -52,18 +52,28 @@ Le dossier **🧪 Banc d'essai** (ou l'URL `?bench=5x90`, ou `__antsys.bench.run
 - **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères. La fourmilière est un GLB dédié, et la nourriture rougeoie comme des lucioles posées dans l'herbe.
 - Tout est réglable en direct dans le dossier **Graphismes** du panneau.
 
+## Prédateurs & défense
+
+- **Araignées** (dossier « 🕷 Prédateurs & défense », jusqu'à 1024) rendues en **VAT multi-clips** : les 4 animations du GLB rigué (Idle/Walk/Attack/Death) sont bakées dans une seule texture ; chaque instance mélange deux clips (transition douce) sans coût de skinning — **1024 araignées animées à ~7 ms/frame**. Chacune suit une machine à états (guet → déambulation → chasse → frappe → retraite → mort → réapparition).
+- La menace passe par une **grille de secteurs 8×8** : chaque fourmi ne teste que les 2 araignées les plus proches de son secteur — coût constant côté GPU quel que soit le nombre de prédateurs.
+- **Défense émergente** : une part réglable de la colonie forme des **soldates** (plus grosses) qui *chargent* l'araignée au lieu de fuir et la mordent ; leurs morsures s'accumulent (buffer GPU par araignée) jusqu'à la faire **reculer, puis mourir** (animation Death). Une **phéromone d'alarme** rouge, déposée par les paniquées, *repousse* les ouvrières et *attire* les soldates — le recrutement au combat émerge du même mécanisme à 3 capteurs que le fourragement.
+- **Mort permanente** : une fourmi croquée devient un **cadavre figé, sur le dos, pattes en l'air** (état 2 : pose retournée, inanimée, assombrie) — elle ne réapparaît pas.
+
 ## Structure
 
 ```
 src/
   config.js         constantes, paramètres simulation + graphismes
   simulation.js     kernels TSL : fourmis, grille, pinceau, obstacles, stats
-  vat.js            bake du cycle de marche squelettique en texture
-  ants.js           rendu instancié VAT + grain de nourriture porté
+  vat.js            bake d'animations squelettiques en texture (1 ou N clips)
+  ants.js           rendu instancié VAT + LOD + cadavres + grain porté
+  spiders.js        prédateurs : VAT multi-clips, FSM, secteurs de menace
   environment.js    sol (visualisation du champ), nid
-  graphics/sky.js   dôme, lune, étoiles, lumières, brouillard, lucioles
-  graphics/grass.js tapis d'herbe GPU en chunks
+  graphics/sky.js   dôme, lune, étoiles, lumières, brouillard
+  graphics/grass.js tapis d'herbe GPU (disque suivant la caméra)
   graphics/props.js arbres, obstacles, déco (pack FBX low-poly)
+  editor.js         éditeur de décor (placer/déplacer/redimensionner)
+  bench.js          banc d'essai statistique headless
   ui.js             panneau lil-gui, peinture au pointeur, overlay
   main.js           bootstrap WebGPU et boucle
 ```

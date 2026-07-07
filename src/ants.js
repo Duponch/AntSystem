@@ -248,14 +248,35 @@ export async function createAnts( sim ) {
 
 			}
 
-			return rot.mul( animated.mul( bodyScale ) ).add( world );
+			// cadavre (état 2) : pose figée retournée sur le dos, posée au sol
+			const dead = sim.antState.element( antId ).equal( uint( 2 ) );
+			varyingProperty( 'float', 'vDead' ).assign( select( dead, 1, 0 ) );
+
+			const local = animated.mul( bodyScale ).toVar();
+
+			If( dead, () => {
+
+				const rest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz.mul( bodyScale );
+				// roulis de π autour de l'axe avant : (x,y) → (−x,−y), puis relevé
+				// de la hauteur du corps pour reposer sur le dos, pattes en l'air
+				local.assign( vec3(
+					rest.x.negate(),
+					rest.y.negate().add( float( vat.bounds.height ).mul( bodyScale ) ),
+					rest.z,
+				) );
+
+			} );
+
+			return rot.mul( local ).add( world );
 
 		} )();
 
 		material.colorNode = Fn( () => {
 
 			const body = mix( uBodyColor, uSoldierColor, varyingProperty( 'float', 'vSoldier' ).mul( 0.85 ) );
-			return mix( body, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
+			const col = mix( body, uAccentColor, varyingProperty( 'float', 'vAntAccent' ) );
+			// cadavre : couleur assombrie / grisée
+			return col.mul( mix( float( 1 ), float( 0.5 ), varyingProperty( 'float', 'vDead' ) ) );
 
 		} )();
 
@@ -302,7 +323,7 @@ export async function createAnts( sim ) {
 	grainMat.positionNode = Fn( () => {
 
 		const { rot, world } = antTransform( instanceIndex );
-		const carrying = sim.antState.element( instanceIndex ).toFloat();
+		const carrying = select( sim.antState.element( instanceIndex ).equal( uint( 1 ) ), float( 1 ), float( 0 ) );
 		const bodyScale = select( soldierOf( instanceIndex ), float( 1.45 ), float( 1 ) );
 		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ).mul( bodyScale ) );
 
@@ -334,7 +355,7 @@ export async function createAnts( sim ) {
 	haloMat.positionNode = Fn( () => {
 
 		const { rot, world } = antTransform( instanceIndex );
-		const carrying = sim.antState.element( instanceIndex ).toFloat();
+		const carrying = select( sim.antState.element( instanceIndex ).equal( uint( 1 ) ), float( 1 ), float( 0 ) );
 		const center = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) ).add( world );
 
 		const view = normalize( cameraPosition.sub( center ) );

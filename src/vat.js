@@ -141,6 +141,160 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 }
 
 // ---------------------------------------------------------------------------
+// VAT MULTI-CLIPS : plusieurs clips (Idle/Walk/Attack/Death…) sont bakés dans
+// UNE texture — colonnes = sommets, lignes = frames de tous les clips
+// concaténées. Le rendu échantillonne par (indice de clip, phase 0..1) via une
+// table {offset, frames} et peut fondre deux clips (transition douce). Le
+// skinning ne coûte plus rien → des centaines/milliers d'instances animées.
+// ---------------------------------------------------------------------------
+export async function loadVATMulti( url, { clipNames = [], fps = 16, targetLength = 1 } = {} ) {
+
+	const gltf = await new GLTFLoader().loadAsync( url );
+	const root = gltf.scene;
+	root.updateMatrixWorld( true );
+
+	const skinned = [];
+	root.traverse( ( o ) => {
+
+		if ( o.isSkinnedMesh ) skinned.push( o );
+
+	} );
+
+	if ( skinned.length === 0 ) throw new Error( `${url} : aucun SkinnedMesh` );
+
+	const clips = clipNames.map( ( n ) => {
+
+		const clip = gltf.animations.find( ( a ) => a.name.includes( n ) );
+		if ( ! clip ) throw new Error( `${url} : clip « ${n} » introuvable` );
+		return clip;
+
+	} );
+
+	const mixer = new THREE.AnimationMixer( root );
+	const counts = skinned.map( ( m ) => m.geometry.attributes.position.count );
+	const totalVerts = counts.reduce( ( a, b ) => a + b, 0 );
+
+	// table des clips (offset de ligne + nb de frames) et total de lignes
+	const clipInfos = [];
+	let totalRows = 0;
+
+	for ( const clip of clips ) {
+
+		const frames = Math.max( 2, Math.round( clip.duration * fps ) );
+		clipInfos.push( { name: clip.name, offset: totalRows, frames, duration: clip.duration } );
+		totalRows += frames;
+
+	}
+
+	// --- échantillonnage de tous les clips ---
+	const data = new Float32Array( totalVerts * totalRows * 4 );
+	const v = new THREE.Vector3();
+	const min = new THREE.Vector3( Infinity, Infinity, Infinity );
+	const max = new THREE.Vector3( - Infinity, - Infinity, - Infinity );
+
+	clips.forEach( ( clip, ci ) => {
+
+		mixer.stopAllAction();
+		const action = mixer.clipAction( clip );
+		action.reset().play();
+
+		const info = clipInfos[ ci ];
+
+		for ( let f = 0; f < info.frames; f ++ ) {
+
+			mixer.setTime( ( clip.duration * f ) / info.frames );
+			root.updateMatrixWorld( true );
+
+			let column = 0;
+
+			for ( const m of skinned ) {
+
+				const n = m.geometry.attributes.position.count;
+
+				for ( let i = 0; i < n; i ++ ) {
+
+					m.getVertexPosition( i, v );
+					const o = ( ( info.offset + f ) * totalVerts + column ) * 4;
+					data[ o ] = v.x;
+					data[ o + 1 ] = v.y;
+					data[ o + 2 ] = v.z;
+					data[ o + 3 ] = 1;
+					min.min( v );
+					max.max( v );
+					column ++;
+
+				}
+
+			}
+
+		}
+
+		action.stop();
+
+	} );
+
+	// --- normalisation : centré X/Z, pieds à y=0, longueur cible sur l'axe majeur ---
+	const size = new THREE.Vector3().subVectors( max, min );
+	const scale = targetLength / Math.max( size.x, size.z );
+	const cx = ( min.x + max.x ) / 2;
+	const cz = ( min.z + max.z ) / 2;
+
+	for ( let i = 0; i < totalVerts * totalRows; i ++ ) {
+
+		const o = i * 4;
+		data[ o ] = ( data[ o ] - cx ) * scale;
+		data[ o + 1 ] = ( data[ o + 1 ] - min.y ) * scale;
+		data[ o + 2 ] = ( data[ o + 2 ] - cz ) * scale;
+
+	}
+
+	const texture = new THREE.DataTexture( data, totalVerts, totalRows, THREE.RGBAFormat, THREE.FloatType );
+	texture.minFilter = THREE.NearestFilter;
+	texture.magFilter = THREE.NearestFilter;
+	texture.generateMipmaps = false;
+	texture.needsUpdate = true;
+
+	// --- géométrie fusionnée (même ordre de sommets que les colonnes) ---
+	const position = new Float32Array( totalVerts * 3 );
+
+	for ( let i = 0; i < totalVerts; i ++ ) {
+
+		position[ i * 3 ] = data[ i * 4 ];
+		position[ i * 3 + 1 ] = data[ i * 4 + 1 ];
+		position[ i * 3 + 2 ] = data[ i * 4 + 2 ];
+
+	}
+
+	let indexCount = 0;
+	for ( const m of skinned ) indexCount += m.geometry.index.count;
+
+	const index = new ( totalVerts > 65535 ? Uint32Array : Uint16Array )( indexCount );
+	let indexOffset = 0;
+	let vertexOffset = 0;
+
+	for ( const m of skinned ) {
+
+		const src = m.geometry.index.array;
+		for ( let i = 0; i < src.length; i ++ ) index[ indexOffset + i ] = src[ i ] + vertexOffset;
+		indexOffset += src.length;
+		vertexOffset += m.geometry.attributes.position.count;
+
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute( 'position', new THREE.BufferAttribute( position, 3 ) );
+	const vatIndex = new Float32Array( totalVerts );
+	for ( let i = 0; i < totalVerts; i ++ ) vatIndex[ i ] = i;
+	geometry.setAttribute( 'vatIndex', new THREE.BufferAttribute( vatIndex, 1 ) );
+	geometry.setIndex( new THREE.BufferAttribute( index, 1 ) );
+
+	const bounds = { length: Math.max( size.x, size.z ) * scale, height: size.y * scale };
+
+	return { texture, geometry, totalVerts, counts, bounds, clipInfos };
+
+}
+
+// ---------------------------------------------------------------------------
 // LOD par clustering : les sommets sont regroupés par cellule (taille en
 // unités monde du modèle normalisé), chaque cluster garde UN représentant qui
 // pointe vers SA colonne VAT (attribut vatIndex) — même texture d'animation,
