@@ -23,7 +23,8 @@ import { loadVATMulti } from './vat.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
-const KILL_RADIUS_WORLD = 1.6;
+const KILL_RADIUS_WORLD = 2.0;         // portée de morsure (le bond rapproche)
+const ATTACK_RANGE = 2.8;              // distance de déclenchement du bond
 const MAX_HP = 100;
 const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
 const T = GRID / WORLD;
@@ -444,37 +445,62 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'hunt' ) {
 
-			turnToward( sp, sp.target.x, sp.target.y, 3.2 * dt );
-			steerClear( sp );
+			// suivi VIVANT : on ré-accroche la fourmi la plus proche à chaque frame
+			// (la cible fuit — une cible figée ferait frapper dans le vide)
+			if ( findNearest( sp, detect * 1.6 ) ) {
 
-			const speed = 3.4 + aggro * 1.6;
-			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
-			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
-			play( sp, 'walk', 0.15, 1.7 );
+				sp.target.copy( nearest );
+				sp.lostT = 0;
 
-			// ré-accroche périodique sur la fourmi la plus proche
-			sp.detectTimer -= dt;
+			} else {
 
-			if ( sp.detectTimer <= 0 ) {
-
-				sp.detectTimer = 0.3;
-				if ( findNearest( sp, detect * 1.3 ) ) sp.target.copy( nearest );
+				sp.lostT = ( sp.lostT || 0 ) + dt;
 
 			}
 
-			if ( sp.pos.distanceTo( sp.target ) < 2.0 ) {
+			turnToward( sp, sp.target.x, sp.target.y, 4.0 * dt );
+			steerClear( sp );
+
+			// plus rapide qu'une ouvrière en fuite (moveSpeed × 1.45) → elle la rattrape
+			const workerFlee = ( params.moveSpeed / T ) * 1.45;
+			const speed = Math.max( 4.5 + aggro * 2.5, workerFlee * 1.35 );
+			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
+			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
+			play( sp, 'walk', 0.12, 1.8 );
+
+			if ( sp.pos.distanceTo( sp.target ) < ATTACK_RANGE ) {
 
 				sp.state = 'attack';
 				sp.t = clipDur[ CLIP.attack ];
-				play( sp, 'attack', 0.08, 1 );
+				play( sp, 'attack', 0.06, 1.15 );
+
+			} else if ( ( sp.lostT || 0 ) > 1.2 ) {
+
+				// proie perdue de vue trop longtemps → on abandonne
+				sp.state = 'idle'; sp.t = 1 + Math.random() * 2;
 
 			}
 
 		} else if ( sp.state === 'attack' ) {
 
-			sp.killActive = ( sp.phase > 0.25 && sp.phase < 0.7 ) ? 1 : 0;
+			// BOND : pendant le cœur de l'animation, l'araignée se PROJETTE en
+			// avant sur la proie (sinon, enracinée, elle frappe où la fourmi
+			// n'est plus). La morsure (killActive) tue toute fourmi à portée.
+			if ( sp.phase < 0.45 ) turnToward( sp, sp.target.x, sp.target.y, 5.0 * dt );
 
-			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 1.2 + ( 1 - aggro ) * 2.5; }
+			const lunging = sp.phase > 0.12 && sp.phase < 0.6;
+			sp.killActive = ( sp.phase > 0.15 && sp.phase < 0.62 ) ? 1 : 0;
+
+			if ( lunging ) {
+
+				const workerFlee = ( params.moveSpeed / T ) * 1.45;
+				const lunge = Math.max( 9, workerFlee * 2.6 );
+				sp.pos.x += Math.cos( sp.heading ) * lunge * dt;
+				sp.pos.y += Math.sin( sp.heading ) * lunge * dt;
+
+			}
+
+			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + ( 1 - aggro ) * 1.8; }
 
 		}
 
@@ -548,7 +574,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( count > 0 ) {
 
 				pollAccum += simDt;
-				if ( pollAccum > 0.6 ) { pollAccum = 0; pollAnts(); }
+				if ( pollAccum > 0.3 ) { pollAccum = 0; pollAnts(); }
 
 				dmgAccum += simDt;
 				if ( dmgAccum > 0.45 ) { dmgAccum = 0; pollDamage(); }

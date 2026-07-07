@@ -214,6 +214,10 @@ export async function loadVATMulti( url, { clipNames = [], fps = 16, targetLengt
 				for ( let i = 0; i < n; i ++ ) {
 
 					m.getVertexPosition( i, v );
+					// espace monde du GLB : inclut la rotation racine (Z-up→Y-up de
+					// Blender) que getVertexPosition (espace de bind local) ignore —
+					// sinon le modèle sort couché/vertical
+					v.applyMatrix4( m.matrixWorld );
 					const o = ( ( info.offset + f ) * totalVerts + column ) * 4;
 					data[ o ] = v.x;
 					data[ o + 1 ] = v.y;
