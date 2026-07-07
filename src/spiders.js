@@ -23,8 +23,9 @@ import { loadVATMulti } from './vat.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
-const KILL_RADIUS_WORLD = 2.6;         // portée de morsure (le bond rapproche)
-const ATTACK_RANGE = 3.0;              // distance de déclenchement du bond
+const MOUTH_OFFSET_WORLD = 1.4;        // la bouche/crochets : décalée vers l'AVANT du corps
+const BITE_RADIUS_WORLD = 1.8;         // zone de morsure autour de la bouche (avant du corps)
+const COMBAT_RANGE = 6.0;              // corps→proie estimé : bascule en morsure lente + anim d'attaque
 const MAX_HP = 100;
 const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
 const T = GRID / WORLD;
@@ -130,21 +131,22 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	// ------------------------------------------------------------------
 	const spiders = [];
 
-	for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+	function initSpider( i ) {
 
-		const a0 = i * 2.399963; // angle d'or : dispersion homogène
-
-		spiders.push( {
+		// apparition dans l'ANNEAU de fourragement (là où circulent les fourmis) :
+		// le prédateur est tout de suite dans l'action, quelle que soit la taille
+		// de la colonie — au lieu d'un point fixe lointain, chaotique à trouver
+		const ang = Math.random() * Math.PI * 2;
+		const r = WORLD * ( 0.12 + Math.random() * 0.14 );   // ~ anneau 20–42 u (carte 160)
+		return {
 			id: i,
-			state: 'idle',
-			t: 1 + Math.random() * 3,
-			pos: new THREE.Vector2(
-				Math.cos( a0 ) * ( WORLD * 0.18 + ( i % 11 ) * WORLD * 0.028 ),
-				Math.sin( a0 ) * ( WORLD * 0.18 + ( i % 7 ) * WORLD * 0.036 ),
-			),
+			state: 'roam',
+			t: 0.5 + Math.random() * 2,
+			pos: new THREE.Vector2( Math.cos( ang ) * r, Math.sin( ang ) * r ),
 			heading: Math.random() * Math.PI * 2,
 			target: new THREE.Vector2(),
 			detectTimer: Math.random() * 0.4,
+			lostT: 0,
 			killActive: 0,
 			hp: MAX_HP,
 			lastBites: 0,
@@ -157,7 +159,17 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			blend: 0,
 			blendRate: 4,
 			speedScale: 1,
-		} );
+		};
+
+	}
+
+	for ( let i = 0; i < MAX_SPIDERS; i ++ ) spiders.push( initSpider( i ) );
+
+	// remet toutes les araignées à leur état/position de départ (appelé au reset)
+	function resetSpiders() {
+
+		for ( let i = 0; i < MAX_SPIDERS; i ++ ) spiders[ i ] = initSpider( i );
+		sampleN = 0;
 
 	}
 
@@ -352,7 +364,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	function updateSpider( sp, dt ) {
 
 		const aggro = params.spiderAggro;
-		const detect = 16 + 26 * aggro;
+		const detect = 20 + 30 * aggro;
 		sp.t -= dt;
 		sp.killActive = 0;
 
@@ -372,7 +384,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			}
 
-			if ( pressed && sp.state !== 'attack' ) {
+			// harcelée par les soldates → elle recule (même en pleine morsure)
+			if ( pressed ) {
 
 				sp.state = 'retreat';
 				sp.t = 3.5;
@@ -432,9 +445,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		} else if ( sp.state === 'roam' ) {
 
 			sp.heading += ( Math.random() - 0.5 ) * 1.6 * dt;
-			// dérive vers la colonie quand on en est loin : un prédateur isolé
-			// errerait sinon loin d'une petite colonie sans jamais la croiser
-			if ( sp.pos.distanceTo( nestV ) > 22 ) turnToward( sp, nestV.x, nestV.y, 0.5 * dt );
+			// patrouille l'ANNEAU de fourragement (là où les fourmis circulent),
+			// au lieu de dériver vers le nid où presque personne ne forage :
+			// trop loin → rentre, trop près du nid → ressort
+			const dNest = sp.pos.distanceTo( nestV );
+			if ( dNest > 38 ) turnToward( sp, nestV.x, nestV.y, 0.6 * dt );
+			else if ( dNest < 14 ) turnToward( sp, sp.pos.x * 10, sp.pos.y * 10, 0.6 * dt );
 			steerClear( sp );
 			sp.pos.x += Math.cos( sp.heading ) * 1.3 * dt;
 			sp.pos.y += Math.sin( sp.heading ) * 1.3 * dt;
@@ -458,64 +474,54 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'hunt' ) {
 
-			// suivi VIVANT : on ré-accroche la fourmi la plus proche à chaque frame
-			// (la cible fuit — une cible figée ferait frapper dans le vide)
-			if ( findNearest( sp, detect * 1.6 ) ) {
+			// suivi VIVANT : on ré-accroche la fourmi échantillonnée la plus proche
+			// à chaque frame — sert au PILOTAGE et à l'ANIMATION, jamais à décider
+			// la morsure (l'échantillon CPU ne voit que 64 fourmis et rate presque
+			// toujours celle réellement sous la bouche).
+			const near = findNearest( sp, detect * 1.6 );
+			if ( near ) { sp.target.copy( nearest ); sp.lostT = 0; }
+			else sp.lostT = ( sp.lostT || 0 ) + dt;
 
-				sp.target.copy( nearest );
-				sp.lostT = 0;
+			const bodyToPrey = near
+				? Math.hypot( sp.target.x - sp.pos.x, sp.target.y - sp.pos.y )
+				: 1e9;
+			// « au contact » (estimation) : on ralentit en morsure lente + anim
+			// d'attaque, au lieu de foncer. Sinon on approche (plus vite que la fuite).
+			const biting = bodyToPrey < COMBAT_RANGE;
 
-			} else {
-
-				sp.lostT = ( sp.lostT || 0 ) + dt;
-
-			}
-
-			turnToward( sp, sp.target.x, sp.target.y, 4.0 * dt );
+			turnToward( sp, sp.target.x, sp.target.y, ( biting ? 3.0 : 4.0 ) * dt );
 			steerClear( sp );
 
-			// plus rapide qu'une ouvrière en fuite (moveSpeed × 1.45) → elle la rattrape
 			const workerFlee = ( params.moveSpeed / T ) * 1.45;
-			const speed = Math.max( 4.5 + aggro * 2.5, workerFlee * 1.35 );
+			// La proie PANIQUE et fuit : si l'araignée ralentit trop au contact, elle
+			// ne comble jamais les derniers centimètres (la bouche asymptote sans
+			// jamais toucher). Il faut rester nettement plus rapide que la fuite pour
+			// FRANCHIR la bulle de panique et poser la bouche — sans pour autant
+			// bondir. Morsure un peu plus lente que l'approche (contrôle), jamais un creep.
+			const speed = biting
+				? Math.max( 5, workerFlee * 1.3 )
+				: Math.max( 4.5 + aggro * 2.5, workerFlee * 1.5 );
 			sp.pos.x += Math.cos( sp.heading ) * speed * dt;
 			sp.pos.y += Math.sin( sp.heading ) * speed * dt;
-			play( sp, 'walk', 0.12, 1.8 );
 
-			if ( sp.pos.distanceTo( sp.target ) < ATTACK_RANGE ) {
+			// CROCHETS ARMÉS pendant toute la traque : c'est le NOYAU (qui voit
+			// TOUTES les fourmis) qui tue celles entrant dans la petite zone de
+			// bouche — jamais les pattes. On NE gate PAS la mise à mort sur
+			// l'échantillon CPU épars (64 fourmis / des centaines) : il rate presque
+			// toujours celle réellement sous la bouche, et avec beaucoup de fourmis
+			// l'araignée ne « verrait » jamais de proche → zéro morsure. Armer en
+			// continu ne tue rien tant que la bouche n'atteint pas une fourmi
+			// (rayon biteR ≈ 1,7 u) : l'arme n'est visible qu'au contact réel.
+			// L'anim d'attaque, elle, ne joue qu'au contact ESTIMÉ (biting).
+			sp.killActive = 1;
+			play( sp, biting ? 'attack' : 'walk', 0.1, biting ? 1.15 : 1.8 );
 
-				sp.state = 'attack';
-				sp.t = clipDur[ CLIP.attack ];
-				play( sp, 'attack', 0.06, 1.15 );
+			if ( ( sp.lostT || 0 ) > 1.2 ) {
 
-			} else if ( ( sp.lostT || 0 ) > 1.2 ) {
-
-				// proie perdue de vue trop longtemps → on abandonne
+				// plus aucune proie en vue depuis longtemps → on abandonne
 				sp.state = 'idle'; sp.t = 1 + Math.random() * 2;
 
 			}
-
-		} else if ( sp.state === 'attack' ) {
-
-			// BOND guidé : l'araignée ré-accroche la proie VIVANTE la plus proche
-			// à chaque frame et braque le bond dessus — sinon, en visant la
-			// position échantillonnée (périmée), elle plonge là où la fourmi
-			// n'est plus. La morsure (killActive) tue toute fourmi à portée.
-			if ( findNearest( sp, 10 ) ) sp.target.copy( nearest );
-			turnToward( sp, sp.target.x, sp.target.y, 6.5 * dt );
-
-			const lunging = sp.phase > 0.1 && sp.phase < 0.62;
-			sp.killActive = ( sp.phase > 0.12 && sp.phase < 0.66 ) ? 1 : 0;
-
-			if ( lunging ) {
-
-				const workerFlee = ( params.moveSpeed / T ) * 1.45;
-				const lunge = Math.max( 9, workerFlee * 2.8 );
-				sp.pos.x += Math.cos( sp.heading ) * lunge * dt;
-				sp.pos.y += Math.sin( sp.heading ) * lunge * dt;
-
-			}
-
-			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 0.5 + ( 1 - aggro ) * 1.6; }
 
 		}
 
@@ -537,12 +543,16 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const sp = spiders[ i ];
 			if ( sp.state === 'death' || sp.state === 'respawn' ) continue;
 
-			const g = worldToGrid( sp.pos.x, sp.pos.y );
+			const g = worldToGrid( sp.pos.x, sp.pos.y );                 // centre du corps (fuite)
+			const gm = worldToGrid(                                     // bouche (avant → morsure)
+				sp.pos.x + Math.cos( sp.heading ) * MOUTH_OFFSET_WORLD,
+				sp.pos.y + Math.sin( sp.heading ) * MOUTH_OFFSET_WORLD,
+			);
 			const sx0 = Math.max( 0, Math.floor( ( g.x - reach ) / SECTOR_TX ) );
 			const sx1 = Math.min( 7, Math.floor( ( g.x + reach ) / SECTOR_TX ) );
 			const sy0 = Math.max( 0, Math.floor( ( g.y - reach ) / SECTOR_TX ) );
 			const sy1 = Math.min( 7, Math.floor( ( g.y + reach ) / SECTOR_TX ) );
-			const killR = KILL_RADIUS_WORLD * T * sp.scaleVar;
+			const biteR = BITE_RADIUS_WORLD * T * sp.scaleVar;
 
 			for ( let sy = sy0; sy <= sy1; sy ++ ) {
 
@@ -553,19 +563,21 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 					const cy = ( sy + 0.5 ) * SECTOR_TX;
 					const d = ( g.x - cx ) ** 2 + ( g.y - cy ) ** 2;
 
-					// garde les 2 plus proches du centre du secteur
+					// A = (centre x, centre y, killActive, rayon de morsure)
+					// B = (id, dist² au centre du secteur, bouche x, bouche y)
+					// garde les 2 araignées les plus proches du centre du secteur
 					if ( sim._sectorA[ base ].w === 0 || d < sim._sectorB[ base ].y ) {
 
 						// décale l'occupant 0 vers le slot 1
 						sim._sectorA[ base + 1 ].copy( sim._sectorA[ base ] );
 						sim._sectorB[ base + 1 ].copy( sim._sectorB[ base ] );
-						sim._sectorA[ base ].set( g.x, g.y, sp.killActive, killR );
-						sim._sectorB[ base ].set( sp.id, d, 0, 0 );
+						sim._sectorA[ base ].set( g.x, g.y, sp.killActive, biteR );
+						sim._sectorB[ base ].set( sp.id, d, gm.x, gm.y );
 
 					} else if ( sim._sectorA[ base + 1 ].w === 0 || d < sim._sectorB[ base + 1 ].y ) {
 
-						sim._sectorA[ base + 1 ].set( g.x, g.y, sp.killActive, killR );
-						sim._sectorB[ base + 1 ].set( sp.id, d, 0, 0 );
+						sim._sectorA[ base + 1 ].set( g.x, g.y, sp.killActive, biteR );
+						sim._sectorB[ base + 1 ].set( sp.id, d, gm.x, gm.y );
 
 					}
 
@@ -582,6 +594,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		mesh,
 		uSpiderColor,
 		uSpiderAccent,
+		reset: resetSpiders,
 		update( simDt ) {
 
 			const count = Math.min( MAX_SPIDERS, params.spiderCount | 0 );

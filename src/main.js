@@ -154,6 +154,7 @@ async function main() {
 		onReset: async () => {
 
 			await sim.reset();
+			spiders.reset();   // les prédateurs repartent aussi de zéro
 
 			// réécrit les marqueurs (nid, nourriture semée) dans la texture affichée,
 			// indispensable quand la simulation est en pause

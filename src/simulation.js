@@ -246,7 +246,8 @@ export class AntSimulation {
 
 					Loop( { start: int( 0 ), end: int( 2 ), type: 'int', condition: '<' }, ( { i: sk } ) => {
 
-						const sp = u.sectorA.element( sBase.add( sk ) );
+						const sp = u.sectorA.element( sBase.add( sk ) );   // (centre.xy, killActive, rayon morsure)
+						const sB = u.sectorB.element( sBase.add( sk ) );   // (id, dist², bouche.xy)
 
 						If( sp.w.greaterThan( 0 ), () => {
 
@@ -260,12 +261,13 @@ export class AntSimulation {
 								If( soldier, () => {
 
 									// les soldates CHARGENT : cap sur l'araignée, morsures au contact
+									// du corps (rayon fixe, pas la petite zone de bouche)
 									rage.assign( max( rage, w ) );
 									fleeDir.subAssign( away.div( dSp ).mul( w ) );
 
-									If( alive.greaterThan( 0.5 ).and( dSp.lessThan( sp.w.mul( 1.5 ) ) ), () => {
+									If( alive.greaterThan( 0.5 ).and( dSp.lessThan( float( 13 ) ) ), () => {
 
-										const spiderId = u.sectorB.element( sBase.add( sk ) ).x.toInt();
+										const spiderId = sB.x.toInt();
 										atomicAdd( spiderDamage.element( spiderId ), uint( 1 ) );
 
 									} );
@@ -277,11 +279,14 @@ export class AntSimulation {
 
 								} );
 
-								// frappe : la fourmi est TUÉE → cadavre figé sur place
-								// (probabilité < 1 : certaines échappent aux crochets). Le
-								// garde « alive » évite qu'une 2e araignée du secteur re-tue
-								// et double-compte une fourmi déjà morte au slot précédent.
-								If( alive.greaterThan( 0.5 ).and( sp.z.greaterThan( 0.5 ) ).and( dSp.lessThan( sp.w ) )
+								// MORSURE À LA BOUCHE : la fourmi meurt seulement si elle est
+								// dans la petite zone des crochets (avant du corps, sB.zw),
+								// pas dans un rayon centré sur les pattes. L'araignée creep
+								// jusqu'à y amener sa proie. Garde « alive » : pas de double-
+								// comptage si 2 araignées d'un même secteur frappent.
+								const dMouth = length( pos.sub( vec2( sB.z, sB.w ) ) );
+
+								If( alive.greaterThan( 0.5 ).and( sp.z.greaterThan( 0.5 ) ).and( dMouth.lessThan( sp.w ) )
 									.and( hash( iseed.add( uint( 0x2545F491 ) ) ).lessThan( 0.6 ) ), () => {
 
 									st.assign( uint( 2 ) );
