@@ -21,7 +21,7 @@ import {
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
-import { GRID, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
+import { GRID, WORLD, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
 
 // gisements de départ (partagés avec la caméra cinématique)
 // (1 bille = 1 unité : zones élargies pour offrir ~15-25 billes chacune)
@@ -70,6 +70,7 @@ export class AntSimulation {
 			biteInterval: uniform( params.biteInterval ),      // s entre deux morsures
 			paralysisFactor: uniform( params.paralysisFactor ), // vitesse après 1 morsure
 			venomRecovery: uniform( params.venomRecovery ),    // dissipation du venin /s
+			antHitR: uniform( params.antRadius * GRID / WORLD ), // rayon hitbox fourmi (texels)
 		};
 
 		// menace par SECTEURS (grille 8×8, 2 araignées les plus proches par secteur) :
@@ -293,13 +294,15 @@ export class AntSimulation {
 
 							const away = pos.sub( sp.xy );
 							const dSp = max( length( away ), 0.001 );
-							const dMouth = length( pos.sub( vec2( sB.z, sB.w ) ) );
 							const spiderId = sB.x.toInt();
+							// contact = les hitbox se touchent : corps araignée (sp.w) + corps fourmi
+							const contact = sp.w.add( u.antHitR );
 
-							// DÉVORATION (mode 2) : un cadavre sous la bouche d'une araignée
-							// qui mange disparaît (husk consommé, plus rien à l'écran)
+							// DÉVORATION (mode 2) : un cadavre SOUS le corps d'une araignée qui
+							// mange disparaît (husk consommé, plus rien à l'écran). sp.w déjà
+							// élargi (×CONSUME_MULT) côté CPU pour ce mode.
 							If( alive.lessThan( 0.5 ).and( st.equal( uint( 2 ) ) )
-								.and( sp.z.greaterThan( 1.5 ) ).and( dMouth.lessThan( sp.w ) ), () => {
+								.and( sp.z.greaterThan( 1.5 ) ).and( dSp.lessThan( contact ) ), () => {
 
 								st.assign( uint( 3 ) );
 								atomicAdd( stats.element( 3 ), uint( 1 ) );
@@ -344,17 +347,16 @@ export class AntSimulation {
 									grabbed.assign( 1 );
 
 								} );
-								// ENVENIMATION (mode 1) : tant que la fourmi est SOUS la bouche
-								// (petite zone, avant du corps sB.zw — « sur » elle, pas au bout
-								// d'une patte), le venin s'accumule au rythme d'≈ 1 dose par
-								// biteInterval. Modèle CONTINU : pas besoin de morsures répétées
-								// parfaitement replacées (impossible à viser avec un échantillon
-								// CPU épars) — RESTER sous les crochets suffit, ce que la saisie
-								// (immobilisation) garantit. Au-delà de bitesToKill doses → mort.
-								// La zone d'envenimation est un peu plus large que le point de
-								// bouche pur, pour tolérer le léger jeu de position.
+								// ENVENIMATION (mode 1) : tant que la fourmi est SOUS le CORPS de
+								// l'araignée (hitbox corps araignée + hitbox fourmi se touchent —
+								// distance au CENTRE, pas à une patte avant), le venin s'accumule
+								// au rythme d'≈ 1 dose / biteInterval. Modèle CONTINU : pas besoin
+								// de morsures répétées parfaitement replacées (impossible à viser
+								// avec un échantillon CPU épars) — RESTER sur la fourmi suffit, ce
+								// que la saisie (immobilisation) garantit. Au-delà de bitesToKill
+								// doses → mort.
 								If( sp.z.greaterThan( 0.5 ).and( sp.z.lessThan( 1.5 ) )
-									.and( dMouth.lessThan( sp.w.mul( 1.8 ) ) ), () => {
+									.and( dSp.lessThan( contact ) ), () => {
 
 									venom.addAssign( u.dt.div( u.biteInterval ) );
 									biteClock.assign( 0 );

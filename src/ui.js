@@ -56,13 +56,19 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const fPredators = gui.addFolder( '🕷 Prédateurs & défense' );
 	fPredators.add( params, 'spiderCount', 0, MAX_SPIDERS, 1 ).name( 'Araignées' );
 	fPredators.add( params, 'spiderAggro', 0, 1, 0.05 ).name( 'Agressivité' );
+	fPredators.add( params, 'spiderSpeed', 1, 20, 0.5 ).name( 'Vitesse araignée' );
+	fPredators.add( params, 'spiderWalkAnim', 0.3, 4, 0.05 ).name( 'Calibrage animation' );
+	fPredators.add( params, 'spiderVision', 10, 90, 1 ).name( 'Portée de vision' );
+	fPredators.add( params, 'spiderFOV', 20, 300, 5 ).name( 'Champ de vision (°)' );
 	fPredators.add( params, 'fleeRadius', 10, 90, 1 ).name( 'Rayon de peur' )
 		.onChange( ( v ) => sim.u.fleeRadius.value = v );
 	fPredators.add( params, 'soldierRatio', 0, 0.3, 0.01 ).name( 'Part de soldates' )
 		.onChange( ( v ) => sim.u.soldierRatio.value = v );
 
-	// --- prédation : morsure « sur » la proie → envenimation → mort → dévoration ---
-	fPredators.add( params, 'biteRadius', 0.3, 3, 0.05 ).name( 'Zone de crochets (u)' );
+	// --- prédation : morsure « sur » le corps → envenimation → mort → dévoration ---
+	fPredators.add( params, 'bodyRadius', 0.3, 3, 0.05 ).name( 'Hitbox corps araignée (u)' );
+	fPredators.add( params, 'antRadius', 0.1, 1.5, 0.05 ).name( 'Hitbox corps fourmi (u)' )
+		.onChange( ( v ) => { sim.u.antHitR.value = v / TEXEL; ants.uAntHitR.value = v; } );
 	fPredators.add( params, 'bitesToKill', 1, 5, 1 ).name( 'Morsures fatales' )
 		.onChange( ( v ) => sim.u.bitesToKill.value = v );
 	fPredators.add( params, 'biteInterval', 0.1, 2, 0.05 ).name( 'Cadence morsure (s)' )
@@ -74,8 +80,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fPredators.add( params, 'eatDuration', 0.5, 8, 0.5 ).name( 'Durée du repas (s)' );
 	fPredators.add( params, 'alarmFleeThreshold', 0, 1, 0.05 ).name( 'Seuil de fuite (alarme)' );
 	fPredators.add( params, 'alarmWait', 1, 15, 0.5 ).name( 'Attente après fuite (s)' );
-	fPredators.add( gfx, 'debugMouth' ).name( '🔍 Marqueur de bouche (debug)' )
-		.onChange( ( v ) => spiders.setMouthVisible( v ) );
+	fPredators.add( gfx, 'debugSpider' ).name( '🔍 Hitbox & vision (debug)' )
+		.onChange( ( v ) => { spiders.setDebugVisible( v ); ants.setHitboxVisible( v ); } );
 	fPredators.close();
 
 	const fPher = gui.addFolder( 'Phéromones' );

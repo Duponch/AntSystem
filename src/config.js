@@ -70,7 +70,12 @@ export const params = {
 
 	// Prédation (calibrée sur la biologie : morsure → envenimation graduée →
 	// paralysie croissante → mort après quelques morsures → dévoration)
-	biteRadius: 0.85,                  // zone de crochets (unités monde) — petite : « sur » la fourmi, pas au bout de la patte
+	spiderSpeed: 8,                    // vitesse de pointe de l'araignée (unités monde/s)
+	spiderWalkAnim: 1.4,               // calibrage anim araignée (rapport foulée/vitesse)
+	spiderFOV: 120,                    // champ de vision (degrés, cône vers l'avant)
+	spiderVision: 45,                  // portée de détection (unités monde)
+	bodyRadius: 1.1,                   // rayon du CORPS de l'araignée (hitbox de morsure — « sur » la fourmi)
+	antRadius: 0.45,                   // rayon du corps de la fourmi (hitbox)
 	bitesToKill: 2,                    // morsures cumulées avant la mort (2-3)
 	biteInterval: 0.55,                // s entre deux morsures d'une même araignée
 	paralysisFactor: 0.35,             // vitesse d'une fourmi après 1 morsure (× vitesse normale)
@@ -132,7 +137,7 @@ export const gfx = {
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis
-	debugMouth: false,                 // marqueur jaune fluo de la bouche des araignées
+	debugSpider: false,                // hitbox (corps araignée + fourmis) et cône de vision de l'araignée
 
 	// Performances (LOD des fourmis)
 	lodDist0: 16,                      // rayon plein détail (unités monde)

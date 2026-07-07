@@ -391,7 +391,31 @@ export async function createAnts( sim ) {
 	const grainHalo = new THREE.Mesh( haloGeo, haloMat );
 	grainHalo.frustumCulled = false;
 
-	group.add( grain, grainHalo );
+	// hitbox de DÉBOGAGE : sphère cyan translucide sur le corps de chaque fourmi.
+	// Avec la sphère jaune de l'araignée, permet de VOIR si, au moment de la morsure,
+	// le corps de la fourmi touche bien celui de l'araignée (et pas une patte avant).
+	// Masquée pour les fourmis dévorées (état 3).
+	const uAntHitR = uniform( params.antRadius );
+	const hbGeo = new THREE.InstancedBufferGeometry();
+	const hbIco = new THREE.IcosahedronGeometry( 1, 2 );
+	hbGeo.index = hbIco.index;
+	hbGeo.attributes = hbIco.attributes;
+	hbGeo.instanceCount = params.antCount;
+	const hbMat = new THREE.MeshBasicNodeMaterial( { color: new THREE.Color( 0x36ffd5 ), transparent: true, opacity: 0.22, depthWrite: false, toneMapped: false } );
+	hbMat.positionNode = Fn( () => {
+
+		const { rot, world } = antTransform( instanceIndex );
+		const bodyScale = select( soldierOf( instanceIndex ), float( 1.45 ), float( 1 ) );
+		const hide = select( sim.antState.element( instanceIndex ).equal( uint( 3 ) ), float( 0 ), float( 1 ) );
+		const center = rot.mul( vec3( 0, vat.bounds.height * 0.45, 0 ).mul( bodyScale ) ).add( world );
+		return positionLocal.mul( uAntHitR.mul( bodyScale ).mul( hide ) ).add( center );
+
+	} )();
+	const antHitbox = new THREE.Mesh( hbGeo, hbMat );
+	antHitbox.frustumCulled = false;
+	antHitbox.visible = !! gfx.debugSpider;
+
+	group.add( grain, grainHalo, antHitbox );
 
 	// ------------------------------------------------------------------
 	const renderer = sim.renderer;
@@ -406,10 +430,13 @@ export async function createAnts( sim ) {
 		uGrainHalo,
 		uGrainHaloIntensity,
 		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },
+		uAntHitR,
+		setHitboxVisible( v ) { antHitbox.visible = !! v; },
 		setCount( n ) {
 
 			grainGeo.instanceCount = n;
 			haloGeo.instanceCount = n;
+			hbGeo.instanceCount = n;
 
 		},
 		setShadows( on ) {
