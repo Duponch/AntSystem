@@ -143,6 +143,8 @@ export const gfx = {
 	lodDist0: 16,                      // rayon plein détail (unités monde)
 	lodDist1: 42,                      // distance d'animation — au-delà : silhouette figée
 	lodBudget: 3000,                   // fourmis plein détail max (rétrogradées ensuite)
+	maxAntCorpses: 2000,               // cadavres de fourmis affichés max (les plus vieux disparaissent)
+	maxSpiderCorpses: 60,              // cadavres d'araignées gardés max (les plus vieux disparaissent)
 
 	// Échelles du décor
 	scaleTrees: 1.0,

@@ -204,6 +204,9 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fPerf.add( gfx, 'lodDist0', 6, 40, 1 ).name( 'Plein détail (u)' );
 	fPerf.add( gfx, 'lodDist1', 20, 100, 1 ).name( 'Distance d\'animation (u)' );
 	fPerf.add( gfx, 'lodBudget', 500, 12000, 100 ).name( 'Budget plein détail' );
+	fPerf.add( gfx, 'maxAntCorpses', 0, 20000, 100 ).name( 'Cadavres fourmis max' )
+		.onChange( ( v ) => sim.u.maxAntCorpses.value = v );
+	fPerf.add( gfx, 'maxSpiderCorpses', 0, 1000, 5 ).name( 'Cadavres araignées max' );
 
 	const fScales = fGfx.addFolder( 'Tailles du décor' );
 	const rescale = ( cat, restamp ) => () => {

@@ -71,6 +71,7 @@ export class AntSimulation {
 			paralysisFactor: uniform( params.paralysisFactor ), // vitesse après 1 morsure
 			venomRecovery: uniform( params.venomRecovery ),    // dissipation du venin /s
 			antHitR: uniform( params.antRadius * GRID / WORLD ), // rayon hitbox fourmi (texels)
+			maxAntCorpses: uniform( gfx.maxAntCorpses ),        // cadavres de fourmis gardés (cap perf)
 		};
 
 		// menace par SECTEURS (grille 8×8, 2 araignées les plus proches par secteur) :
@@ -259,6 +260,20 @@ export class AntSimulation {
 				// alive = vivante (drapeau flottant) : cadavres ET dévorées restent figés.
 				const alive = select( st.lessThan( uint( 2 ) ), float( 1 ), float( 0 ) ).toVar();
 
+				// CAP DE CADAVRES : un cadavre (état 2) dont le numéro de série est plus
+				// vieux que les maxAntCorpses derniers créés disparaît (état 3, non rendu)
+				// — borne le coût d'affichage. (stats[2] = total tué = compteur de série.)
+				If( st.equal( uint( 2 ) ), () => {
+
+					If( antBiteClock.element( instanceIndex ).add( u.maxAntCorpses )
+						.lessThan( atomicLoad( stats.element( 2 ) ).toFloat() ), () => {
+
+						st.assign( uint( 3 ) );
+
+					} );
+
+				} );
+
 				// --- caste : soldate (stable par fourmi, même formule que le rendu) ---
 				const soldier = hash( instanceIndex.add( uint( 0xCA57E ) ) ).lessThan( u.soldierRatio ).toVar();
 
@@ -365,7 +380,11 @@ export class AntSimulation {
 
 										st.assign( uint( 2 ) );
 										alive.assign( float( 0 ) );
-										atomicAdd( stats.element( 2 ), uint( 1 ) );
+										// stats[2] = nombre total de tuées = compteur de série des
+										// cadavres ; on stocke le numéro de série de CE cadavre dans
+										// antBiteClock (inutilisé une fois mort) pour le cap de cadavres
+										const serial = atomicAdd( stats.element( 2 ), uint( 1 ) );
+										antBiteClock.element( instanceIndex ).assign( serial.toFloat() );
 										atomicAdd( spiderKills.element( spiderId ), uint( 1 ) );
 										spiderKillPos.element( spiderId ).assign( pos );   // où dévorer
 

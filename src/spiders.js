@@ -224,10 +224,25 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	for ( let i = 0; i < MAX_SPIDERS; i ++ ) spiders.push( initSpider( i ) );
 
+	// cadavres d'araignées PERSISTANTS (ne disparaissent pas comme l'individu qui
+	// réapparaît) : { x, z, theta, scale } — pose de mort figée, rendus en plus des
+	// vivantes. Plafonnés (FIFO) par gfx.maxSpiderCorpses.
+	const spiderCorpses = [];
+
+	// dépose des billes de nourriture au sol (le cadavre de l'araignée nourrit la
+	// colonie) : coup de « pinceau nourriture » (mode 0) drainé chaque frame
+	function dropFood( wx, wy ) {
+
+		const g = worldToGrid( wx, wy );
+		sim.queueBrush( g.x, g.y, 0, 7, Math.max( 1, params.foodAmount ) );
+
+	}
+
 	// remet toutes les araignées à leur état/position de départ (appelé au reset)
 	function resetSpiders() {
 
 		for ( let i = 0; i < MAX_SPIDERS; i ++ ) spiders[ i ] = initSpider( i );
+		spiderCorpses.length = 0;
 		sampleN = 0;
 
 	}
@@ -477,8 +492,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( sp.hp <= 0 ) {
 
 				sp.state = 'death';
-				sp.t = clipDur[ CLIP.death ] + 1.6;
+				sp.t = clipDur[ CLIP.death ];
 				play( sp, 'death', 0.1, 1 );
+				dropFood( sp.pos.x, sp.pos.y );   // billes de nourriture lâchées sur le corps
 				return;
 
 			}
@@ -507,7 +523,16 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		if ( sp.state === 'death' ) {
 
-			if ( sp.t <= 0 ) { sp.state = 'respawn'; sp.t = 20; }
+			if ( sp.t <= 0 ) {
+
+				// chute terminée → CADAVRE PERSISTANT (pose de mort figée), et
+				// l'individu réapparaît ailleurs (le nombre d'araignées vivantes tient).
+				const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
+				spiderCorpses.push( { x: sp.pos.x, y: sp.pos.y, theta, scale: sp.scaleVar } );
+				while ( spiderCorpses.length > gfx.maxSpiderCorpses ) spiderCorpses.shift();
+				sp.state = 'respawn'; sp.t = 20;
+
+			}
 			return;
 
 		}
@@ -784,7 +809,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		setDebugVisible( v ) { showDebug = !! v; for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) m.visible = showDebug; },
 		// hooks de débogage (tests headless : pollAnts/pollDamage sont async et ne
 		// résolvent pas dans une boucle synchrone → on les awaite à la main)
-		_dbg: { spiders, pollAnts, pollDamage, sampleN: () => sampleN, setManualPoll( v ) { manualPoll = !! v; } },
+		_dbg: { spiders, spiderCorpses, pollAnts, pollDamage, sampleN: () => sampleN, setManualPoll( v ) { manualPoll = !! v; } },
 		update( simDt ) {
 
 			const count = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
@@ -845,6 +870,19 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			}
 
+			const liveRender = render;   // les helpers ne concernent QUE les vivantes
+
+			// CADAVRES persistants (pose de mort figée) rendus après les vivantes
+			for ( let c = 0; c < spiderCorpses.length && render < MAX_SPIDERS; c ++ ) {
+
+				const cp = spiderCorpses[ c ];
+				aPose.setXYZW( render, cp.x, cp.y, cp.theta, cp.scale );
+				aAnim.setXYZW( render, CLIP.death, 0.999, CLIP.death, 0.999 );
+				aBlend.setX( render, 0 );
+				render ++;
+
+			}
+
 			geo.instanceCount = render;
 			mesh.visible = render > 0;
 			aPose.needsUpdate = true;
@@ -861,8 +899,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			}
 			for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) {
 
-				m.count = showDebug ? render : 0;
-				m.visible = showDebug && render > 0;
+				m.count = showDebug ? liveRender : 0;
+				m.visible = showDebug && liveRender > 0;
 				if ( showDebug ) m.instanceMatrix.needsUpdate = true;
 
 			}
