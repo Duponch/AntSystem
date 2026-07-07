@@ -23,8 +23,8 @@ import { loadVATMulti } from './vat.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
-const KILL_RADIUS_WORLD = 2.0;         // portée de morsure (le bond rapproche)
-const ATTACK_RANGE = 2.8;              // distance de déclenchement du bond
+const KILL_RADIUS_WORLD = 2.6;         // portée de morsure (le bond rapproche)
+const ATTACK_RANGE = 3.0;              // distance de déclenchement du bond
 const MAX_HP = 100;
 const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
 const T = GRID / WORLD;
@@ -206,18 +206,26 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			const n = Math.min( SAMPLE, params.antCount );
 			const start = Math.floor( Math.random() * Math.max( 1, params.antCount - n ) );
-			const buf = await renderer.getArrayBufferAsync( sim.antData.value, null, start * 16, n * 16 );
-			const d = new Float32Array( buf );
+			const posBuf = await renderer.getArrayBufferAsync( sim.antData.value, null, start * 16, n * 16 );
+			const stBuf = await renderer.getArrayBufferAsync( sim.antState.value, null, start * 4, n * 4 );
+			const d = new Float32Array( posBuf );
+			const st = new Uint32Array( stBuf );
+
+			// on ne garde QUE les fourmis vivantes : un cadavre (état 2) conserve sa
+			// position dans antData, sinon l'araignée le chasserait sans fin
+			let m = 0;
 
 			for ( let i = 0; i < n; i ++ ) {
 
+				if ( st[ i ] === 2 ) continue;
 				const w = gridToWorld( d[ i * 4 ], d[ i * 4 + 1 ] );
-				antSample[ i * 2 ] = w.x;
-				antSample[ i * 2 + 1 ] = w.z;
+				antSample[ m * 2 ] = w.x;
+				antSample[ m * 2 + 1 ] = w.z;
+				m ++;
 
 			}
 
-			sampleN = n;
+			sampleN = m;
 
 		} catch { /* device occupé */ } finally {
 
@@ -298,8 +306,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		push.set( 0, 0 );
 
+		// évite de s'installer SUR la fourmilière, mais rôde près de son entrée
+		// (sinon, sur une petite colonie serrée au nid, elle n'attrape rien)
 		const dn = sp.pos.distanceTo( nestV );
-		if ( dn < 12 ) push.add( sp.pos.clone().sub( nestV ).normalize().multiplyScalar( ( 12 - dn ) * 0.4 ) );
+		if ( dn < 7 ) push.add( sp.pos.clone().sub( nestV ).normalize().multiplyScalar( ( 7 - dn ) * 0.5 ) );
 
 		const m = WORLD / 2 - 6;
 		if ( Math.abs( sp.pos.x ) > m ) push.x -= Math.sign( sp.pos.x ) * ( Math.abs( sp.pos.x ) - m ) * 0.5;
@@ -422,6 +432,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		} else if ( sp.state === 'roam' ) {
 
 			sp.heading += ( Math.random() - 0.5 ) * 1.6 * dt;
+			// dérive vers la colonie quand on en est loin : un prédateur isolé
+			// errerait sinon loin d'une petite colonie sans jamais la croiser
+			if ( sp.pos.distanceTo( nestV ) > 22 ) turnToward( sp, nestV.x, nestV.y, 0.5 * dt );
 			steerClear( sp );
 			sp.pos.x += Math.cos( sp.heading ) * 1.3 * dt;
 			sp.pos.y += Math.sin( sp.heading ) * 1.3 * dt;
@@ -483,24 +496,26 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'attack' ) {
 
-			// BOND : pendant le cœur de l'animation, l'araignée se PROJETTE en
-			// avant sur la proie (sinon, enracinée, elle frappe où la fourmi
-			// n'est plus). La morsure (killActive) tue toute fourmi à portée.
-			if ( sp.phase < 0.45 ) turnToward( sp, sp.target.x, sp.target.y, 5.0 * dt );
+			// BOND guidé : l'araignée ré-accroche la proie VIVANTE la plus proche
+			// à chaque frame et braque le bond dessus — sinon, en visant la
+			// position échantillonnée (périmée), elle plonge là où la fourmi
+			// n'est plus. La morsure (killActive) tue toute fourmi à portée.
+			if ( findNearest( sp, 10 ) ) sp.target.copy( nearest );
+			turnToward( sp, sp.target.x, sp.target.y, 6.5 * dt );
 
-			const lunging = sp.phase > 0.12 && sp.phase < 0.6;
-			sp.killActive = ( sp.phase > 0.15 && sp.phase < 0.62 ) ? 1 : 0;
+			const lunging = sp.phase > 0.1 && sp.phase < 0.62;
+			sp.killActive = ( sp.phase > 0.12 && sp.phase < 0.66 ) ? 1 : 0;
 
 			if ( lunging ) {
 
 				const workerFlee = ( params.moveSpeed / T ) * 1.45;
-				const lunge = Math.max( 9, workerFlee * 2.6 );
+				const lunge = Math.max( 9, workerFlee * 2.8 );
 				sp.pos.x += Math.cos( sp.heading ) * lunge * dt;
 				sp.pos.y += Math.sin( sp.heading ) * lunge * dt;
 
 			}
 
-			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + ( 1 - aggro ) * 1.8; }
+			if ( sp.t <= 0 ) { sp.state = 'idle'; sp.t = 0.5 + ( 1 - aggro ) * 1.6; }
 
 		}
 
