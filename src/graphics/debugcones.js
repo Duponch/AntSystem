@@ -55,8 +55,11 @@ export function createDebugCones( scene, sim ) {
 		const t = attribute( 'coneT', 'float' );
 		const ring = attribute( 'coneRing', 'float' );
 
+		// fourmi MORTE (cadavre état 2 / dévorée état 3) : pas de vision → cône
+		// réduit à un point (invisible), sinon on verrait des cônes sans fourmi
+		const live = select( sim.antState.element( instanceIndex ).toFloat().lessThan( 2 ), float( 1 ), float( 0 ) );
 		const dir = a.z.add( t.mul( sim.u.sensorAngle ) );
-		const g = a.xy.add( vec2( cos( dir ), sin( dir ) ).mul( ring.mul( sim.u.sensorDist ) ) );
+		const g = a.xy.add( vec2( cos( dir ), sin( dir ) ).mul( ring.mul( sim.u.sensorDist ).mul( live ) ) );
 
 		return vec3(
 			g.x.mul( texel ).sub( WORLD / 2 ),

@@ -303,13 +303,15 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const d = new Float32Array( posBuf );
 			const st = new Uint32Array( stBuf );
 
-			// on ne garde QUE les fourmis vivantes : un cadavre (état 2) conserve sa
-			// position dans antData, sinon l'araignée le chasserait sans fin
+			// on ne garde QUE les fourmis VIVANTES (état 0/1). Les MORTES gardent leur
+			// position dans antData : cadavre (état 2) ET surtout DÉVORÉE (état 3,
+			// invisible) — sans ce filtre, l'araignée « chasse » une fourmi fantôme
+			// (invisible) à l'infini et mord/mange sur place sans fin.
 			let m = 0;
 
 			for ( let i = 0; i < n; i ++ ) {
 
-				if ( st[ i ] === 2 ) continue;
+				if ( st[ i ] >= 2 ) continue;
 				const w = gridToWorld( d[ i * 4 ], d[ i * 4 + 1 ] );
 				antSample[ m * 2 ] = w.x;
 				antSample[ m * 2 + 1 ] = w.z;
