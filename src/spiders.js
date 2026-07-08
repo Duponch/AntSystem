@@ -560,7 +560,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			steerClear( sp );
 			sp.pos.x += Math.cos( sp.heading ) * 5.2 * dt;
 			sp.pos.y += Math.sin( sp.heading ) * 5.2 * dt;
-			play( sp, 'walk', 0.12, 2.1 );
+			play( sp, 'walk', 0.12, 2.1 * params.spiderWalkAnim );
 
 			// ne repart que si le délai est écoulé ET l'alarme retombée
 			if ( sp.t <= 0 && sp.alarm < params.alarmFleeThreshold * 0.5 ) {
@@ -571,6 +571,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} else if ( sp.state === 'idle' ) {
 
+			sp.newKills = 0;
 			play( sp, 'idle' );
 			sp.detectTimer -= dt;
 
@@ -595,7 +596,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			steerClear( sp );
 			sp.pos.x += Math.cos( sp.heading ) * 1.3 * dt;
 			sp.pos.y += Math.sin( sp.heading ) * 1.3 * dt;
-			play( sp, 'walk', 0.25, 0.8 );
+			play( sp, 'walk', 0.25, 0.8 * params.spiderWalkAnim );
 
 			sp.detectTimer -= dt;
 
@@ -620,20 +621,26 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			// MORD. La morsure ne compte qu'au CORPS (le noyau teste hitbox corps
 			// araignée + hitbox fourmi) — jamais au bout d'une patte. La saisie (large
 			// zone) immobilise la proie ; rester dessus = envenimation graduée → mort.
-			const near = findNearest( sp, detect * 1.4 );
-			if ( near ) {
+			// CIBLE ENGAGÉE (anti-tremblement/« Parkinson ») : on ne re-choisit la proie
+			// que ~4×/s, PAS chaque frame — sinon la « plus proche » saute d'une fourmi
+			// à l'autre et l'araignée tremble de gauche à droite. Entre deux, on poursuit
+			// la MÊME cible, cap lissé.
+			sp.retargetT = ( sp.retargetT || 0 ) - dt;
+			sp.lostT = ( sp.lostT || 0 ) + dt;
+			if ( sp.retargetT <= 0 ) {
 
-				sp.target.copy( nearest );
-				// cible LISSÉE : supprime le tremblement quand la plus proche change de côté
-				sp.aimX = ( sp.aimX == null ) ? nearest.x : sp.aimX + ( nearest.x - sp.aimX ) * 0.25;
-				sp.aimY = ( sp.aimY == null ) ? nearest.y : sp.aimY + ( nearest.y - sp.aimY ) * 0.25;
-				sp.lostT = 0;
+				sp.retargetT = 0.28;
+				if ( findNearest( sp, detect * 1.4 ) ) { sp.target.copy( nearest ); sp.lostT = 0; }
 
-			} else sp.lostT = ( sp.lostT || 0 ) + dt;
+			}
+			const hasTarget = sp.lostT < 1.2;
 
-			const aimX = ( sp.aimX == null ) ? sp.pos.x + Math.cos( sp.heading ) : sp.aimX;
-			const aimY = ( sp.aimY == null ) ? sp.pos.y + Math.sin( sp.heading ) : sp.aimY;
-			const bodyToPrey = near ? Math.hypot( sp.target.x - sp.pos.x, sp.target.y - sp.pos.y ) : 1e9;
+			// cap visé LISSÉ vers la cible engagée (segments doux, aucun saut par frame)
+			sp.aimX = ( sp.aimX == null ) ? sp.target.x : sp.aimX + ( sp.target.x - sp.aimX ) * 0.18;
+			sp.aimY = ( sp.aimY == null ) ? sp.target.y : sp.aimY + ( sp.target.y - sp.aimY ) * 0.18;
+
+			const aimX = sp.aimX, aimY = sp.aimY;
+			const bodyToPrey = hasTarget ? Math.hypot( sp.target.x - sp.pos.x, sp.target.y - sp.pos.y ) : 1e9;
 			// hystérésis : entre en morsure à CONTACT_ANIM, y reste jusqu'à +1 u — évite
 			// le clignotement marche↔attaque quand la proie oscille autour du seuil
 			const contact = bodyToPrey < ( sp.biting ? CONTACT_ANIM + 1 : CONTACT_ANIM );
@@ -682,15 +689,27 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			}
 
-			if ( sp.newKills > 0 ) {
+			// DÉCLENCHEUR DE DÉVORATION robuste : soit le noyau signale une mise à mort
+			// (relevé GPU async, exact), SOIT — indépendamment de tout relevé — l'araignée
+			// est restée AU CONTACT à mordre assez longtemps pour tuer (temps de morsure
+			// estimé). Le second cas évite qu'elle reste bloquée en morsure à l'infini si
+			// le relevé async traîne (sinon : anim d'attaque en boucle sur place).
+			sp.contactBiteT = contact ? ( sp.contactBiteT || 0 ) + dt : 0;
+			// marge : laisse d'abord au relevé GPU (exact) le temps d'arriver ; ce
+			// repli ne se déclenche que s'il n'est jamais venu, et la proie est alors
+			// certainement morte (restée sous le corps bien au-delà du temps de morsure)
+			const killTime = params.bitesToKill * params.biteInterval + 0.8;
 
-				// le noyau signale une mise à mort par CETTE araignée → dévoration
+			if ( sp.newKills > 0 || sp.contactBiteT >= killTime ) {
+
+				if ( sp.newKills <= 0 ) { sp.killX = sp.aimX; sp.killY = sp.aimY; }  // pas de signal noyau → position estimée
 				sp.newKills = 0;
+				sp.contactBiteT = 0;
 				sp.state = 'feed';
 				sp.feedTimer = params.eatDuration;
 				sp.feedApproach = 0;
 
-			} else if ( ( sp.lostT || 0 ) > 1.2 ) {
+			} else if ( sp.lostT > 1.2 ) {
 
 				// plus aucune proie en vue depuis longtemps → on abandonne
 				sp.state = 'idle'; sp.t = 1 + Math.random() * 2;
@@ -698,6 +717,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			}
 
 		} else if ( sp.state === 'feed' ) {
+
+			sp.newKills = 0;   // le signal de mise à mort ne sert qu'en traque (pas de re-dévoration parasite)
 
 			// DÉVORATION : l'araignée rejoint le lieu de la mise à mort, se met SUR le
 			// cadavre, puis le dévore un COURT instant (chrono = eatDuration, décompté
