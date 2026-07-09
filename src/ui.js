@@ -10,7 +10,7 @@ import { CATALOG } from './graphics/props.js';
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, controls, camera, renderer, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -24,21 +24,110 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		ants.setShadows( params.shadows && params.antCount <= ANT_SHADOW_MAX );
 
 	const fColony = gui.addFolder( 'Colonie' );
-	fColony.add( params, 'antCount', 10, MAX_ANTS, 1 ).name( 'Fourmis' ).onChange( ( v ) => {
+
+	// UNIQUE point d'entrée pour changer la population (slider ET éclosions) :
+	// params, uniform, compteurs de rendu, ombres et affichage du slider
+	// restent toujours synchronisés.
+	let antCountCtrl = null;
+
+	function setPopulation( v ) {
+
+		v = Math.round( Math.min( MAX_ANTS, Math.max( 10, v ) ) );
+		params.antCount = v;
+		sim.u.antCount.value = v;
+		ants.setCount( v );
+		cones.setCount( v );
+		applyAntShadows();
+		if ( antCountCtrl ) antCountCtrl.updateDisplay();
+
+	}
+
+	antCountCtrl = fColony.add( params, 'antCount', 10, MAX_ANTS, 1 ).name( 'Fourmis' ).onChange( ( v ) => {
 
 		// les fourmis nouvellement activées repartent du nid (état propre)
 		const prev = sim.u.antCount.value;
 		if ( v > prev ) sim.reinitAnts( prev );
 
-		sim.u.antCount.value = v;
-		ants.setCount( v );
-		cones.setCount( v );
-		applyAntShadows();
+		setPopulation( v );
 
 	} );
 	fColony.add( params, 'simSpeed', 0, 4, 0.1 ).name( 'Vitesse ×' );
 	fColony.add( params, 'paused' ).name( 'Pause' );
 	fColony.add( { reset: onReset }, 'reset' ).name( '🔄 Réinitialiser' );
+
+	// ------------------------------------------------------------------
+	// La colonie VIVANTE : reine, castes, énergie, couvain, souterrain
+	// ------------------------------------------------------------------
+	const fLife = gui.addFolder( '👑 Fourmilière & castes' );
+
+	fLife.add( params, 'colony' ).name( 'Colonie vivante (reine, castes)' ).onChange( async ( v ) => {
+
+		await sim.setColonyEnabled( v );
+		ants.queen.visible = v;
+		colony.setVisible( v );
+		if ( ! v ) gfx.undergroundView = false;
+		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
+
+	} );
+
+	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue souterraine (fosse)' );
+	fLife.add( gfx, 'pitRadius', 8, 20, 0.5 ).name( 'Rayon de la fosse (u)' );
+
+	const fCastes = fLife.addFolder( 'Castes' );
+	fCastes.add( params, 'nurseRatio', 0, 0.4, 0.01 ).name( 'Part de nourrices' )
+		.onChange( ( v ) => sim.u.nurseRatio.value = v );
+	fCastes.add( params, 'scoutRatio', 0, 0.4, 0.01 ).name( 'Part d\'éclaireuses' )
+		.onChange( ( v ) => sim.u.scoutRatio.value = v );
+	fCastes.add( params, 'scoutWander', 1, 4, 0.1 ).name( 'Errance éclaireuse (×)' )
+		.onChange( ( v ) => sim.u.scoutWander.value = v );
+	fCastes.add( params, 'scoutTrailFollow', 0, 1, 0.05 ).name( 'Suivi de piste éclaireuse' )
+		.onChange( ( v ) => sim.u.scoutTrail.value = v );
+	fCastes.add( params, 'scoutSpeedMult', 0.8, 1.5, 0.05 ).name( 'Vitesse éclaireuse (×)' )
+		.onChange( ( v ) => sim.u.scoutSpeed.value = v );
+	fCastes.add( params, 'soldierSpeedMult', 0.5, 1.2, 0.05 ).name( 'Vitesse soldate (×)' )
+		.onChange( ( v ) => sim.u.soldierSpeed.value = v );
+	fCastes.close();
+
+	const fEnergy = fLife.addFolder( 'Énergie & nourriture' );
+	fEnergy.add( params, 'energyLife', 60, 1800, 10 ).name( 'Autonomie (s)' )
+		.onChange( ( v ) => sim.u.energyLife.value = v );
+	fEnergy.add( params, 'eatThreshold', 0.1, 0.9, 0.05 ).name( 'Seuil de repas' )
+		.onChange( ( v ) => sim.u.eatThreshold.value = v );
+	fEnergy.add( params, 'hungryHome', 0.05, 0.6, 0.05 ).name( 'Seuil de retour (faim)' )
+		.onChange( ( v ) => sim.u.hungryHome.value = v );
+	fEnergy.add( params, 'foodRegen', 0, 12, 0.5 ).name( 'Gisements régénérés /min' );
+	fEnergy.add( params, 'granaryStart', 0, 400, 10 ).name( 'Grenier de départ (reset)' )
+		.onChange( ( v ) => sim.u.granaryStart.value = v );
+	fEnergy.close();
+
+	const fQueen = fLife.addFolder( 'Reine & ponte' );
+	fQueen.add( params, 'queenLayInterval', 2, 60, 1 ).name( 'Intervalle de ponte (s)' )
+		.onChange( ( v ) => sim.u.queenLayInterval.value = v );
+	fQueen.add( params, 'queenLayCost', 0.02, 0.4, 0.01 ).name( 'Coût d\'une ponte' )
+		.onChange( ( v ) => sim.u.queenLayCost.value = v );
+	fQueen.add( params, 'queenLayMin', 0.2, 0.9, 0.05 ).name( 'Énergie min de ponte' )
+		.onChange( ( v ) => sim.u.queenLayMin.value = v );
+	fQueen.add( params, 'queenEnergyLife', 60, 1200, 10 ).name( 'Autonomie reine (s)' )
+		.onChange( ( v ) => sim.u.queenEnergyLife.value = v );
+	fQueen.add( params, 'queenMealValue', 0.1, 1, 0.05 ).name( 'Énergie par repas' )
+		.onChange( ( v ) => sim.u.queenMealValue.value = v );
+	fQueen.add( gfx, 'queenScale', 1.4, 4, 0.1 ).name( 'Gabarit de la reine (×)' )
+		.onChange( ( v ) => ants.uQueenScale.value = v );
+	fQueen.close();
+
+	const fBrood = fLife.addFolder( 'Couvain' );
+	fBrood.add( params, 'eggDuration', 5, 120, 1 ).name( 'Durée œuf (s)' )
+		.onChange( ( v ) => colony.u.eggDuration.value = v );
+	fBrood.add( params, 'larvaMeals', 1, 8, 1 ).name( 'Repas par larve' )
+		.onChange( ( v ) => colony.u.larvaMeals.value = v );
+	fBrood.add( params, 'larvaMealEvery', 5, 90, 1 ).name( 'Cadence des repas (s)' )
+		.onChange( ( v ) => colony.u.larvaMealEvery.value = v );
+	fBrood.add( params, 'larvaStarveTime', 20, 300, 5 ).name( 'Famine fatale larve (s)' )
+		.onChange( ( v ) => colony.u.larvaStarveTime.value = v );
+	fBrood.add( params, 'pupaDuration', 5, 120, 1 ).name( 'Durée nymphe (s)' )
+		.onChange( ( v ) => colony.u.pupaDuration.value = v );
+	fBrood.add( params, 'maxPopulation', 100, MAX_ANTS, 50 ).name( 'Plafond de population' );
+	fBrood.close();
 
 	const fBehavior = gui.addFolder( 'Comportement' );
 	fBehavior.add( params, 'moveSpeed', 5, 100, 1 ).name( 'Vitesse' )
@@ -158,6 +247,18 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => ants.uAccentColor.value.set( v ) );
 	fColors.addColor( gfx, 'soldierColor' ).name( 'Soldates' )
 		.onChange( ( v ) => ants.uSoldierColor.value.set( v ) );
+	fColors.addColor( gfx, 'nurseColor' ).name( 'Nourrices' )
+		.onChange( ( v ) => ants.uNurseColor.value.set( v ) );
+	fColors.addColor( gfx, 'scoutColor' ).name( 'Éclaireuses' )
+		.onChange( ( v ) => ants.uScoutColor.value.set( v ) );
+	fColors.addColor( gfx, 'queenColor' ).name( 'Reine' )
+		.onChange( ( v ) => ants.uQueenColor.value.set( v ) );
+	fColors.addColor( gfx, 'eggColor' ).name( 'Œufs' )
+		.onChange( ( v ) => colony.uEggColor.value.set( v ) );
+	fColors.addColor( gfx, 'larvaColor' ).name( 'Larves' )
+		.onChange( ( v ) => colony.uLarvaColor.value.set( v ) );
+	fColors.addColor( gfx, 'pupaColor' ).name( 'Nymphes' )
+		.onChange( ( v ) => colony.uPupaColor.value.set( v ) );
 	fColors.addColor( gfx, 'spiderColor' ).name( 'Araignée' )
 		.onChange( ( v ) => spiders.uSpiderColor.value.set( v ) );
 	fColors.addColor( gfx, 'spiderAccent' ).name( 'Araignée (pattes)' )
@@ -560,11 +661,29 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		const carrying = Math.max( 0, stats.picked - stats.delivered );
 		const eaten = stats.eaten || 0;
 		const devoured = stats.devoured || 0;
+		// population vivante = activées − mortes (morsures + faim, série stats[2])
+		const aliveCount = Math.max( 0, params.antCount - eaten );
+
+		let colonyLine = '';
+
+		if ( params.colony && colony ) {
+
+			const d = colony.demo;
+			const qe = Math.round( ( stats.queenEnergy || 0 ) * 100 );
+			const famine = qe < 25 ? ' ⚠️ reine affamée' : '';
+			colonyLine =
+				`👑 ${qe}%${famine} · 🥚 ${d.eggs} · 🐛 ${d.larvae} · 🦋 ${d.pupae} · ` +
+				`🌾 ${stats.granary || 0} au grenier · ` +
+				`${stats.laid || 0} pondus / ${stats.hatched || 0} éclos<br>`;
+
+		}
+
 		overlay.innerHTML =
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
-			( params.spiderCount > 0 ? `🕷 ${eaten} tuées (${devoured} dévorées) · ` : '' ) +
-			`${params.antCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
+			( params.spiderCount > 0 ? `🕷 ${eaten} mortes (${devoured} dévorées) · ` : '' ) +
+			`${aliveCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
+			colonyLine +
 			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
 			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +
 			`Espace : pause · 1/2/3 : outils</span>`;
@@ -573,6 +692,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	return {
 		updateOverlay,
+		setPopulation,
 		consumePaintFlag() {
 
 			const p = paintedThisFrame;

@@ -15,8 +15,12 @@ export function createBench( { sim, onProgress } ) {
 		sim.u.seed.value = seed;
 		// banc d'essai = mesure du fourragement pur : pas de prédateur (le kernel
 		// n'accède alors jamais aux secteurs, pilotés par spiders.update hors headless)
+		// NI colonie (énergie/castes/livraison au grenier fausseraient « livrées » —
+		// sémantique historique : stats[0] = arrivée au nid). Restaurés à la fin.
 		const savedSpiders = sim.u.spiderCount.value;
+		const savedColony = sim.u.colonyOn.value;
 		sim.u.spiderCount.value = 0;
+		sim.u.colonyOn.value = 0;
 		await sim.reset();
 
 		const dt = 1 / 60;
@@ -36,6 +40,7 @@ export function createBench( { sim, onProgress } ) {
 		}
 
 		sim.u.spiderCount.value = savedSpiders;
+		sim.u.colonyOn.value = savedColony;
 		return checkpoints;
 
 	}

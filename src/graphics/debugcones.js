@@ -8,7 +8,7 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, instanceIndex, attribute, uniform,
-	vec2, vec3, float, cos, sin, select, mix,
+	vec2, vec3, float, uint, cos, sin, select, mix,
 } from 'three/tsl';
 
 import { GRID, WORLD, params, gfx } from '../config.js';
@@ -55,9 +55,15 @@ export function createDebugCones( scene, sim ) {
 		const t = attribute( 'coneT', 'float' );
 		const ring = attribute( 'coneRing', 'float' );
 
-		// fourmi MORTE (cadavre état 2 / dévorée état 3) : pas de vision → cône
-		// réduit à un point (invisible), sinon on verrait des cônes sans fourmi
-		const live = select( sim.antState.element( instanceIndex ).toFloat().lessThan( 2 ), float( 1 ), float( 0 ) );
+		// fourmi MORTE (cadavre état 2 / dévorée état 3) OU SOUTERRAINE (bit 3,
+		// pas de capteurs sous terre) : cône réduit à un point (invisible),
+		// sinon on verrait des cônes sans fourmi. antState est PACKÉ : masquer.
+		const stRaw = sim.antState.element( instanceIndex );
+		const live = select(
+			stRaw.bitAnd( uint( 7 ) ).lessThan( uint( 2 ) )
+				.and( stRaw.bitAnd( uint( 8 ) ).equal( uint( 0 ) ) ),
+			float( 1 ), float( 0 ),
+		);
 		const dir = a.z.add( t.mul( sim.u.sensorAngle ) );
 		const g = a.xy.add( vec2( cos( dir ), sin( dir ) ).mul( ring.mul( sim.u.sensorDist ).mul( live ) ) );
 
@@ -71,7 +77,11 @@ export function createDebugCones( scene, sim ) {
 
 	material.colorNode = Fn( () => {
 
-		const carrying = sim.antState.element( instanceIndex ).toFloat();
+		// antState packé : seul l'état bas (0/1) donne la couleur
+		const carrying = select(
+			sim.antState.element( instanceIndex ).bitAnd( uint( 7 ) ).equal( uint( 1 ) ),
+			float( 1 ), float( 0 ),
+		);
 		// couleur de la carte LUE : exploratrice → nourriture (orange),
 		// porteuse → maison (bleu)
 		return mix( vec3( 1.0, 0.55, 0.15 ), vec3( 0.25, 0.55, 1.0 ), carrying );

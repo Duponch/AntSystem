@@ -5,9 +5,11 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-import { params, gfx } from './config.js';
+import { params, gfx, MAX_ANTS } from './config.js';
 import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
+import { buildNestLayout, createColony } from './colony.js';
+import { createUnderground } from './underground.js';
 import { createEnvironment, uShowWalls, uTrailGamma } from './environment.js';
 import { createSky } from './graphics/sky.js';
 import { createGrass } from './graphics/grass.js';
@@ -17,6 +19,7 @@ import { createCinematic } from './graphics/cinematic.js';
 import { createFoodBalls } from './graphics/foodballs.js';
 import { createDebugCones } from './graphics/debugcones.js';
 import { createBench } from './bench.js';
+import { createColonyTests } from './tests.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
 import { createUI } from './ui.js';
@@ -92,7 +95,11 @@ async function main() {
 	controls.maxDistance = 280;
 
 	// --- simulation + monde ---
-	const sim = new AntSimulation( renderer );
+	// topologie de la fourmilière souterraine : UNE source de vérité partagée
+	// par le kernel (creusage, navigation), le rendu des fourmis (profondeur)
+	// et la vue en fosse
+	const layout = buildNestLayout();
+	const sim = new AntSimulation( renderer, layout );
 	const sky = createSky( scene );
 
 	// décor édité sauvegardé (sinon génération procédurale)
@@ -120,6 +127,12 @@ async function main() {
 	await sim.setObstacles( props.wallStamps );
 
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
+
+	// couvain + mangeoires (kernel dédié) et vue en fosse de la fourmilière
+	const colony = createColony( { scene, sim, renderer, layout } );
+	const underground = createUnderground( { scene, layout, env, grass, camera } );
+	colony.setVisible( params.colony );
+	ants.queen.visible = params.colony;
 
 	const godrays = createGodrays( renderer, scene, camera, sky );
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
@@ -163,11 +176,12 @@ async function main() {
 	// --- interface ---
 	const ui = createUI( {
 		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
-		godrays, cinematic, bench, music, spiders, controls, camera, renderer,
+		godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer,
 		onReset: async () => {
 
 			await sim.reset();
 			spiders.reset();   // les prédateurs repartent aussi de zéro
+			await colony.reset(); // couvain vidé, compteurs de ponte/éclosion resynchronisés
 
 			// réécrit les marqueurs (nid, nourriture semée) dans la texture affichée,
 			// indispensable quand la simulation est en pause
@@ -176,6 +190,22 @@ async function main() {
 
 		},
 	} );
+
+	// éclosions → activation de nouvelles fourmis : nées au couvain (sous
+	// terre), elles remontent d'elles-mêmes. L'ordre compte : on initialise
+	// les slots AVANT de monter antCount (l'inverse rendrait une frame de
+	// fourmis à l'état périmé).
+	const colonyHooks = {
+		activateAnts( n ) {
+
+			const from = params.antCount;
+			const target = Math.min( MAX_ANTS, from + n );
+			if ( target <= from ) return;
+			sim.spawnHatched( from );
+			ui.setPopulation( target );
+
+		},
+	};
 
 	// --- boucle ---
 	const timer = new THREE.Timer();
@@ -198,6 +228,7 @@ async function main() {
 		if ( running ) {
 
 			sim.step( simDt );
+			colony.step( simDt );   // couvain (kernel dédié) + semis des pontes
 			sim.updateFieldNodes();
 
 		} else if ( painted || ui.consumePaintFlag() ) {
@@ -208,6 +239,8 @@ async function main() {
 
 		}
 
+		underground.update( rawDt );                 // anim d'ouverture de la fosse
+		ants.uReveal.value = underground.reveal;     // vue fermée → souterraines non rendues
 		ants.tick( simDt, camera );
 		spiders.update( simDt );
 		sky.update( camera );
@@ -229,14 +262,24 @@ async function main() {
 			fps = Math.round( fpsCount / fpsAccum );
 			fpsAccum = 0;
 			fpsCount = 0;
-			sim.readStats().then( ( stats ) => ui.updateOverlay( stats, fps ) );
+			sim.readStats().then( ( stats ) => {
+
+				ui.updateOverlay( stats, fps );
+				// la colonie réagit aux MÊMES stats (zéro readback en plus) :
+				// pontes → semis d'œufs, éclosions → nouvelles fourmis
+				colony.onStats( stats, colonyHooks );
+
+			} );
 
 		}
 
 	} );
 
+	// tests de cohérence de la colonie : ?test=colony ou __antsys.tests.run()
+	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
+
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );
@@ -244,6 +287,12 @@ async function main() {
 	if ( benchMatch ) {
 
 		setTimeout( () => bench.run( { runs: + benchMatch[ 1 ], seconds: + benchMatch[ 2 ] } ), 800 );
+
+	}
+
+	if ( /test=colony/.test( location.search ) ) {
+
+		setTimeout( () => tests.run(), 800 );
 
 	}
 
@@ -274,9 +323,13 @@ function showError(
 main().catch( ( err ) => {
 
 	console.error( err );
+	const detail = ( err && ( err.stack || err.message ) ) || String( err );
 	showError(
 		'Erreur au démarrage 😕',
-		'Un fichier requis n\'a pas pu être chargé ou l\'initialisation a échoué.<br>Voir la console pour les détails.',
+		`Un fichier requis n'a pas pu être chargé ou l'initialisation a échoué.<br>`
+		+ `<pre style="text-align:left;white-space:pre-wrap;font-size:11px;max-width:90vw;max-height:60vh;overflow:auto;background:#000;padding:8px;border-radius:6px;">${
+			detail.replace( /&/g, '&amp;' ).replace( /</g, '&lt;' )
+		}</pre>`,
 	);
 
 } );

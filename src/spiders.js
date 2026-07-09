@@ -21,6 +21,7 @@ import {
 
 import { loadVATMulti } from './vat.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
+import { tryAcquireReadback, releaseReadback } from './readback.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
 const CONTACT_ANIM = 2.6;              // corps→proie estimé sous lequel joue l'anim d'attaque (« au contact »)
@@ -281,7 +282,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	// three (les mappings concurrents se corrompent → lectures à zéro). Un seul
 	// verrou partagé sérialise TOUS les relevés (échantillon de fourmis + dégâts/
 	// alarme/kills) : si un relevé est en cours, les autres passent leur tour.
-	let readbackBusy = false;
+	// verrou readback GLOBAL (readback.js) : partagé avec readStats (overlay)
+	// et le poller du couvain — deux getArrayBufferAsync concurrents se
+	// corrompent mutuellement, quel que soit le module d'origine
 	let manualPoll = false;   // tests headless : coupe les relevés internes (pilotés à la main)
 
 	// --- échantillonnage d'un lot de fourmis (16 Ko ~1×/0,6 s) ---
@@ -291,8 +294,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	async function pollAnts() {
 
-		if ( readbackBusy ) return;
-		readbackBusy = true;
+		if ( ! tryAcquireReadback() ) return;
 
 		try {
 
@@ -303,15 +305,17 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const d = new Float32Array( posBuf );
 			const st = new Uint32Array( stBuf );
 
-			// on ne garde QUE les fourmis VIVANTES (état 0/1). Les MORTES gardent leur
-			// position dans antData : cadavre (état 2) ET surtout DÉVORÉE (état 3,
-			// invisible) — sans ce filtre, l'araignée « chasse » une fourmi fantôme
-			// (invisible) à l'infini et mord/mange sur place sans fin.
+			// antState est PACKÉ (bits 0-2 état, bit 3 souterraine). On ne garde
+			// QUE les fourmis VIVANTES (état 0/1) et DE SURFACE. Les MORTES gardent
+			// leur position dans antData : cadavre (état 2) ET surtout DÉVORÉE
+			// (état 3, invisible) — sans ce filtre, l'araignée « chasse » une
+			// fourmi fantôme à l'infini. Les SOUTERRAINES sont invisibles et hors
+			// de portée : les cibler ferait mordre l'araignée à travers le sol.
 			let m = 0;
 
 			for ( let i = 0; i < n; i ++ ) {
 
-				if ( st[ i ] >= 2 ) continue;
+				if ( ( st[ i ] & 7 ) >= 2 || ( st[ i ] & 8 ) !== 0 ) continue;
 				const w = gridToWorld( d[ i * 4 ], d[ i * 4 + 1 ] );
 				antSample[ m * 2 ] = w.x;
 				antSample[ m * 2 + 1 ] = w.z;
@@ -323,7 +327,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} catch { /* device occupé */ } finally {
 
-			readbackBusy = false;
+			releaseReadback();
 
 		}
 
@@ -374,8 +378,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	async function pollDamage() {
 
-		if ( readbackBusy ) return;
-		readbackBusy = true;
+		if ( ! tryAcquireReadback() ) return;
 
 		try {
 
@@ -415,7 +418,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} catch { /* device occupé */ } finally {
 
-			readbackBusy = false;
+			releaseReadback();
 
 		}
 

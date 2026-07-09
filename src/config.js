@@ -25,7 +25,12 @@ export const WORLD = ( saved && saved.gfx && saved.gfx.mapSize ) || 160; // unit
 export const TEXEL = WORLD / GRID;
 export const MAX_ANTS = 65536;
 export const MAX_SPIDERS = 1024;       // prédateurs simultanés (VAT instancié)
+export const MAX_BROOD = 4096;         // œufs/larves/nymphes simultanés (kernel couvain)
 export const FIXED = 1024;             // échelle virgule fixe des dépôts u32
+
+// Castes (dérivées d'un hash stable par fourmi — zéro stockage GPU).
+// L'index 0 est TOUJOURS la reine quand la colonie est active.
+export const CASTE = { WORKER: 0, SOLDIER: 1, NURSE: 2, SCOUT: 3, QUEEN: 4 };
 
 export const NEST = {
 	x: GRID / 2,
@@ -67,6 +72,31 @@ export const params = {
 	spiderAggro: 0.5,                  // agressivité (détection, vitesse, cadence)
 	soldierRatio: 0.12,                // part de soldates (chargent au lieu de fuir)
 	fleeRadius: 35,                    // rayon de peur des fourmis (texels)
+
+	// Colonie vivante : castes, énergie, reine, couvain (tout GPU)
+	colony: true,                      // maître : false = comportement historique (livraison instantanée, pas de souterrain)
+	nurseRatio: 0.14,                  // part de nourrices (restent sous terre, navette nourriture)
+	scoutRatio: 0.10,                  // part d'éclaireuses (errance forte, suivent peu les pistes)
+	scoutWander: 2.2,                  // multiplicateur d'errance des éclaireuses
+	scoutTrailFollow: 0.35,            // poids des pistes existantes pour une éclaireuse (× normal)
+	scoutSpeedMult: 1.1,               // vitesse éclaireuse (× vitesse normale)
+	soldierSpeedMult: 0.85,            // vitesse soldate (plus grosse, plus lente)
+	energyLife: 600,                   // s d'autonomie d'une fourmi (énergie pleine → 0 = mort de faim)
+	eatThreshold: 0.45,                // sous ce niveau, une fourmi mange si elle trouve à manger
+	hungryHome: 0.25,                  // sous ce niveau, elle rentre au nid manger au grenier
+	queenEnergyLife: 300,              // s d'autonomie de la reine (elle doit être nourrie)
+	queenMealValue: 0.4,               // énergie rendue par unité de nourriture mangée par la reine
+	queenLayInterval: 10,              // s entre deux pontes (si assez d'énergie)
+	queenLayCost: 0.1,                 // énergie dépensée par ponte
+	queenLayMin: 0.5,                  // énergie minimale pour pondre
+	eggDuration: 25,                   // s œuf → larve
+	larvaMeals: 2,                     // unités de nourriture pour qu'une larve devienne nymphe
+	larvaMealEvery: 20,                // s entre deux repas de larve
+	larvaStarveTime: 90,               // s sans repas → la larve meurt
+	pupaDuration: 20,                  // s nymphe → éclosion (nouvelle fourmi)
+	maxPopulation: 3000,               // plafond de population (éclosions bloquées au-delà)
+	granaryStart: 80,                  // stock de départ du grenier (survie le temps du 1er fourragement)
+	foodRegen: 3,                      // gisements régénérés par minute (0 = économie fermée → famine)
 
 	// Prédation (calibrée sur la biologie : morsure → envenimation graduée →
 	// paralysie croissante → mort après quelques morsures → dévoration)
@@ -118,6 +148,12 @@ export const gfx = {
 	antColor: '#16120e',
 	antAccentColor: '#4a5578',         // yeux / antennes
 	soldierColor: '#5a2716',           // caste soldate
+	nurseColor: '#a8935f',             // caste nourrice (pâle, sous terre)
+	scoutColor: '#3d3324',             // caste éclaireuse (brun clair)
+	queenColor: '#4a1f12',             // la reine (acajou sombre)
+	eggColor: '#f2ecd8',               // œufs (blanc cassé)
+	larvaColor: '#e3d3a6',             // larves (crème)
+	pupaColor: '#8f6f45',              // nymphes (brun clair)
 	spiderColor: '#39302a',            // corps de l'araignée (VAT sans matériau GLB)
 	spiderAccent: '#17110c',           // pattes / détail
 	anthillColor: '#7a5230',           // marron terre
@@ -134,6 +170,11 @@ export const gfx = {
 
 	// Pistes
 	trailGamma: 1.7,                   // contraste des pistes (1 = faibles visibles)
+
+	// Fourmilière souterraine (vue en fosse)
+	undergroundView: false,            // découpe le sol autour du nid pour voir les chambres
+	pitRadius: 18,                     // rayon de la fosse (unités monde)
+	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis

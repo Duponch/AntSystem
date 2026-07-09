@@ -8,7 +8,7 @@
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, texture, uniform, positionWorld, time, sin,
+	Fn, texture, uniform, positionWorld, time, sin, Discard,
 	vec3, float, color, mix, clamp, smoothstep, length, pow, mx_noise_float,
 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -20,6 +20,10 @@ export const uTrail = uniform( params.trailIntensity );
 export const uTrailGamma = uniform( gfx.trailGamma );
 // zones de mur visibles seulement en mode pinceau / éditeur
 export const uShowWalls = uniform( 0 );
+// rayon COURANT de la fosse souterraine (unités monde, 0 = fermée) : le sol
+// et le socle discardent leurs fragments dans ce disque autour du nid —
+// animé par underground.js
+export const uPitR = uniform( 0 );
 export const uGroundA = uniform( new THREE.Color( gfx.groundColorA ) );
 export const uGroundB = uniform( new THREE.Color( gfx.groundColorB ) );
 export const uFoodColor = uniform( new THREE.Color( gfx.foodColor ) );
@@ -101,7 +105,15 @@ export async function createEnvironment( scene, sim ) {
 	const guv = positionWorld.xz.div( WORLD ).add( 0.5 );
 	const fieldNode = makeFieldSampler( sim, guv );
 
-	groundMat.colorNode = Fn( () => groundAlbedo( positionWorld.xz, fieldNode ) )();
+	groundMat.colorNode = Fn( () => {
+
+		// vue souterraine : le disque de la fosse est découpé (le nid est au
+		// centre du monde — même origine que la grille)
+		Discard( length( positionWorld.xz ).lessThan( uPitR ) );
+
+		return groundAlbedo( positionWorld.xz, fieldNode );
+
+	} )();
 	groundMat.emissiveNode = Fn( () => groundEmissive( fieldNode ) )();
 
 	const ground = new THREE.Mesh( groundGeo, groundMat );
@@ -113,6 +125,9 @@ export async function createEnvironment( scene, sim ) {
 	// ------------------------------------------------------------------
 	const soilMat = new THREE.MeshStandardNodeMaterial( { roughness: 1, metalness: 0 } );
 	soilMat.colorNode = Fn( () => {
+
+		// même découpe que le sol : la fosse traverse l'épaisseur de terre
+		Discard( length( positionWorld.xz ).lessThan( uPitR ) );
 
 		// strates de terre subtiles
 		const strata = mx_noise_float( positionWorld.xz.mul( 0.25 ).add( positionWorld.y ) )
@@ -172,12 +187,14 @@ export async function createEnvironment( scene, sim ) {
 	anthill.position.y = - nestWorldR * 0.08;      // base légèrement enterrée
 	anthill.castShadow = true;
 	anthill.receiveShadow = true;
+	anthill.userData.baseScale = nestWorldR * 2.4; // pour l'anim de retrait (vue souterraine)
 	scene.add( anthill );
 
 	return {
 		ground,
 		uTrail,
 		anthillMat,
+		anthill,
 		setThickness,
 	};
 

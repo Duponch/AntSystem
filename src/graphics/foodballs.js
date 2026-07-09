@@ -33,6 +33,9 @@ export function createFoodBalls( scene, sim ) {
 
 	// vue NON atomique du buffer de nourriture (lecture en vertex shader)
 	const foodRead = storage( sim.food.value, 'uint', GRID * GRID );
+	// murs packés : une cellule CREUSÉE (bit 1) appartient au souterrain — son
+	// stock (grenier, mangeoires) est rendu par les tas de colony.js, pas ici
+	const wallRead = storage( sim.wall.value, 'uint', GRID * GRID );
 
 	// centre de la bille du bloc + stock restant (partagé billes/halos)
 	// — formule de jitter IDENTIQUE à celle du pinceau (simulation.js)
@@ -51,7 +54,9 @@ export function createFoodBalls( scene, sim ) {
 
 		const cell = floor( center );
 		const idx = cell.y.toInt().mul( GRID ).add( cell.x.toInt() );
-		const stock = foodRead.element( idx ).toFloat();
+		const isDug = wallRead.element( idx ).bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
+		const stock = foodRead.element( idx ).toFloat()
+			.mul( select( isDug, float( 0 ), float( 1 ) ) );
 
 		// rayon visuel plafonné sous la demi-séparation : chevauchement impossible
 		const radius = min( u.ballSize, u.spacing.mul( TEXEL * 0.22 ) );

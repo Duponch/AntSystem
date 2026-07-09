@@ -34,6 +34,10 @@ export function createGrass( scene, sim ) {
 		windGust: uniform( 0 ),
 		cam: uniform( new THREE.Vector2() ),
 		chaos: uniform( gfx.grassChaos ),   // 0 = uniforme, 1 = delta maximal
+		// trou central (nid — et fosse souterraine quand la vue est ouverte) :
+		// fondu entre holeIn et holeOut autour de l'origine (underground.js)
+		holeIn: uniform( 3.6 ),
+		holeOut: uniform( 5.2 ),
 	};
 
 	// --- géométrie d'un brin : quad effilé + penché (4 sommets, 2 triangles) ---
@@ -80,7 +84,7 @@ export function createGrass( scene, sim ) {
 		const mask = float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bx.abs() ) ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bz.abs() ) ) )
-			.mul( smoothstep( 3.6, 5.2, length( root ) ) );
+			.mul( smoothstep( u.holeIn, u.holeOut, length( root ) ) );
 
 		// irrégularité : le chaos élargit les écarts de taille et couche les
 		// brins dans des directions aléatoires (mêmes hash, coût négligeable)
