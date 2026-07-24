@@ -27,12 +27,12 @@ import * as THREE from 'three/webgpu';
 import {
 	Fn, If, Loop, uniform, uniformArray, instancedArray, instanceIndex,
 	float, int, uint, vec2, vec3, vec4, ivec2, uvec2,
-	exp, cos, sin, sqrt, floor, ceil, max, min, clamp, mix, length, select,
+	exp, cos, sin, sqrt, floor, ceil, fract, pow, abs, atan, max, min, clamp, mix, length, select,
 	atomicAdd, atomicSub, atomicLoad, atomicStore, atomicMax,
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
-import { GRID, WORLD, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
+import { GRID, WORLD, TEXEL, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
 // gisements de départ (partagés avec la caméra cinématique)
@@ -108,6 +108,25 @@ export class AntSimulation {
 			granaryStart: uniform( params.granaryStart ),
 			spawnMode: uniform( 0 ),                     // kInitAnts : 0 = disque du nid, 1 = éclosion (couvain, sous terre)
 			entranceR: uniform( 3 ),                     // rayon d'arrivée au nœud d'entrée (texels)
+
+			// --- PHYSIQUE ---
+			// physOn = 0 : chemin cinématique historique, bit à bit (témoin perf).
+			// Les vitesses de fourmi vivent en TEXELS/s (comme pos) ; la hauteur,
+			// la vitesse verticale et la gravité en UNITÉS MONDE (comme le rendu).
+			physOn: uniform( params.physics ? 1 : 0 ),
+			gravity: uniform( params.gravity ),
+			antAccel: uniform( params.antAccel ),
+			groundDrag: uniform( params.groundDrag ),
+			airDrag: uniform( params.airDrag ),
+			restitution: uniform( params.restitution ),
+			wallBounce: uniform( params.wallBounce ),
+			biteKnock: uniform( params.biteKnockback / TEXEL ),   // u/s → texels/s
+			bitePop: uniform( params.bitePop ),
+			deathPop: uniform( params.deathPop ),
+			deathFling: uniform( params.deathFling / TEXEL ),
+			chargeImpulse: uniform( params.chargeImpulse / TEXEL ),
+			walkAnim: uniform( params.walkAnim ),
+			queenScale: uniform( gfx.queenScale ),
 		};
 
 		// --- topologie souterraine (uniforms remplis depuis le layout) ---
@@ -185,8 +204,17 @@ export class AntSimulation {
 		//   x = venin (0 = saine ; ≥ bitesToKill = morte)
 		//   y = horloge de morsure (vivante) / n° de série du cadavre (morte)
 		//   z = énergie 0..1 (0 = mort de faim)
-		//   w = libre
+		//   w = POLYMORPHE : phase de démarche 0..1 (vivante, pilotée par la
+		//       DISTANCE réellement parcourue → zéro patinage) / temps écoulé
+		//       depuis la mort en s, plafonné à 8 (morte, horloge de culbute)
 		this.antVital = instancedArray( MAX_ANTS, 'vec4' );
+		// état DYNAMIQUE (13ᵉ binding du noyau fourmis, budget 16) :
+		//   xy = vitesse planaire (TEXELS/s)  — inertie, glissades, projections
+		//   z  = hauteur au-dessus du sol local (unités monde, 0 = posée)
+		//   w  = vitesse verticale (unités monde/s)
+		// Sans ce buffer il n'y a ni masse, ni impact, ni balistique : c'est lui
+		// qui remplace `pos += dir·v·dt` par une vraie intégration.
+		this.antDyn = instancedArray( MAX_ANTS, 'vec4' );
 
 		this.deposit = instancedArray( GRID * GRID * 2, 'uint' ).toAtomic(); // accumulateur virgule fixe
 		this.alarm = instancedArray( GRID * GRID, 'uint' ).toAtomic();       // phéromone d'alarme
@@ -240,7 +268,7 @@ export class AntSimulation {
 	_buildKernels() {
 
 		const u = this.u;
-		const { antData, antState, antVital, deposit, alarm, food, wall, stats, spiderDamage, spiderAlarm, spiderKills, spiderKillPos } = this;
+		const { antData, antState, antVital, antDyn, deposit, alarm, food, wall, stats, spiderDamage, spiderAlarm, spiderKills, spiderKillPos } = this;
 		const layout = this.layout;
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
@@ -270,6 +298,33 @@ export class AntSimulation {
 
 		// partagé avec le rendu (ants.js) : mêmes hashs, mêmes uniforms
 		this.casteOf = casteOf;
+
+		// MOT DE MORT (8 bits, rangés dans antState bits 11-18) : tiré UNE FOIS,
+		// à l'instant de la mort, il fige la culbute d'un cadavre.
+		//   bits 0-1  quadrant de repos  0 sur pattes · 1 flanc · 2 dos · 3 flanc
+		//   bits 2-3  demi-tours supplémentaires pendant la chute
+		//   bits 4-6  tangage final (8 pas)
+		//   bit  7    sens de rotation
+		// Un insecte mort finit RAREMENT sur ses pattes : la flexion des pattes
+		// (voir la pose de mort bakée dans vat.js) déplace son centre de masse
+		// au-dessus du polygone de sustentation et il bascule. D'où la
+		// distribution : 14 % debout, 86 % flanc ou dos.
+		const makeDeathWord = ( iseed ) => {
+
+			const r0 = hash( iseed.add( uint( 0xD1E ) ) );
+			const restQ = select( r0.lessThan( 0.14 ), uint( 0 ),
+				select( r0.lessThan( 0.47 ), uint( 1 ),
+					select( r0.lessThan( 0.80 ), uint( 2 ), uint( 3 ) ) ) );
+			const spinN = hash( iseed.add( uint( 0xD1F ) ) ).mul( 2.999 ).toUint();
+			const pitchQ = hash( iseed.add( uint( 0xD20 ) ) ).mul( 7.999 ).toUint();
+			const dirS = select( hash( iseed.add( uint( 0xD21 ) ) ).lessThan( 0.5 ), uint( 1 ), uint( 0 ) );
+
+			return restQ
+				.bitOr( spinN.shiftLeft( uint( 2 ) ) )
+				.bitOr( pitchQ.shiftLeft( uint( 4 ) ) )
+				.bitOr( dirS.shiftLeft( uint( 7 ) ) );
+
+		};
 
 		// prend UNE unité de nourriture dans une cellule, avec restitution si la
 		// course est perdue (le compteur u32 wrappe) — onOk : callback TSL succès
@@ -335,10 +390,15 @@ export class AntSimulation {
 				antData.element( instanceIndex ).assign( vec4(
 					pos, hash( i.add( uint( 923 ) ) ).mul( PI2 ), 0,
 				) );
+				// st est construit de zéro : le MOT DE MORT (bits 11+) repart donc
+				// à 0 — une fourmi éclose qui recycle un slot n'hérite pas de la
+				// culbute de l'ancienne occupante.
 				antState.element( instanceIndex ).assign( st );
 				antVital.element( instanceIndex ).assign( vec4(
-					0, 0, hash( i.add( uint( 4409 ) ) ).mul( 0.5 ).add( 0.5 ), 0,
+					0, 0, hash( i.add( uint( 4409 ) ) ).mul( 0.5 ).add( 0.5 ),
+					hash( i.add( uint( 7717 ) ) ),      // phase de démarche désynchronisée
 				) );
+				antDyn.element( instanceIndex ).assign( vec4( 0 ) );
 
 			} );
 
@@ -447,20 +507,34 @@ export class AntSimulation {
 				const under = stPacked.shiftRight( uint( 3 ) ).bitAnd( uint( 1 ) ).toVar();
 				const goal = stPacked.shiftRight( uint( 4 ) ).bitAnd( uint( 7 ) ).toVar();
 				const node = stPacked.shiftRight( uint( 7 ) ).bitAnd( uint( 15 ) ).toVar();
+				// MOT DE MORT (bits 11-18) : figé à l'instant de la mort, il décrit
+				// la culbute (quadrant de repos, tours, tangage, sens). Il DOIT être
+				// relu ici et ré-inclus au re-pack, sinon tous les cadavres
+				// repartiraient à zéro dès la frame suivante.
+				const deathWord = stPacked.shiftRight( uint( 11 ) ).bitAnd( uint( 255 ) ).toVar();
 
 				const pos = a.xy.toVar();
+				const pos0 = a.xy.toVar();          // origine du pas : distance réelle → démarche
 				const ang = a.z.toVar();
 				const timer = min( a.w.add( u.dt ), 600 ).toVar();
 				const carrying = state.equal( uint( 1 ) ).toVar();
 
+				// --- état dynamique : vitesse planaire, hauteur, vitesse verticale ---
+				const dyn = antDyn.element( instanceIndex );
+				const vel = dyn.xy.toVar();
+				const height = dyn.z.toVar();
+				const vHeight = dyn.w.toVar();
+				const phys = u.physOn.greaterThan( 0.5 );
+
 				// alive = vivante (drapeau flottant) : cadavres ET dévorées restent figés.
 				const alive = select( state.lessThan( uint( 2 ) ), float( 1 ), float( 0 ) ).toVar();
 
-				// signes vitaux : venin, horloge/série, énergie
+				// signes vitaux : venin, horloge/série, énergie, phase/horloge de mort
 				const vital = antVital.element( instanceIndex );
 				const venom = vital.x.toVar();
 				const biteClock = vital.y.toVar();
 				const energy = vital.z.toVar();
+				const gait = vital.w.toVar();       // vivante : phase 0..1 ; morte : s depuis la mort
 
 				// CAP DE CADAVRES : un cadavre (état 2) dont le numéro de série est plus
 				// vieux que les maxAntCorpses derniers créés disparaît (état 3, non rendu)
@@ -542,6 +616,17 @@ export class AntSimulation {
 
 									} );
 
+									// CHOC DE LA CHARGE : la soldate qui percute le corps de
+									// l'araignée encaisse le contre-coup (3ᵉ loi de Newton) —
+									// elle rebondit, se replace et recharge. C'est ce qui donne
+									// la mêlée qui bouillonne autour du prédateur.
+									If( phys.and( dSp.lessThan( contact ) ), () => {
+
+										vel.addAssign( away.div( dSp ).mul( u.chargeImpulse ) );
+										vHeight.addAssign( u.chargeImpulse.mul( TEXEL ).mul( 0.35 ) );
+
+									} );
+
 								} ).Else( () => {
 
 									// ouvrières : paniquent, fuient — et leur peur nourrit la
@@ -574,8 +659,23 @@ export class AntSimulation {
 								If( sp.z.greaterThan( 0.5 ).and( sp.z.lessThan( 1.5 ) )
 									.and( dSp.lessThan( contact ) ), () => {
 
+									const venomBefore = venom.toVar();
 									venom.addAssign( u.dt.div( u.biteInterval ) );
 									biteClock.assign( 0 );
+
+									// COUP PORTÉ : l'envenimation est continue (le modèle
+									// « rester sur la proie »), mais le CROCHET frappe par
+									// à-coups. Chaque franchissement d'une dose entière = une
+									// vraie frappe : impulsion de recul + projection verticale.
+									// La fourmi décolle, tourne en l'air, retombe et dérape.
+									If( phys.and( floor( venom ).greaterThan( floor( venomBefore ) ) ), () => {
+
+										const kick = away.div( dSp );
+										vel.addAssign( kick.mul( u.biteKnock ) );
+										vHeight.addAssign( u.bitePop );
+										height.addAssign( 0.001 );          // décollage franc
+
+									} );
 
 									If( venom.greaterThanEqual( u.bitesToKill ), () => {
 
@@ -587,7 +687,30 @@ export class AntSimulation {
 										const serial = atomicAdd( stats.element( 2 ), uint( 1 ) );
 										biteClock.assign( serial.toFloat() );
 										atomicAdd( spiderKills.element( spiderId ), uint( 1 ) );
-										spiderKillPos.element( spiderId ).assign( pos );   // où dévorer
+
+										// mot de mort : quadrant de repos, demi-tours, tangage, sens
+										deathWord.assign( makeDeathWord( iseed ) );
+										gait.assign( 0 );
+
+										// dernier soubresaut : la proie est lâchée, elle bascule.
+										// Projection VOLONTAIREMENT modeste (l'araignée agrippe sa
+										// proie, elle ne l'envoie pas valser) — et l'araignée est
+										// dirigée vers le point d'ATTERRISSAGE, pas vers le point de
+										// mort, sinon elle irait mâcher du vide.
+										const kick = away.div( dSp );
+
+										If( phys, () => {
+
+											vel.addAssign( kick.mul( u.deathFling ) );
+											vHeight.addAssign( u.deathPop );
+											height.addAssign( 0.001 );
+
+										} );
+
+										const flightT = u.deathPop.mul( 2 ).div( max( u.gravity, 1 ) );
+										spiderKillPos.element( spiderId ).assign(
+											pos.add( kick.mul( u.deathFling ).mul( flightT ).mul( select( phys, 1, 0 ) ) ),
+										);
 
 									} );
 
@@ -614,10 +737,35 @@ export class AntSimulation {
 						alive.assign( float( 0 ) );
 						const serial = atomicAdd( stats.element( 2 ), uint( 1 ) );
 						biteClock.assign( serial.toFloat() );
+						// épuisement : elle s'effondre SUR PLACE (aucune projection),
+						// mais bascule quand même en se recroquevillant
+						deathWord.assign( makeDeathWord( iseed.add( uint( 0x51A ) ) ) );
+						gait.assign( 0 );
 
 					} );
 
 				} );
+
+				// --- collision avec le terrain (partagée vivantes / cadavres) ---
+				// Surface : bit 0 (une fourmi enterrée sous un mur fraîchement peint
+				// ignore les murs le temps d'en sortir). Sous terre : tout ce qui
+				// n'est PAS creusé (bit 1) est de la terre pleine.
+				const startWalled = surfaceWall( wall.element(
+					cellIndex( clamp( ivec2( pos ), ivec2( 1 ), ivec2( GRID - 2 ) ) ),
+				) ).toVar();
+
+				const blockedAt = ( px, py ) => {
+
+					const c = clamp( ivec2( px, py ), ivec2( 1 ), ivec2( GRID - 2 ) );
+					const w = wall.element( cellIndex( c ) );
+					const hitWall = select( under.equal( uint( 1 ) ),
+						dug( w ).not(),
+						surfaceWall( w ).and( startWalled.not() ) );
+					const out = px.lessThan( 1 ).or( px.greaterThanEqual( GRID - 1 ) )
+						.or( py.lessThan( 1 ) ).or( py.greaterThanEqual( GRID - 1 ) );
+					return out.or( hitWall );
+
+				};
 
 				// --- reste du comportement, sauté pour les cadavres (fraîchement
 				// mortes ou déjà mortes) : la fourmi reste figée à sa position ---
@@ -912,51 +1060,94 @@ export class AntSimulation {
 
 					} );
 
-					// --- déplacement + rebond sur murs / bords (réflexion par axe) ---
-					// Surface : bit 0 (une fourmi enterrée sous un mur fraîchement peint
-					// ignore les murs le temps d'en sortir). Sous terre : tout ce qui
-					// n'est PAS creusé (bit 1) est de la terre pleine.
-					const startWalled = surfaceWall( wall.element(
-						cellIndex( clamp( ivec2( pos ), ivec2( 1 ), ivec2( GRID - 2 ) ) ),
-					) ).toVar();
+					// ================== DÉPLACEMENT ==================
+					// PHYSIQUE : la vitesse est un ÉTAT persistant, pas une constante
+					// recalculée. Le muscle ne place pas la fourmi, il TIRE sa vitesse
+					// vers la vitesse voulue (d'où l'inertie : démarrages, arrêts et
+					// virages ont une durée). Les impacts s'ajoutent directement à cette
+					// vitesse et se dissipent par la friction du sol. Dès qu'elle décolle
+					// (h > 0), plus aucun contrôle : c'est un projectile balistique.
+					// physOn = 0 rétablit le pas cinématique historique, bit à bit.
+					const stepLen = u.moveSpeed.mul( u.dt ).mul( moveMult );
+					const disp = vec2( 0 ).toVar();
 
-					const blockedAt = ( px, py ) => {
+					If( phys, () => {
 
-						const c = clamp( ivec2( px, py ), ivec2( 1 ), ivec2( GRID - 2 ) );
-						const w = wall.element( cellIndex( c ) );
-						const hitWall = select( under.equal( uint( 1 ) ),
-							dug( w ).not(),
-							surfaceWall( w ).and( startWalled.not() ) );
-						const out = px.lessThan( 1 ).or( px.greaterThanEqual( GRID - 1 ) )
-							.or( py.lessThan( 1 ) ).or( py.greaterThanEqual( GRID - 1 ) );
-						return out.or( hitWall );
+						const grounded = height.lessThanEqual( 1e-4 ).and( vHeight.lessThanEqual( 0 ) );
+						const vDes = vec2( cos( ang ), sin( ang ) ).mul( u.moveSpeed.mul( moveMult ) );
 
-					};
+						If( grounded, () => {
+
+							height.assign( 0 );
+							vHeight.assign( 0 );
+							// relaxation exponentielle vers la vitesse voulue : c'est à la
+							// fois le moteur et la friction (une fourmi projetée retrouve
+							// sa marche en ~1/antAccel seconde, en dérapant d'abord)
+							vel.addAssign( vDes.sub( vel ).mul( clamp( u.antAccel.mul( u.dt ), 0, 1 ) ) );
+
+						} ).Else( () => {
+
+							vHeight.subAssign( u.gravity.mul( u.dt ) );
+							height.addAssign( vHeight.mul( u.dt ) );
+							vel.mulAssign( exp( u.airDrag.negate().mul( u.dt ) ) );
+
+							If( height.lessThanEqual( 0 ), () => {
+
+								// impact au sol : rebond amorti, l'horizontale prend le choc
+								height.assign( 0 );
+								vHeight.assign( vHeight.negate().mul( u.restitution ) );
+								If( vHeight.lessThan( 0.3 ), () => {
+
+									vHeight.assign( 0 );
+
+								} );
+								vel.mulAssign( 0.55 );
+
+							} );
+
+						} );
+
+						disp.assign( vel.mul( u.dt ) );
+
+					} ).Else( () => {
+
+						disp.assign( vec2( cos( ang ), sin( ang ) ).mul( stepLen ) );
+
+					} );
 
 					// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
-					const stepLen = u.moveSpeed.mul( u.dt ).mul( moveMult );
-					const nSub = clamp( ceil( stepLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
-					const subLen = stepLen.div( nSub.toFloat() );
+					const dispLen = select( phys, length( disp ), stepLen ).toVar();
+					const nSub = clamp( ceil( dispLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
+					const subStep = disp.div( nSub.toFloat() ).toVar();
+					// en mode historique la vitesse ne doit PAS être touchée par les
+					// rebonds (elle n'est pas utilisée) : le facteur vaut alors 1
+					const bounceF = select( phys, u.wallBounce.negate(), float( 1 ) ).toVar();
 
 					Loop( { start: int( 0 ), end: nSub, type: 'int', condition: '<' }, () => {
 
-						const next = pos.add( vec2( cos( ang ), sin( ang ) ).mul( subLen ) ).toVar();
+						const next = pos.add( subStep ).toVar();
 						const bx = blockedAt( next.x, pos.y ).toVar();
 						const by = blockedAt( pos.x, next.y ).toVar();
 
 						If( bx.or( by ), () => {
 
+							// réflexion par axe : le cap ET la vitesse rebondissent
+							// (miroir du pas : identique au calcul historique par l'angle)
 							If( bx, () => {
 
 								ang.assign( PI.sub( ang ) );
+								subStep.x.mulAssign( - 1 );
+								vel.x.mulAssign( bounceF );
 
 							} );
 							If( by, () => {
 
 								ang.assign( ang.negate() );
+								subStep.y.mulAssign( - 1 );
+								vel.y.mulAssign( bounceF );
 
 							} );
-							next.assign( pos.add( vec2( cos( ang ), sin( ang ) ).mul( subLen ) ) );
+							next.assign( pos.add( subStep ) );
 
 						} );
 
@@ -965,6 +1156,8 @@ export class AntSimulation {
 
 							next.assign( pos );
 							ang.assign( hash( iseed.add( uint( 0xC2B2AE35 ) ) ).mul( PI2 ) );
+							subStep.assign( vec2( 0 ) );
+							vel.mulAssign( select( phys, float( 0 ), float( 1 ) ) );
 
 						} );
 
@@ -1195,6 +1388,29 @@ export class AntSimulation {
 
 				} ); // fin Else (non-reine)
 
+				// --- DÉMARCHE : la phase du cycle de marche avance avec la DISTANCE
+				// réellement parcourue, jamais avec le temps. Fin du patinage : une
+				// fourmi bloquée contre un mur cesse de pédaler, une envenimée traîne
+				// vraiment la patte, une soldate a une foulée plus ample.
+				// Allométrie de la fourmi : longueur de foulée ∝ v^0,42 (donc cadence
+				// ∝ v^0,58, somme = 1). À vitesse nominale la formule redonne
+				// EXACTEMENT l'ancienne cadence moveSpeed·walkAnim·0,14.
+				If( phys, () => {
+
+					const distW = length( pos.sub( pos0 ) ).mul( TEXEL );
+					const vRef = max( u.moveSpeed.mul( TEXEL ), 1e-4 );
+					const ratio = distW.div( max( u.dt, 1e-4 ) ).div( vRef );
+					const sFac = clamp( pow( max( ratio, 1e-4 ), 0.4232 ), 0.35, 1.8 );
+					const strMul = select( isQueen, u.queenScale,
+						select( isSoldier, float( 1.45 ),
+							select( isNurse, float( 0.85 ),
+								select( isScout, float( 0.92 ), float( 1 ) ) ) ) );
+					const stride = float( TEXEL )
+						.div( max( u.walkAnim, 0.05 ).mul( 0.14 ) ).mul( sFac ).mul( strMul );
+					gait.assign( fract( gait.add( distW.div( max( stride, 1e-4 ) ) ) ) );
+
+				} );
+
 				// normalisation de l'angle dans [0, 2π)
 				ang.assign( ang.sub( floor( ang.div( PI2 ) ).mul( PI2 ) ) );
 
@@ -1202,15 +1418,68 @@ export class AntSimulation {
 
 				} ); // fin If(alive) — reste du comportement
 
-				// --- écriture finale : état re-packé + signes vitaux ---
+				// ================== CADAVRE : chute, rebond, glissade ==================
+				// Le cadavre n'est plus figé à l'instant de la mort : il retombe,
+				// rebondit, dérape et s'immobilise là où la physique le mène. Sa
+				// position reste dans antData — donc l'araignée qui vient le dévorer
+				// le trouve VRAIMENT, et la hitbox de débogage ne ment pas.
+				If( phys.and( alive.lessThan( 0.5 ) ).and( state.equal( uint( 2 ) ) ), () => {
+
+					gait.assign( min( gait.add( u.dt ), 8 ) );   // horloge de culbute
+
+					If( height.greaterThan( 0 ).or( vHeight.greaterThan( 0 ) ), () => {
+
+						vHeight.subAssign( u.gravity.mul( u.dt ) );
+						height.addAssign( vHeight.mul( u.dt ) );
+						vel.mulAssign( exp( u.airDrag.negate().mul( u.dt ) ) );
+
+						If( height.lessThanEqual( 0 ), () => {
+
+							height.assign( 0 );
+							vHeight.assign( vHeight.negate().mul( u.restitution ) );
+							If( vHeight.lessThan( 0.25 ), () => {
+
+								vHeight.assign( 0 );
+
+							} );
+							vel.mulAssign( 0.45 );
+
+						} );
+
+					} ).Else( () => {
+
+						height.assign( 0 );
+						vHeight.assign( 0 );
+						// un cadavre ne glisse pas longtemps : chitine contre mousse
+						vel.mulAssign( exp( u.groundDrag.mul( 2.4 ).negate().mul( u.dt ) ) );
+
+					} );
+
+					const cn = pos.add( vel.mul( u.dt ) ).toVar();
+
+					If( blockedAt( cn.x, cn.y ), () => {
+
+						cn.assign( pos );
+						vel.assign( vec2( 0 ) );
+
+					} );
+
+					pos.assign( cn );
+					a.assign( vec4( pos, ang, timer ) );
+
+				} );
+
+				// --- écriture finale : état re-packé + signes vitaux + dynamique ---
 				// (aussi pour les mortes : le cap de cadavres et la dévoration font
-				// évoluer leur état ; leur position, elle, reste figée)
+				// évoluer leur état)
 				antState.element( instanceIndex ).assign(
 					state.bitOr( under.shiftLeft( uint( 3 ) ) )
 						.bitOr( goal.shiftLeft( uint( 4 ) ) )
-						.bitOr( node.shiftLeft( uint( 7 ) ) ),
+						.bitOr( node.shiftLeft( uint( 7 ) ) )
+						.bitOr( deathWord.shiftLeft( uint( 11 ) ) ),
 				);
-				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, 0 ) );
+				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, gait ) );
+				antDyn.element( instanceIndex ).assign( vec4( vel, height, vHeight ) );
 
 			} );
 

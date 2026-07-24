@@ -114,6 +114,30 @@ export const params = {
 	alarmFleeThreshold: 0.45,          // pression d'alarme locale qui fait fuir l'araignée (0..1)
 	alarmWait: 6.0,                    // s d'attente à distance avant de retenter
 
+	// ------------------------------------------------------------------
+	// PHYSIQUE (mode physique : vraies vitesses, vraies forces, vrais impacts)
+	// `physics: false` = chemin historique EXACT (déplacement cinématique
+	// `pos += dir·v·dt`, phase de marche globale, cadavre plaqué sur le dos) :
+	// c'est le témoin de comparaison des performances.
+	// ------------------------------------------------------------------
+	physics: true,
+	// gravité de JEU, PAS la gravité physique. À l'échelle fourmi (1 unité monde
+	// ≈ 1 cm) g vaut ~930 u/s² : une chute de 0,25 u durerait 1,5 frame, donc
+	// serait strictement invisible. 45 u/s² donne une chute lisible en ~6 frames.
+	// NE PAS « corriger » vers la valeur physique exacte.
+	gravity: 45,
+	antAccel: 14,                      // /s : raideur du contrôle musculaire (inertie)
+	groundDrag: 3.2,                   // /s : friction du sol sur une fourmi qui glisse
+	airDrag: 0.5,                      // /s : traînée en vol (insecte = très léger)
+	restitution: 0.32,                 // rebond au contact du sol
+	wallBounce: 0.45,                  // restitution sur un mur (impact réel)
+	biteKnockback: 9,                   // u/s : recul horizontal encaissé à chaque morsure
+	bitePop: 2.2,                       // u/s : composante verticale du coup
+	deathPop: 2.7,                      // u/s : impulsion verticale à la mort (culbute)
+	deathFling: 2.5,                      // u/s : projection horizontale à la mort
+	chargeImpulse: 3.5,                 // u/s : recul de la soldate qui percute l'araignée
+	spiderKnockback: 2.6,               // u/s : recul de l'araignée sous les morsures
+
 	// Affichage
 	trailIntensity: 1.0,
 	shadows: true,
@@ -176,9 +200,21 @@ export const gfx = {
 	pitRadius: 18,                     // rayon de la fosse (unités monde)
 	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
+	// Micro-dynamique du corps (démarche physique : le corps tangue et roule
+	// en cadence avec le trépied au lieu de glisser en bloc). 0 = désactivé.
+	bobAmp: 0.018,                     // rebond vertical (unités monde)
+	swayAmp: 0.085,                    // roulis de la foulée (rad)
+	pitchAmp: 0.045,                   // tangage de la foulée (rad)
+
+	// Ragdoll GPU (XPBD) — pool borné : le coût est plafonné par construction
+	rdBudget: 192,                     // ragdolls simultanés max (0 = jamais de ragdoll)
+	rdDist: 26,                        // distance caméra max pour ragdoller (u)
+	rdSubsteps: 8,                     // sous-pas XPBD par pas fixe
+
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis
 	debugSpider: false,                // hitbox (corps araignée + fourmis) et cône de vision de l'araignée
+	perfHud: false,                    // chronos GPU par passe (nécessite un rechargement)
 
 	// Performances (LOD des fourmis)
 	lodDist0: 16,                      // rayon plein détail (unités monde)
@@ -226,6 +262,18 @@ if ( saved ) {
 	// migration : une bille = UNE unité, littéralement prise du sol
 	// (les anciennes sauvegardes portaient 12-30 unités par bille)
 	params.foodAmount = 1;
+
+}
+
+// Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
+// et `?physics=1` donnent deux onglets comparables sans toucher au panneau
+// (l'A/B honnête exige DEUX pages rechargées — l'HMR ne recompile pas un
+// kernel déjà instancié). `?perf=1` active les chronos GPU par passe.
+{
+
+	const q = new URLSearchParams( location.search );
+	if ( q.has( 'physics' ) ) params.physics = q.get( 'physics' ) !== '0';
+	if ( q.has( 'perf' ) ) gfx.perfHud = q.get( 'perf' ) !== '0';
 
 }
 

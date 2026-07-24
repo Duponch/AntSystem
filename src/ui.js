@@ -112,7 +112,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fQueen.add( params, 'queenMealValue', 0.1, 1, 0.05 ).name( 'Énergie par repas' )
 		.onChange( ( v ) => sim.u.queenMealValue.value = v );
 	fQueen.add( gfx, 'queenScale', 1.4, 4, 0.1 ).name( 'Gabarit de la reine (×)' )
-		.onChange( ( v ) => ants.uQueenScale.value = v );
+		.onChange( ( v ) => { ants.uQueenScale.value = v; sim.u.queenScale.value = v; } );
 	fQueen.close();
 
 	const fBrood = fLife.addFolder( 'Couvain' );
@@ -173,6 +173,72 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => { spiders.setDebugVisible( v ); ants.setHitboxVisible( v ); } );
 	fPredators.close();
 
+	// ------------------------------------------------------------------
+	// PHYSIQUE — l'interrupteur maître et son early-out
+	// ------------------------------------------------------------------
+	const fPhys = gui.addFolder( '⚙️ Physique' );
+
+	fPhys.add( params, 'physics' ).name( 'Mode physique' ).onChange( ( v ) => {
+
+		sim.u.physOn.value = v ? 1 : 0;
+		overlayFlash( v
+			? '⚙️ Physique ON — vitesses, impacts, culbutes'
+			: '⚙️ Physique OFF — déplacement cinématique historique' );
+
+	} );
+
+	fPhys.add( { info: () => {
+
+		overlayFlash( 'Comparaison honnête : ouvrez ?physics=0 et ?physics=1 dans deux onglets rechargés' );
+
+	} }, 'info' ).name( '❔ Comment comparer' );
+
+	const fForces = fPhys.addFolder( 'Forces & matière' );
+	fForces.add( params, 'gravity', 5, 200, 1 ).name( 'Gravité (u/s²)' )
+		.onChange( ( v ) => sim.u.gravity.value = v );
+	fForces.add( params, 'antAccel', 2, 60, 0.5 ).name( 'Réactivité musculaire' )
+		.onChange( ( v ) => sim.u.antAccel.value = v );
+	fForces.add( params, 'groundDrag', 0.2, 12, 0.1 ).name( 'Friction au sol' )
+		.onChange( ( v ) => sim.u.groundDrag.value = v );
+	fForces.add( params, 'airDrag', 0, 4, 0.05 ).name( 'Traînée en vol' )
+		.onChange( ( v ) => sim.u.airDrag.value = v );
+	fForces.add( params, 'restitution', 0, 0.9, 0.02 ).name( 'Rebond au sol' )
+		.onChange( ( v ) => sim.u.restitution.value = v );
+	fForces.add( params, 'wallBounce', 0, 1, 0.05 ).name( 'Rebond sur les murs' )
+		.onChange( ( v ) => sim.u.wallBounce.value = v );
+	fForces.close();
+
+	const fImpacts = fPhys.addFolder( 'Impacts & projections' );
+	fImpacts.add( params, 'biteKnockback', 0, 30, 0.5 ).name( 'Recul encaissé (u/s)' )
+		.onChange( ( v ) => sim.u.biteKnock.value = v / TEXEL );
+	fImpacts.add( params, 'bitePop', 0, 10, 0.1 ).name( 'Soulèvement du coup (u/s)' )
+		.onChange( ( v ) => sim.u.bitePop.value = v );
+	fImpacts.add( params, 'deathPop', 0, 10, 0.1 ).name( 'Sursaut de mort (u/s)' )
+		.onChange( ( v ) => sim.u.deathPop.value = v );
+	fImpacts.add( params, 'deathFling', 0, 15, 0.1 ).name( 'Projection de mort (u/s)' )
+		.onChange( ( v ) => sim.u.deathFling.value = v / TEXEL );
+	fImpacts.add( params, 'chargeImpulse', 0, 15, 0.1 ).name( 'Contre-coup de la charge' )
+		.onChange( ( v ) => sim.u.chargeImpulse.value = v / TEXEL );
+	fImpacts.add( params, 'spiderKnockback', 0, 12, 0.1 ).name( 'Recul de l\'araignée (u/s)' );
+	fImpacts.close();
+
+	const fBody = fPhys.addFolder( 'Démarche' );
+	fBody.add( gfx, 'bobAmp', 0, 0.08, 0.002 ).name( 'Rebond du corps' )
+		.onChange( ( v ) => ants.pose.u.bobAmp.value = v );
+	fBody.add( gfx, 'swayAmp', 0, 0.3, 0.005 ).name( 'Roulis du trépied' )
+		.onChange( ( v ) => ants.pose.u.swayAmp.value = v );
+	fBody.add( gfx, 'pitchAmp', 0, 0.2, 0.005 ).name( 'Tangage' )
+		.onChange( ( v ) => ants.pose.u.pitchAmp.value = v );
+	fBody.close();
+
+	fPhys.add( gfx, 'perfHud' ).name( '⏱ Chronos GPU (recharge)' ).onFinishChange( () => {
+
+		saveSettings();
+		location.reload();
+
+	} );
+	fPhys.close();
+
 	const fPher = gui.addFolder( 'Phéromones' );
 	fPher.add( params, 'depositRate', 0, 40, 0.5 ).name( 'Dépôt' )
 		.onChange( ( v ) => sim.u.depositRate.value = v );
@@ -207,7 +273,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fDisplay.add( gfx, 'musicVolume', 0, 1, 0.01 ).name( 'Volume' )
 		.onChange( ( v ) => music.setVolume( v ) );
 	// l'animation reste proportionnelle à la vitesse ; ceci règle le rapport
-	fDisplay.add( params, 'walkAnim', 0.2, 4, 0.05 ).name( 'Calibrage animation' );
+	fDisplay.add( params, 'walkAnim', 0.2, 4, 0.05 ).name( 'Calibrage animation' )
+		.onChange( ( v ) => sim.u.walkAnim.value = v );
 	fDisplay.add( params, 'shadows' ).name( 'Ombres' ).onChange( ( v ) => {
 
 		renderer.shadowMap.enabled = v;
@@ -656,7 +723,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	}
 
-	function updateOverlay( stats, fps ) {
+	function updateOverlay( stats, fps, perf ) {
 
 		const carrying = Math.max( 0, stats.picked - stats.delivered );
 		const eaten = stats.eaten || 0;
@@ -682,7 +749,10 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
 			( params.spiderCount > 0 ? `🕷 ${eaten} mortes (${devoured} dévorées) · ` : '' ) +
-			`${aliveCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips<br>` +
+			`${aliveCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips` +
+			( perf && perf.compute ? ` · ⏱ compute ${perf.compute.toFixed( 2 )} ms` +
+				` / rendu ${perf.render.toFixed( 2 )} ms (${perf.computeCalls} passes)` : '' ) +
+			` · ⚙️ ${params.physics ? 'physique' : 'cinématique'}<br>` +
 			colonyLine +
 			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
 			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +

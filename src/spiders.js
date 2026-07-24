@@ -20,6 +20,7 @@ import {
 } from 'three/tsl';
 
 import { loadVATMulti } from './vat.js';
+import { qrot } from './pose.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
@@ -29,7 +30,14 @@ const CONSUME_MULT = 2.6;              // la zone de dévoration est plus large 
 const MAX_HP = 100;
 // modes diffusés au noyau (sectorA.z) : 0 rien, 1 morsure, 2 dévoration
 const MODE_NONE = 0, MODE_BITE = 1, MODE_EAT = 2;
-const CLIP = { idle: 0, walk: 1, attack: 2, death: 3 };
+const CLIP = { idle: 0, walk: 1, attack: 2, death: 3, jump: 4 };
+// distance parcourue par cycle de marche (unités monde) : c'est une propriété
+// de l'ANIMAL, pas de sa vitesse — d'où l'absence totale de patinage quel que
+// soit le réglage de vitesse.
+const STRIDE = BODY_LENGTH * 0.72;
+const SP_GRAV = 26;                    // gravité ressentie par l'araignée (u/s²)
+const JUMP_RANGE = [ 4.5, 11 ];        // distance de déclenchement du bond (u)
+const JUMP_COOLDOWN = 2.6;             // s entre deux bonds
 const T = GRID / WORLD;
 const SAMPLE = 1024;                   // fourmis échantillonnées pour la détection
 const WINDOW = 64;                     // fenêtre de recherche par araignée
@@ -59,24 +67,32 @@ function buildConeGeo( fovDeg ) {
 export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	const vat = await loadVATMulti( '/Spider.glb', {
-		clipNames: [ 'Idle', 'Walk', 'Attack', 'Death' ],
+		clipNames: [ 'Idle', 'Walk', 'Attack', 'Death', 'Jump' ],
 		fps: 16,
 		targetLength: BODY_LENGTH,
 	} );
 
 	const clipDur = vat.clipInfos.map( ( c ) => c.duration );
+	// hauteur du pivot corporel dans le modèle normalisé (pattes en dessous)
+	const PIVOT_H = vat.bounds.height * 0.5;
 	// Idle/Walk/Attack bouclent (l'attaque se répète tant que l'araignée mord/
 	// dévore, au lieu de se figer sur sa dernière frame = « glissade » sans anim) ;
-	// Death tient sa dernière frame.
-	const isLoop = [ true, true, true, false ];
+	// Death et Jump tiennent leur dernière frame.
+	const isLoop = [ true, true, true, false, false ];
 
 	// ------------------------------------------------------------------
 	// Rendu : un seul mesh instancié, attributs dynamiques par araignée
 	// ------------------------------------------------------------------
-	const aPose = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // x, z, theta, échelle
+	// L'ORIENTATION est un quaternion complet (lacet + tangage + roulis) calculé
+	// côté CPU : à ≤ 1024 individus c'est gratuit, et ça évite trois sin/cos par
+	// SOMMET. Sans tangage/roulis, une araignée ne peut ni bondir, ni encaisser,
+	// ni basculer en mourant.
+	const aPose = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // x, y, z, échelle
+	const aQuat = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // quaternion d'attitude
 	const aAnim = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS * 4 ), 4 );   // clipA, phaseA, clipB, phaseB
 	const aBlend = new THREE.InstancedBufferAttribute( new Float32Array( MAX_SPIDERS ), 1 );       // poids du clip précédent
 	aPose.setUsage( THREE.DynamicDrawUsage );
+	aQuat.setUsage( THREE.DynamicDrawUsage );
 	aAnim.setUsage( THREE.DynamicDrawUsage );
 	aBlend.setUsage( THREE.DynamicDrawUsage );
 
@@ -84,6 +100,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	geo.index = vat.geometry.index;
 	geo.setAttribute( 'position', vat.geometry.attributes.position );
 	geo.setAttribute( 'aPose', aPose );
+	geo.setAttribute( 'aQuat', aQuat );
 	geo.setAttribute( 'aAnim', aAnim );
 	geo.setAttribute( 'aBlend', aBlend );
 	geo.instanceCount = 0;
@@ -114,6 +131,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	material.positionNode = Fn( () => {
 
 		const pose = attribute( 'aPose', 'vec4' );
+		const quat = attribute( 'aQuat', 'vec4' );
 		const anim = attribute( 'aAnim', 'vec4' );
 		const blend = attribute( 'aBlend', 'float' );
 
@@ -129,15 +147,11 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		} );
 
-		const c = cos( pose.z );
-		const s = sin( pose.z );
-		const rot = mat3(
-			vec3( c, 0, s.negate() ),
-			vec3( 0, 1, 0 ),
-			vec3( s, 0, c ),
-		);
+		// pivot au niveau du corps (les pattes pendent en dessous) : c'est autour
+		// de lui que l'araignée tangue, roule et bascule en mourant
+		const pivot = vec3( 0, PIVOT_H, 0 );
 
-		return rot.mul( local.mul( pose.w ) ).add( vec3( pose.x, 0, pose.y ) );
+		return qrot( quat, local.sub( pivot ).mul( pose.w ) ).add( pose.xyz );
 
 	} )();
 
@@ -182,6 +196,20 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	}
 	const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion();
 	const _vp = new THREE.Vector3(), _vs = new THREE.Vector3(), _yAxis = new THREE.Vector3( 0, 1, 0 );
+	// composition d'attitude : lacet ∘ tangage ∘ roulis (mêmes axes que la
+	// fourmi — avant = +Z, haut = +Y)
+	const _qy = new THREE.Quaternion(), _qp = new THREE.Quaternion(), _qr = new THREE.Quaternion();
+	const _xAxis = new THREE.Vector3( 1, 0, 0 ), _zAxis = new THREE.Vector3( 0, 0, 1 );
+
+	function writeAttitude( slot, theta, pitch, roll ) {
+
+		_qy.setFromAxisAngle( _yAxis, theta );
+		_qp.setFromAxisAngle( _xAxis, pitch );
+		_qr.setFromAxisAngle( _zAxis, roll );
+		_qy.multiply( _qp ).multiply( _qr );
+		aQuat.setXYZW( slot, _qy.x, _qy.y, _qy.z, _qy.w );
+
+	}
 
 	// ------------------------------------------------------------------
 	// État CPU par araignée
@@ -200,6 +228,16 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			state: 'roam',
 			t: 0.5 + Math.random() * 2,
 			pos: new THREE.Vector2( Math.cos( ang ) * r, Math.sin( ang ) * r ),
+			// --- état dynamique : l'araignée a une masse, donc de l'inertie ---
+			vel: new THREE.Vector2(),  // vitesse planaire (u/s)
+			h: 0,                      // hauteur au-dessus du sol (u)
+			vh: 0,                     // vitesse verticale (u/s)
+			pitch: 0,                  // tangage courant (rad)
+			roll: 0,                   // roulis courant (rad)
+			pitchT: 0,                 // tangage visé
+			rollT: 0,                  // roulis visé
+			gait: Math.random(),       // phase de marche, pilotée par la DISTANCE
+			jumpCd: Math.random() * JUMP_COOLDOWN,
 			heading: Math.random() * Math.PI * 2,
 			target: new THREE.Vector2(),
 			detectTimer: Math.random() * 0.4,
@@ -263,10 +301,24 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 	}
 
-	function advanceAnim( sp, dt ) {
+	function advanceAnim( sp, dt, dist ) {
 
-		sp.phase += ( dt * sp.speedScale ) / clipDur[ sp.clip ];
-		sp.phase = isLoop[ sp.clip ] ? sp.phase % 1 : Math.min( sp.phase, 0.999 );
+		// LE CYCLE DE MARCHE AVANCE AVEC LA DISTANCE, PAS AVEC LE TEMPS.
+		// C'est la seule façon d'éliminer le patinage : quelle que soit la
+		// vitesse — accélération, virage serré, blocage contre un obstacle —
+		// les pattes touchent le sol au bon endroit. Les autres clips (guet,
+		// attaque, mort, bond) restent pilotés par le temps, eux ne se
+		// déplacent pas.
+		if ( params.physics && sp.clip === CLIP.walk ) {
+
+			sp.phase = ( sp.phase + dist / ( STRIDE / Math.max( 0.2, params.spiderWalkAnim ) ) ) % 1;
+
+		} else {
+
+			sp.phase += ( dt * sp.speedScale ) / clipDur[ sp.clip ];
+			sp.phase = isLoop[ sp.clip ] ? sp.phase % 1 : Math.min( sp.phase, 0.999 );
+
+		}
 
 		if ( sp.blend > 0 ) {
 
@@ -275,6 +327,81 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			sp.blend = Math.max( 0, sp.blend - dt * sp.blendRate );
 
 		}
+
+	}
+
+	// ------------------------------------------------------------------
+	// Intégration physique d'une araignée (masse, inertie, balistique)
+	// ------------------------------------------------------------------
+	// `wantX/wantY` = vitesse VOULUE par l'animal. En l'air, elle est ignorée :
+	// une araignée en vol ne peut pas changer de trajectoire — c'est ce qui rend
+	// un bond crédible. Renvoie la distance réellement parcourue (pour la
+	// phase de marche).
+	const SP_ACCEL = 9;                    // /s : nervosité de l'araignée
+
+	function integrate( sp, dt, wantX, wantY ) {
+
+		const px = sp.pos.x, py = sp.pos.y;
+
+		if ( ! params.physics ) {
+
+			sp.pos.x += wantX * dt;
+			sp.pos.y += wantY * dt;
+			return Math.hypot( sp.pos.x - px, sp.pos.y - py );
+
+		}
+
+		if ( sp.h > 1e-4 || sp.vh > 0 ) {
+
+			sp.vh -= SP_GRAV * dt;
+			sp.h += sp.vh * dt;
+			// le corps suit la tangente de sa trajectoire : nez haut à la montée,
+			// nez bas à la descente
+			sp.pitchT = - sp.vh * 0.035;
+
+			if ( sp.h <= 0 ) {
+
+				// atterrissage : les pattes encaissent, le corps plonge puis se
+				// redresse (le tangage visé retombe à zéro tout seul)
+				sp.h = 0;
+				sp.pitchT += Math.min( 0.5, Math.abs( sp.vh ) * 0.05 );
+				sp.vh = 0;
+				sp.vel.multiplyScalar( 0.45 );
+
+			}
+
+		} else {
+
+			sp.h = 0;
+			sp.vh = 0;
+			const k = Math.min( 1, SP_ACCEL * dt );
+			sp.vel.x += ( wantX - sp.vel.x ) * k;
+			sp.vel.y += ( wantY - sp.vel.y ) * k;
+
+		}
+
+		sp.pos.x += sp.vel.x * dt;
+		sp.pos.y += sp.vel.y * dt;
+
+		// le corps s'incline dans le sens de l'accélération (comme un vrai
+		// animal qui démarre ou freine) et se remet à plat par ressort
+		const damp = Math.min( 1, 8 * dt );
+		sp.pitch += ( sp.pitchT - sp.pitch ) * damp;
+		sp.roll += ( sp.rollT - sp.roll ) * damp;
+		sp.pitchT *= Math.max( 0, 1 - 3 * dt );
+		sp.rollT *= Math.max( 0, 1 - 3 * dt );
+
+		return Math.hypot( sp.pos.x - px, sp.pos.y - py );
+
+	}
+
+	// impulsion : la seule façon d'appliquer un coup à un corps qui a une masse
+	function impulse( sp, ix, iy, iv = 0 ) {
+
+		if ( ! params.physics ) return;
+		sp.vel.x += ix;
+		sp.vel.y += iy;
+		if ( iv > 0 ) { sp.vh += iv; sp.h = Math.max( sp.h, 1e-3 ); }
 
 	}
 
@@ -486,12 +613,22 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		const detect = params.spiderVision;   // portée de vision (cône, voir findNearest)
 		sp.t -= dt;
 		sp.biteMode = MODE_NONE;
+		sp.moved = 0;
 
 		// dégâts : usure, retraite sous la pression, mort
 		if ( sp.biteWindow > 0 && sp.state !== 'death' && sp.state !== 'respawn' ) {
 
 			sp.hp -= sp.biteWindow * 0.006;
 			const pressed = sp.biteWindow > 110;
+
+			// RECUL SOUS LA MÊLÉE : chaque salve de morsures pousse réellement le
+			// prédateur en arrière et le déséquilibre. À plusieurs dizaines de
+			// soldates accrochées, l'araignée est physiquement repoussée — ce
+			// n'était jusqu'ici qu'un changement d'état.
+			const push = Math.min( 1, sp.biteWindow / 90 ) * params.spiderKnockback;
+			impulse( sp, - Math.cos( sp.heading ) * push, - Math.sin( sp.heading ) * push );
+			sp.pitchT -= push * 0.05;
+			sp.rollT += ( Math.random() - 0.5 ) * push * 0.08;
 			sp.biteWindow = 0;
 
 			if ( sp.hp <= 0 ) {
@@ -499,6 +636,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.state = 'death';
 				sp.t = clipDur[ CLIP.death ];
 				play( sp, 'death', 0.1, 1 );
+				// AGONIE PHYSIQUE : elle se cabre, retombe et bascule sur le flanc.
+				// Une araignée morte ne reste pas plantée sur ses huit pattes.
+				sp.vh = 2.4;
+				sp.h = 1e-3;
+				sp.rollT = ( Math.random() < 0.5 ? - 1 : 1 ) * ( 1.15 + Math.random() * 0.5 );
+				sp.pitchT = ( Math.random() - 0.5 ) * 0.5;
 				dropFood( sp.pos.x, sp.pos.y );   // billes de nourriture lâchées sur le corps
 				return;
 
@@ -528,12 +671,19 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 		if ( sp.state === 'death' ) {
 
+			// elle continue de subir la gravité pendant l'animation de mort
+			sp.moved = integrate( sp, dt, 0, 0 );
+
 			if ( sp.t <= 0 ) {
 
-				// chute terminée → CADAVRE PERSISTANT (pose de mort figée), et
-				// l'individu réapparaît ailleurs (le nombre d'araignées vivantes tient).
+				// chute terminée → CADAVRE PERSISTANT, figé dans la pose ET
+				// l'ORIENTATION où la physique l'a laissé (sur le flanc, incliné),
+				// pas debout comme avant.
 				const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
-				spiderCorpses.push( { x: sp.pos.x, y: sp.pos.y, theta, scale: sp.scaleVar } );
+				spiderCorpses.push( {
+					x: sp.pos.x, y: sp.pos.y, theta, scale: sp.scaleVar,
+					pitch: sp.pitch, roll: sp.roll,
+				} );
 				while ( spiderCorpses.length > gfx.maxSpiderCorpses ) spiderCorpses.shift();
 				sp.state = 'respawn'; sp.t = 20;
 
@@ -548,6 +698,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 				const a = Math.random() * Math.PI * 2;
 				sp.pos.set( Math.cos( a ) * ( WORLD / 2 - 10 ), Math.sin( a ) * ( WORLD / 2 - 10 ) );
+				sp.vel.set( 0, 0 );
+				sp.h = 0; sp.vh = 0;
+				sp.pitch = sp.roll = sp.pitchT = sp.rollT = 0;
 				sp.hp = MAX_HP;
 				sp.state = 'idle';
 				sp.t = 2;
@@ -563,8 +716,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			turnToward( sp, sp.pos.x * 3, sp.pos.y * 3, 4.5 * dt );
 			steerClear( sp );
-			sp.pos.x += Math.cos( sp.heading ) * 5.2 * dt;
-			sp.pos.y += Math.sin( sp.heading ) * 5.2 * dt;
+			sp.moved = integrate( sp, dt, Math.cos( sp.heading ) * 5.2, Math.sin( sp.heading ) * 5.2 );
 			play( sp, 'walk', 0.12, 2.1 * params.spiderWalkAnim );
 
 			// ne repart que si le délai est écoulé ET l'alarme retombée
@@ -577,6 +729,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		} else if ( sp.state === 'idle' ) {
 
 			sp.newKills = 0;
+			sp.moved = integrate( sp, dt, 0, 0 );   // elle s'arrête en glissant, pas net
 			play( sp, 'idle' );
 			sp.detectTimer -= dt;
 
@@ -599,8 +752,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( dNest > 38 ) turnToward( sp, nestV.x, nestV.y, 0.6 * dt );
 			else if ( dNest < 14 ) turnToward( sp, sp.pos.x * 10, sp.pos.y * 10, 0.6 * dt );
 			steerClear( sp );
-			sp.pos.x += Math.cos( sp.heading ) * 1.3 * dt;
-			sp.pos.y += Math.sin( sp.heading ) * 1.3 * dt;
+			sp.moved = integrate( sp, dt, Math.cos( sp.heading ) * 1.3, Math.sin( sp.heading ) * 1.3 );
 			play( sp, 'walk', 0.25, 0.8 * params.spiderWalkAnim );
 
 			sp.detectTimer -= dt;
@@ -651,46 +803,95 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const contact = bodyToPrey < ( sp.biting ? CONTACT_ANIM + 1 : CONTACT_ANIM );
 			sp.biting = contact;
 
-			const turnRate = ( contact ? 4.5 : 3.4 ) * dt;
-			const turned = turnToward( sp, aimX, aimY, turnRate );
-			steerClear( sp );
-			const turnFrac = Math.min( 1, Math.abs( turned ) / ( turnRate + 1e-5 ) );
-			const maxSpeed = contact ? Math.max( 1.3, params.spiderSpeed * 0.22 ) : params.spiderSpeed;
+			sp.jumpCd -= dt;
+			const airborne = sp.h > 1e-4;
 
-			let moveSpeed;
-			if ( contact ) {
+			// ============================ LE BOND ============================
+			// Un salticide ne trotte pas jusqu'à sa proie : il se cale, vise et
+			// SAUTE. Ici c'est un vrai tir balistique — on résout la vitesse
+			// initiale pour que la parabole retombe exactement sur la cible, puis
+			// plus personne ne pilote : la gravité fait le reste. La proie peut
+			// esquiver, l'araignée peut manquer. Le clip « Jump » du GLB, jamais
+			// utilisé jusqu'ici, sert enfin.
+			if ( params.physics && ! airborne && ! contact && sp.jumpCd <= 0 && hasTarget
+				&& bodyToPrey > JUMP_RANGE[ 0 ] && bodyToPrey < JUMP_RANGE[ 1 ] ) {
 
-				// AU CONTACT : avance DIRECTEMENT vers la proie (jamais tangentiel → pas
-				// d'orbite ni de toupie autour d'elle), sans jamais la dépasser
-				const dx = aimX - sp.pos.x, dy = aimY - sp.pos.y, dl = Math.hypot( dx, dy ) || 1e-5;
-				moveSpeed = Math.min( maxSpeed, dl / dt );
-				const step = moveSpeed * dt;
-				sp.pos.x += dx / dl * step;
-				sp.pos.y += dy / dl * step;
+				const dx = sp.target.x - sp.pos.x, dy = sp.target.y - sp.pos.y;
+				const toAim = Math.atan2( dy, dx );
+				// il faut lui faire face : on ne saute pas de travers
+				if ( Math.cos( toAim - sp.heading ) > 0.86 ) {
 
-			} else {
+					const apex = 1.1 + Math.random() * 0.5;
+					const flight = 2 * Math.sqrt( 2 * apex / SP_GRAV );
+					sp.vel.set( dx / flight, dy / flight );
+					sp.vh = SP_GRAV * flight * 0.5;
+					sp.h = 1e-3;
+					sp.jumpCd = JUMP_COOLDOWN;
+					play( sp, 'jump', 0.06, 1 / Math.max( flight, 0.1 ) * clipDur[ CLIP.jump ] );
 
-				// APPROCHE : le long du cap (courbes douces), RÉDUITE dans les virages et
-				// tant qu'on ne fait pas face à la cible (anti-toupie : pivote avant d'avancer)
-				const toAim = Math.atan2( aimY - sp.pos.y, aimX - sp.pos.x );
-				const facing = Math.max( 0, Math.cos( toAim - sp.heading ) );
-				moveSpeed = maxSpeed * ( 1 - 0.6 * turnFrac ) * facing;
-				sp.pos.x += Math.cos( sp.heading ) * moveSpeed * dt;
-				sp.pos.y += Math.sin( sp.heading ) * moveSpeed * dt;
+				}
 
 			}
 
-			sp.biteMode = MODE_BITE;   // hitbox de morsure armée (le noyau ne mord qu'AU CORPS)
+			if ( sp.h > 1e-4 ) {
 
-			// anim : attaque en boucle au contact ; sinon marche (foulée ∝ vitesse × calibrage)
-			if ( contact ) {
-
-				play( sp, 'attack', 0.12, 1.0 );
+				// EN VOL : aucun contrôle, aucun virage. C'est ce qui rend le bond
+				// crédible — et faillible.
+				sp.moved = integrate( sp, dt, 0, 0 );
+				sp.biteMode = MODE_BITE;
 
 			} else {
 
-				const stride = Math.max( 0.2, moveSpeed / Math.max( 1, params.spiderSpeed ) ) * params.spiderWalkAnim * 1.6;
-				play( sp, 'walk', 0.12, stride );
+				const turnRate = ( contact ? 4.5 : 3.4 ) * dt;
+				const turned = turnToward( sp, aimX, aimY, turnRate );
+				steerClear( sp );
+				const turnFrac = Math.min( 1, Math.abs( turned ) / ( turnRate + 1e-5 ) );
+				const maxSpeed = contact ? Math.max( 1.3, params.spiderSpeed * 0.22 ) : params.spiderSpeed;
+
+				let moveSpeed;
+				if ( contact ) {
+
+					// AU CONTACT : avance DIRECTEMENT vers la proie (jamais tangentiel → pas
+					// d'orbite ni de toupie autour d'elle), sans jamais la dépasser
+					const dx = aimX - sp.pos.x, dy = aimY - sp.pos.y, dl = Math.hypot( dx, dy ) || 1e-5;
+					moveSpeed = Math.min( maxSpeed, dl / dt );
+					sp.moved = integrate( sp, dt, dx / dl * moveSpeed, dy / dl * moveSpeed );
+
+				} else {
+
+					// APPROCHE : le long du cap (courbes douces), RÉDUITE dans les virages et
+					// tant qu'on ne fait pas face à la cible (anti-toupie : pivote avant d'avancer)
+					const toAim = Math.atan2( aimY - sp.pos.y, aimX - sp.pos.x );
+					const facing = Math.max( 0, Math.cos( toAim - sp.heading ) );
+					moveSpeed = maxSpeed * ( 1 - 0.6 * turnFrac ) * facing;
+					sp.moved = integrate( sp, dt,
+						Math.cos( sp.heading ) * moveSpeed, Math.sin( sp.heading ) * moveSpeed );
+
+				}
+
+				sp.biteMode = MODE_BITE;   // hitbox de morsure armée (le noyau ne mord qu'AU CORPS)
+
+				// anim : attaque en boucle au contact ; sinon marche (la phase est
+				// pilotée par la distance, le timeScale ne sert plus qu'au mode
+				// historique)
+				if ( contact ) {
+
+					play( sp, 'attack', 0.12, 1.0 );
+					// RECUL DU COUP : chaque frappe repousse légèrement l'araignée
+					// (elle mord, elle ne pousse pas un mur)
+					if ( Math.random() < dt / Math.max( params.biteInterval, 0.05 ) ) {
+
+						impulse( sp, - Math.cos( sp.heading ) * 1.4, - Math.sin( sp.heading ) * 1.4 );
+						sp.pitchT -= 0.12;
+
+					}
+
+				} else {
+
+					const stride = Math.max( 0.2, moveSpeed / Math.max( 1, params.spiderSpeed ) ) * params.spiderWalkAnim * 1.6;
+					play( sp, 'walk', 0.12, stride );
+
+				}
 
 			}
 
@@ -741,9 +942,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.feedApproach = ( sp.feedApproach || 0 ) + dt;
 				turnToward( sp, tx, ty, 6.0 * dt );
 				steerClear( sp );
-				const step = Math.min( dCorpse - 0.6, params.spiderSpeed * 0.6 * dt );
-				sp.pos.x += ( tx - sp.pos.x ) / dCorpse * step;
-				sp.pos.y += ( ty - sp.pos.y ) / dCorpse * step;
+				const want = Math.min( ( dCorpse - 0.6 ) / Math.max( dt, 1e-4 ), params.spiderSpeed * 0.6 );
+				sp.moved = integrate( sp, dt,
+					( tx - sp.pos.x ) / dCorpse * want, ( ty - sp.pos.y ) / dCorpse * want );
 				play( sp, 'walk', 0.1, params.spiderWalkAnim * 1.4 );
 
 				// cadavre inatteignable (coincé) → on abandonne au bout de quelques s
@@ -755,6 +956,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				// en boucle ; le chrono du repas tourne ; derniers instants → consommation.
 				sp.feedApproach = 0;
 				sp.feedTimer -= dt;
+				sp.moved = integrate( sp, dt, 0, 0 );
 				play( sp, 'attack', 0.1, 0.9 );
 				if ( sp.feedTimer < 0.5 ) sp.biteMode = MODE_EAT;
 				if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + Math.random() * 1.2; }
@@ -861,14 +1063,15 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				if ( simDt > 0 ) {
 
 					updateSpider( sp, simDt );
-					advanceAnim( sp, simDt );
+					advanceAnim( sp, simDt, sp.moved || 0 );
 
 				}
 
 				if ( sp.state === 'respawn' ) continue;
 
 				const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
-				aPose.setXYZW( render, sp.pos.x, sp.pos.y, theta, sp.scaleVar );
+				aPose.setXYZW( render, sp.pos.x, PIVOT_H * sp.scaleVar + sp.h, sp.pos.y, sp.scaleVar );
+				writeAttitude( render, theta, sp.pitch, sp.roll );
 				aAnim.setXYZW( render, sp.clip, sp.phase, sp.prevClip, sp.prevPhase );
 				aBlend.setX( render, sp.blend );
 
@@ -876,7 +1079,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				if ( showDebug ) {
 
 					const br = params.bodyRadius * sp.scaleVar;
-					_m4.makeScale( br, br, br ); _m4.setPosition( sp.pos.x, 0.45, sp.pos.y );
+					_m4.makeScale( br, br, br ); _m4.setPosition( sp.pos.x, 0.45 + sp.h, sp.pos.y );
 					hitboxMesh.setMatrixAt( render, _m4 );
 
 					const gr = params.fleeRadius * 0.85 / T;   // zone de saisie (monde)
@@ -902,7 +1105,9 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			for ( let c = 0; c < spiderCorpses.length && render < MAX_SPIDERS; c ++ ) {
 
 				const cp = spiderCorpses[ c ];
-				aPose.setXYZW( render, cp.x, cp.y, cp.theta, cp.scale );
+				aPose.setXYZW( render, cp.x, PIVOT_H * cp.scale, cp.y, cp.scale );
+				// le cadavre garde l'ORIENTATION où la physique l'a laissé
+				writeAttitude( render, cp.theta, cp.pitch || 0, cp.roll || 0 );
 				aAnim.setXYZW( render, CLIP.death, 0.999, CLIP.death, 0.999 );
 				aBlend.setX( render, 0 );
 				render ++;
@@ -912,6 +1117,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			geo.instanceCount = render;
 			mesh.visible = render > 0;
 			aPose.needsUpdate = true;
+			aQuat.needsUpdate = true;
 			aAnim.needsUpdate = true;
 			aBlend.needsUpdate = true;
 

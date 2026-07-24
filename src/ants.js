@@ -1,6 +1,6 @@
 // Rendu des fourmis 100 % GPU-driven :
 //
-//   VAT (cycle de marche baké, voir vat.js)
+//   VAT (cycle de marche baké + pose de mort, voir vat.js)
 //   + LOD à 3 niveaux (plein / décimé / silhouette) par clustering
 //   + frustum culling PAR FOURMI et classement par distance dans un compute
 //   + draws INDIRECTS : le compute écrit les instanceCount, compacte les
@@ -11,22 +11,27 @@
 // remappe instanceIndex (slot compacté, firstInstance=0) → id de fourmi via
 // la liste lodList[k*MAX + slot].
 //
-// CASTES : mêmes hashs et uniforms que le kernel (sim.casteOf) — couleur et
-// gabarit par caste, REINE (index 0) rendue par un mesh dédié hors pipeline
-// LOD (échelle libre, anim propre, jamais cullée par erreur).
-// SOUTERRAIN : le bit 3 d'antState fait lire la profondeur du plancher dans
-// la carte du layout — grain porté, halo, hitbox et cônes en héritent.
+// TOUTE la transformation d'un corps (position monde, attitude quaternion,
+// gabarit, phase de démarche, teintes, drapeaux) vient d'un SEUL buffer,
+// `antPose`, rempli une fois par fourmi et par frame par la passe kPose
+// (pose.js). Le vertex shader ne fait plus que trois lectures contiguës et une
+// rotation par quaternion : plus de hash de caste, plus de trigonométrie, plus
+// de lecture de la carte de profondeur par sommet.
+//
+// SOUTERRAIN : le drapeau « sous terre » de la pose fait sauter la fourmi au
+// classement quand la fosse est fermée (invisible sous le sol opaque).
 
 import * as THREE from 'three/webgpu';
 import {
 	Fn, If, instanceIndex, uniform, varyingProperty, storage, instancedArray,
 	attribute, positionLocal, cameraPosition,
-	vec2, vec3, vec4, mat3, float, int, ivec2, uint,
-	cos, sin, fract, floor, mix, hash, select, min, abs, normalize, cross, smoothstep, uv,
+	vec2, vec3, vec4, float, int, ivec2, uint,
+	fract, floor, mix, hash, select, min, abs, normalize, cross, smoothstep, uv,
 	textureLoad, atomicAdd, atomicStore, atomicLoad, clamp,
 } from 'three/tsl';
 
 import { loadAntVAT, buildLodGeometry } from './vat.js';
+import { createPose, qrot } from './pose.js';
 import { GRID, WORLD, MAX_ANTS, params, gfx } from './config.js';
 
 const LOD_DIST = [ 16, 42 ];          // limites LOD0→1 et LOD1→2 (unités monde)
@@ -35,8 +40,12 @@ const CULL_MARGIN = 1.6;              // rayon de sécurité autour d'une fourmi
 export async function createAnts( sim ) {
 
 	const vat = await loadAntVAT( '/AntRigged.glb', { frames: 20, targetLength: 0.95 } );
-	const layout = sim.layout;
-	const depthSize = layout.depthTexture.image.width;
+
+	// passe de pose : la source unique de vérité du rendu
+	const pose = createPose( sim, vat );
+	const antPose = pose.antPose;
+	const uPivot = pose.u.pivotY;
+	const uPhysOn = sim.u.physOn;
 
 	// trois niveaux de détail partageant la MÊME texture d'animation
 	const lod1 = buildLodGeometry( vat, 0.045 );
@@ -75,43 +84,7 @@ export async function createAnts( sim ) {
 	const uReveal = uniform( 0 );
 	let phaseAcc = 0;
 
-	const texel = WORLD / GRID;
 	const framesF = float( vat.frames );
-
-	// --- état packé : masquer les bits hauts avant toute comparaison ---
-	const stateOf = ( antId ) => sim.antState.element( antId ).bitAnd( uint( 7 ) );
-	const underOf = ( antId ) => sim.antState.element( antId ).bitAnd( uint( 8 ) ).notEqual( uint( 0 ) );
-
-	// profondeur du plancher souterrain au point (texels grille)
-	const floorDepth = ( gp ) => {
-
-		const lc = clamp(
-			ivec2( gp.sub( vec2( layout.origin.x, layout.origin.y ) ) ),
-			ivec2( 0 ), ivec2( depthSize - 1 ),
-		);
-		return textureLoad( layout.depthTexture, lc ).x;
-
-	};
-
-	// gabarit par caste (mêmes hashs que le kernel — reine hors pipeline)
-	const casteScale = ( antId ) => {
-
-		const { isNurse, isSoldier, isScout } = sim.casteOf( antId );
-		return select( isSoldier, float( 1.45 ),
-			select( isNurse, float( 0.85 ),
-				select( isScout, float( 0.92 ), float( 1 ) ) ) );
-
-	};
-
-	// id de caste pour la teinte (0 ouvrière, 1 soldate, 2 nourrice, 3 éclaireuse)
-	const casteId = ( antId ) => {
-
-		const { isNurse, isSoldier, isScout } = sim.casteOf( antId );
-		return select( isSoldier, float( 1 ),
-			select( isNurse, float( 2 ),
-				select( isScout, float( 3 ), float( 0 ) ) ) );
-
-	};
 
 	// ------------------------------------------------------------------
 	// Kernels : remise à zéro des compteurs puis classement/compaction
@@ -126,20 +99,20 @@ export async function createAnts( sim ) {
 
 		If( instanceIndex.toFloat().lessThan( sim.u.antCount ), () => {
 
+			const P = pose.read( instanceIndex );
+			// vue fermée → les souterraines sont invisibles sous le sol opaque ;
 			// la reine (index 0, colonie active) a son mesh dédié
-			const isQueenSlot = sim.u.colonyOn.greaterThan( 0.5 ).and( instanceIndex.equal( uint( 0 ) ) );
-			const under = underOf( instanceIndex );
-			// vue fermée → les souterraines sont invisibles sous le sol opaque
-			const hidden = under.and( uReveal.lessThan( 0.01 ) );
+			const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
 
-			If( isQueenSlot.not().and( hidden.not() ), () => {
+			If( P.isQueen.not().and( hidden.not() ), () => {
 
-				const a = sim.antData.element( instanceIndex );
-				const y = select( under, floorDepth( a.xy ), float( 0 ) );
+				// centre de la sphère de culling : on retire le pivot pour rester
+				// sur le même point qu'avant le passage par antPose (sinon les
+				// bascules de LOD se décalent d'une caste à l'autre)
 				const world = vec3(
-					a.x.mul( texel ).sub( WORLD / 2 ),
-					y.add( 0.3 ),
-					a.y.mul( texel ).sub( WORLD / 2 ),
+					P.world.x,
+					P.world.y.sub( uPivot.mul( P.scale ) ).add( 0.3 ),
+					P.world.z,
 				);
 
 				// test de frustum en espace vue (marge = rayon d'une fourmi)
@@ -215,37 +188,6 @@ export async function createAnts( sim ) {
 	} )().compute( 2 );
 
 	// ------------------------------------------------------------------
-	// Transformation d'une fourmi (partagée corps/grain/halo/hitbox) —
-	// une souterraine est posée sur le plancher de sa galerie
-	// ------------------------------------------------------------------
-	const antTransform = ( antId ) => {
-
-		const a = sim.antData.element( antId );
-		const gp = a.xy;
-		const angle = a.z;
-
-		const yaw = float( Math.PI / 2 ).sub( angle );
-		const c = cos( yaw );
-		const s = sin( yaw );
-		const rot = mat3(
-			vec3( c, 0, s.negate() ),
-			vec3( 0, 1, 0 ),
-			vec3( s, 0, c ),
-		);
-
-		const y = select( underOf( antId ), floorDepth( gp ).add( 0.04 ), float( 0 ) );
-
-		const world = vec3(
-			gp.x.mul( texel ).sub( WORLD / 2 ),
-			y,
-			gp.y.mul( texel ).sub( WORLD / 2 ),
-		);
-
-		return { rot, world };
-
-	};
-
-	// ------------------------------------------------------------------
 	// Corps : 3 meshes indirects (matériaux jumeaux → même pipeline en cache)
 	// ------------------------------------------------------------------
 	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
@@ -266,16 +208,15 @@ export async function createAnts( sim ) {
 		material.positionNode = Fn( () => {
 
 			const antId = lodList.element( base.toUint().add( instanceIndex ) );
-			const { rot, world } = antTransform( antId );
+			const P = pose.read( antId );
 
 			const vatIdx = attribute( 'vatIndex', 'float' ).toInt();
 			varyingProperty( 'float', 'vAntAccent' ).assign(
 				select( vatIdx.lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ),
 			);
-
-			// caste : gabarit + teinte propres (mêmes hashs que la simulation)
-			const bodyScale = casteScale( antId );
-			varyingProperty( 'float', 'vCaste' ).assign( casteId( antId ) );
+			varyingProperty( 'float', 'vCaste' ).assign( P.caste );
+			varyingProperty( 'float', 'vVenom' ).assign( P.venom );
+			varyingProperty( 'float', 'vDead' ).assign( select( P.dead, 1, 0 ) );
 
 			let animated;
 
@@ -285,8 +226,11 @@ export async function createAnts( sim ) {
 
 			} else {
 
-				// phase de marche accumulée + décalage par fourmi
-				const cycle = uPhase.add( hash( antId.add( uint( 1013 ) ) ) );
+				// PHASE DE DÉMARCHE : en mode physique elle est propre à chaque
+				// fourmi et pilotée par la DISTANCE qu'elle a réellement parcourue
+				// (fin du patinage) ; en mode historique c'est l'horloge globale.
+				const cycle = select( uPhysOn.greaterThan( 0.5 ),
+					P.gait, uPhase.add( hash( antId.add( uint( 1013 ) ) ) ) );
 				const ff = fract( cycle ).mul( framesF );
 				const f0 = floor( ff ).toInt();
 
@@ -306,36 +250,29 @@ export async function createAnts( sim ) {
 
 			}
 
-			// envenimation : la marche se fige progressivement (paralysie) ; un
-			// varying porte la charge de venin (0..1) pour teinter le corps
-			const venom = sim.antVital.element( antId ).x.clamp( 0, 1 );
-			animated = mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, venom );
-			varyingProperty( 'float', 'vVenom' ).assign( venom );
+			// envenimation : la marche se fige progressivement (paralysie)
+			animated = mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, P.venom );
 
-			// cadavre (état 2) : pose figée retournée sur le dos, posée au sol
-			const state = stateOf( antId );
-			const dead = state.equal( uint( 2 ) );
-			varyingProperty( 'float', 'vDead' ).assign( select( dead, 1, 0 ) );
+			const local = animated.toVar();
 
-			// dévorée (état 3) : le cadavre a été mangé → sommet dégénéré, invisible
-			const consumed = state.equal( uint( 3 ) );
+			If( P.dead, () => {
 
-			const local = animated.mul( bodyScale ).mul( select( consumed, float( 0 ), float( 1 ) ) ).toVar();
-
-			If( dead, () => {
-
-				const rest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz.mul( bodyScale );
-				// roulis de π autour de l'axe avant : (x,y) → (−x,−y), puis relevé
-				// de la hauteur du corps pour reposer sur le dos, pattes en l'air
-				local.assign( vec3(
-					rest.x.negate(),
-					rest.y.negate().add( float( vat.bounds.height ).mul( bodyScale ) ),
-					rest.z,
-				) );
+				// CADAVRE : pose de mort bakée — pattes recroquevillées sous le
+				// corps, tête et gastre retombés. En mode historique on garde la
+				// vieille pose de repos plaquée (le témoin de comparaison).
+				const rowDead = textureLoad( vat.texture, ivec2( vatIdx, int( vat.deathRow ) ) ).xyz;
+				const rowRest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+				local.assign( select( uPhysOn.greaterThan( 0.5 ), rowDead, rowRest ) );
 
 			} );
 
-			return rot.mul( local ).add( world );
+			// dévorée : sommet dégénéré, invisible
+			const vis = select( P.gone, float( 0 ), float( 1 ) );
+
+			// le corps tourne autour de son PIVOT anatomique (articulation « root »),
+			// pas autour de ses pieds : sans ça une fourmi qui bascule s'enfonce
+			return qrot( P.q, local.sub( vec3( 0, uPivot, 0 ) ).mul( P.scale ).mul( vis ) )
+				.add( P.world );
 
 		} )();
 
@@ -393,15 +330,17 @@ export async function createAnts( sim ) {
 
 	queenMat.positionNode = Fn( () => {
 
-		const { rot, world } = antTransform( uint( 0 ) );
+		const P = pose.read( uint( 0 ) );
 
 		const vatIdx = attribute( 'vatIndex', 'float' ).toInt();
 		varyingProperty( 'float', 'vQAccent' ).assign(
 			select( vatIdx.lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ),
 		);
 
-		// démarche lente : cadence divisée par le gabarit (pas de patinage)
-		const cycle = uPhase.div( uQueenScale ).mul( 0.55 );
+		// démarche lente : en mode physique la cadence découle de sa vraie
+		// vitesse et de son gabarit (le facteur magique 0,55 disparaît)
+		const cycle = select( uPhysOn.greaterThan( 0.5 ),
+			P.gait, uPhase.div( uQueenScale ).mul( 0.55 ) );
 		const ff = fract( cycle ).mul( framesF );
 		const f0 = floor( ff ).toInt();
 		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
@@ -411,13 +350,19 @@ export async function createAnts( sim ) {
 
 		// gabarit royal : corps élargi, gaster étiré vers l'arrière (−z)
 		const stretch = clamp( positionLocal.z.negate().mul( 2 ), 0, 1 );
-		const local = animated.mul( uQueenScale )
+		const local = animated.sub( vec3( 0, uPivot, 0 ) ).mul( uQueenScale )
 			.mul( vec3( 1.05, 1.05, float( 1 ).add( stretch.mul( 0.5 ) ) ) );
 
-		// masquée si la colonie est coupée (l'index 0 redevient une ouvrière)
+		// masquée si la colonie est coupée (l'index 0 redevient une ouvrière) ;
+		// son pivot est relevé à SON échelle, pas à celle d'une ouvrière
 		const on = sim.u.colonyOn;
+		const world = vec3(
+			P.world.x,
+			P.world.y.sub( uPivot.mul( P.scale ) ).add( uPivot.mul( uQueenScale ) ),
+			P.world.z,
+		);
 
-		return rot.mul( local.mul( on ) ).add( world );
+		return qrot( P.q, local.mul( on ) ).add( world );
 
 	} )();
 
@@ -449,17 +394,23 @@ export async function createAnts( sim ) {
 		roughness: 0.4,
 	} );
 
+	// offset de la mandibule, exprimé RELATIVEMENT AU PIVOT (le grain est porté
+	// à la bouche : il suit donc le tangage et le roulis du corps)
+	const mouthOffset = ( scale ) => vec3(
+		float( 0 ),
+		float( vat.bounds.height * 0.62 ).sub( uPivot ),
+		float( vat.bounds.headZ * 0.9 ),
+	).mul( scale );
+
 	grainMat.positionNode = Fn( () => {
 
-		const { rot, world } = antTransform( instanceIndex );
-		const carrying = select( stateOf( instanceIndex ).equal( uint( 1 ) ), float( 1 ), float( 0 ) );
+		const P = pose.read( instanceIndex );
 		// grain caché avec sa porteuse : souterraine + vue fermée
-		const hidden = underOf( instanceIndex ).and( uReveal.lessThan( 0.01 ) );
-		const show = carrying.mul( select( hidden, float( 0 ), float( 1 ) ) );
-		const bodyScale = casteScale( instanceIndex );
-		const offset = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ).mul( bodyScale ) );
+		const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
+		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
+		const offset = qrot( P.q, mouthOffset( P.scale ) );
 
-		return positionLocal.mul( show ).add( offset ).add( world );
+		return positionLocal.mul( show ).add( offset ).add( P.world );
 
 	} )();
 
@@ -486,11 +437,10 @@ export async function createAnts( sim ) {
 
 	haloMat.positionNode = Fn( () => {
 
-		const { rot, world } = antTransform( instanceIndex );
-		const carrying = select( stateOf( instanceIndex ).equal( uint( 1 ) ), float( 1 ), float( 0 ) );
-		const hidden = underOf( instanceIndex ).and( uReveal.lessThan( 0.01 ) );
-		const show = carrying.mul( select( hidden, float( 0 ), float( 1 ) ) );
-		const center = rot.mul( vec3( 0, vat.bounds.height * 0.62, vat.bounds.headZ * 0.9 ) ).add( world );
+		const P = pose.read( instanceIndex );
+		const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
+		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
+		const center = qrot( P.q, mouthOffset( P.scale ) ).add( P.world );
 
 		const view = normalize( cameraPosition.sub( center ) );
 		const right = normalize( cross( vec3( 0, 1, 0 ), view ) );
@@ -515,9 +465,9 @@ export async function createAnts( sim ) {
 	grainHalo.frustumCulled = false;
 
 	// hitbox de DÉBOGAGE : sphère cyan translucide sur le corps de chaque fourmi.
-	// Avec la sphère jaune de l'araignée, permet de VOIR si, au moment de la morsure,
-	// le corps de la fourmi touche bien celui de l'araignée (et pas une patte avant).
-	// Masquée pour les fourmis dévorées (état 3).
+	// Elle suit la POSITION SIMULÉE (antData via antPose) — donc elle reste
+	// honnête quand un cadavre est projeté : c'est bien là que l'araignée
+	// testera le contact.
 	const uAntHitR = uniform( params.antRadius );
 	const hbGeo = new THREE.InstancedBufferGeometry();
 	const hbIco = new THREE.IcosahedronGeometry( 1, 2 );
@@ -527,11 +477,11 @@ export async function createAnts( sim ) {
 	const hbMat = new THREE.MeshBasicNodeMaterial( { color: new THREE.Color( 0x36ffd5 ), transparent: true, opacity: 0.22, depthWrite: false, toneMapped: false } );
 	hbMat.positionNode = Fn( () => {
 
-		const { rot, world } = antTransform( instanceIndex );
-		const bodyScale = casteScale( instanceIndex );
-		const hide = select( stateOf( instanceIndex ).equal( uint( 3 ) ), float( 0 ), float( 1 ) );
-		const center = rot.mul( vec3( 0, vat.bounds.height * 0.45, 0 ).mul( bodyScale ) ).add( world );
-		return positionLocal.mul( uAntHitR.mul( bodyScale ).mul( hide ) ).add( center );
+		const P = pose.read( instanceIndex );
+		const hide = select( P.gone, float( 0 ), float( 1 ) );
+		const center = qrot( P.q,
+			vec3( 0, float( vat.bounds.height * 0.45 ).sub( uPivot ), 0 ).mul( P.scale ) ).add( P.world );
+		return positionLocal.mul( uAntHitR.mul( P.scale ).mul( hide ) ).add( center );
 
 	} )();
 	const antHitbox = new THREE.Mesh( hbGeo, hbMat );
@@ -541,11 +491,15 @@ export async function createAnts( sim ) {
 	group.add( grain, grainHalo, antHitbox );
 
 	// ------------------------------------------------------------------
-	const renderer = sim.renderer;
 	const fovTmp = { tan: Math.tan };
+	const renderer = sim.renderer;
+	// tableau STABLE (three suit les passes par identité d'objet) : les quatre
+	// noyaux partent en UN seul command buffer au lieu de trois.
+	const PASSES = [ pose.kPose, kReset, kClassify, kFinalize ];
 
 	return {
 		group,
+		pose,
 		grainMat,
 		uBodyColor,
 		uAccentColor,
@@ -560,6 +514,7 @@ export async function createAnts( sim ) {
 		queen,
 		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },
 		uAntHitR,
+		passes: PASSES,
 		setHitboxVisible( v ) { antHitbox.visible = !! v; },
 		setCount( n ) {
 
@@ -573,8 +528,11 @@ export async function createAnts( sim ) {
 			for ( const b of bodies ) b.castShadow = on;
 
 		},
-		// chaque frame : phase de marche + classement LOD/frustum
+		// chaque frame : horloge de pose + phase historique + classement LOD/frustum
+		// (les dispatches eux-mêmes sont encodés par main.js, en un seul submit)
 		tick( simDt, camera ) {
+
+			pose.tick( simDt );
 
 			phaseAcc = ( phaseAcc + simDt * params.moveSpeed * params.walkAnim * 0.14 ) % 1;
 			uPhase.value = phaseAcc;
@@ -589,9 +547,19 @@ export async function createAnts( sim ) {
 			u.budget0.value = gfx.lodBudget;
 			u.budget1.value = gfx.lodBudget * 4;
 
-			renderer.compute( kReset );
-			renderer.compute( kClassify );
-			renderer.compute( kFinalize );
+			// ORDRE IMPOSÉ : kPose lit ce que kAnt vient d'écrire, kClassify lit
+			// ce que kPose vient d'écrire. En mode profilage on encode une passe
+			// par command buffer, sinon les chronos GPU se recouvrent et three
+			// leur donne le même identifiant (mesures écrasées).
+			if ( gfx.perfHud ) {
+
+				for ( const p of PASSES ) renderer.compute( p );
+
+			} else {
+
+				renderer.compute( PASSES );
+
+			}
 
 		},
 	};

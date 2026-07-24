@@ -23,6 +23,7 @@ import { createColonyTests } from './tests.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
 import { createUI } from './ui.js';
+import { tryAcquireReadback, releaseReadback } from './readback.js';
 
 async function main() {
 
@@ -47,7 +48,11 @@ async function main() {
 
 	} catch { /* adaptateur indisponible : on laisse les limites par défaut */ }
 
-	const renderer = new THREE.WebGPURenderer( { antialias: true, requiredLimits } );
+	// trackTimestamp : chronos GPU réels par passe (three demande automatiquement
+	// la feature « timestamp-query » quand l'adaptateur la propose). Coûte
+	// quelques écritures de compteur par passe : réservé au mode profilage,
+	// activable par `?perf=1` ou par le panneau (rechargement requis).
+	const renderer = new THREE.WebGPURenderer( { antialias: true, requiredLimits, trackTimestamp: gfx.perfHud } );
 	renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
 	// jamais 0×0 (fenêtre cachée/minimisée) : une swapchain vide invalide tout
 	renderer.setSize( Math.max( 2, window.innerWidth ), Math.max( 2, window.innerHeight ) );
@@ -64,6 +69,33 @@ async function main() {
 		console.error( err );
 		showError();
 		return;
+
+	}
+
+	// Ce que le device a RÉELLEMENT accordé — l'adaptateur interrogé plus haut
+	// n'est pas celui que three utilise (il en redemande un avec
+	// featureLevel:'compatibility'), les deux peuvent diverger. Le noyau fourmis
+	// lie 13 storage buffers : sous 13 accordés, il ne s'exécuterait tout
+	// simplement pas, silencieusement.
+	{
+
+		const dev = renderer.backend.device;
+		const lim = dev && dev.limits;
+		console.info(
+			`AntSystem GPU : storageBuffers/stage = ${lim ? lim.maxStorageBuffersPerShaderStage : '?'}`
+			+ ` · invocations/workgroup = ${lim ? lim.maxComputeInvocationsPerWorkgroup : '?'}`
+			+ ` · compatibilityMode = ${renderer.backend.compatibilityMode}`
+			+ ` · timestamps = ${renderer.backend.trackTimestamp === true}`
+			+ ` · physique = ${params.physics ? 'ON' : 'OFF'}`,
+		);
+		if ( lim && lim.maxStorageBuffersPerShaderStage < 13 ) {
+
+			console.error(
+				`AntSystem : seulement ${lim.maxStorageBuffersPerShaderStage} storage buffers par étage `
+				+ '— le noyau fourmis en demande 13, il ne tournera PAS.',
+			);
+
+		}
 
 	}
 
@@ -213,6 +245,27 @@ async function main() {
 	let fpsAccum = 0;
 	let fpsCount = 0;
 	let fps = 0;
+	const perf = { compute: 0, render: 0, computeCalls: 0 };
+
+	// Chronos GPU. Le pool de requêtes de three est BORNÉ (256 paires) : avec
+	// 8-9 passes compute par frame il déborde en une trentaine de frames, et les
+	// mesures perdues le sont silencieusement. On résout donc toutes les 10
+	// frames — et jamais pendant un autre readback (deux mappings concurrents se
+	// corrompent mutuellement, cf. le verrou global de readback.js).
+	async function resolveTimings() {
+
+		if ( renderer.backend.trackTimestamp !== true ) return;
+
+		try {
+
+			await renderer.resolveTimestampsAsync( THREE.TimestampQuery.COMPUTE );
+			await renderer.resolveTimestampsAsync( THREE.TimestampQuery.RENDER );
+			perf.compute = renderer.info.compute.timestamp;
+			perf.render = renderer.info.render.timestamp;
+
+		} catch { /* pool pas encore prêt */ }
+
+	}
 
 	renderer.setAnimationLoop( () => {
 
@@ -257,14 +310,23 @@ async function main() {
 
 		frame ++;
 
+		// résolution intercalée (jamais la même frame que le readback de stats)
+		if ( renderer.backend.trackTimestamp === true && frame % 30 === 10 ) {
+
+			if ( tryAcquireReadback() ) resolveTimings().finally( releaseReadback );
+
+		}
+
 		if ( frame % 30 === 0 ) {
 
 			fps = Math.round( fpsCount / fpsAccum );
 			fpsAccum = 0;
 			fpsCount = 0;
-			sim.readStats().then( ( stats ) => {
+			perf.computeCalls = renderer.info.compute.frameCalls;
+			sim.readStats().then( async ( stats ) => {
 
-				ui.updateOverlay( stats, fps );
+				await resolveTimings();
+				ui.updateOverlay( stats, fps, perf );
 				// la colonie réagit aux MÊMES stats (zéro readback en plus) :
 				// pontes → semis d'œufs, éclosions → nouvelles fourmis
 				colony.onStats( stats, colonyHooks );
