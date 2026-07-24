@@ -18,6 +18,7 @@ import {
 import { GRID, WORLD, NEST, gfx } from './config.js';
 import { uPitR } from './environment.js';
 import { DEPTH_SIZE, LAYERS } from './colony.js';
+import { layerDepth } from './nest.js';
 
 const TEXEL = WORLD / GRID;
 
@@ -76,6 +77,7 @@ export function createUnderground( { scene, layout, env, grass, camera } ) {
 	};
 
 	const floors = [];
+	const plates = [];
 
 	for ( let l = 0; l < LAYERS; l ++ ) {
 
@@ -85,12 +87,18 @@ export function createUnderground( { scene, layout, env, grass, camera } ) {
 		const mat = new THREE.MeshStandardNodeMaterial( { roughness: 0.96, metalness: 0 } );
 		mat.side = THREE.DoubleSide;
 
+		// Un sommet SANS cavite est plaque a la profondeur nominale de SA nappe,
+		// jamais a la surface. Le fragment sera de toute facon jete, mais la
+		// geometrie, elle, reste plate : sinon deux sommets voisins (l'un dans une
+		// chambre profonde, l'autre dans la terre pleine) engendrent un triangle
+		// vertical de toute la hauteur du nid. C'etaient les rideaux parasites.
+		const uPlate = uniform( layerDepth( l, layout.depthMax || 60 ) );
+		plates.push( uPlate );
+
 		mat.positionNode = Fn( () => {
 
 			const d = layerOf( textureLoad( layout.depthTexture, mapTexel( positionLocal ) ), l );
-			// pas de cavite ici : on plaque le sommet sur l'epaule, le fragment
-			// sera de toute facon jete
-			return vec3( positionLocal.x, select( d.lessThan( - 1e-4 ), d, float( SHELF ) ), positionLocal.z );
+			return vec3( positionLocal.x, select( d.lessThan( - 1e-4 ), d, uPlate ), positionLocal.z );
 
 		} )();
 
@@ -190,6 +198,7 @@ export function createUnderground( { scene, layout, env, grass, camera } ) {
 		// l'epaule : le nid fait desormais des dizaines d'unites de profondeur
 		const H = ( layout.depthMax || 60 ) + 2;
 		uDepthMax.value = layout.depthMax || 60;
+		for ( let l = 0; l < plates.length; l ++ ) plates[ l ].value = layerDepth( l, layout.depthMax || 60 );
 		rim.scale.set( Math.max( 0.001, r ), Math.max( 0.001, H ), Math.max( 0.001, r ) );
 		rim.position.set( centerX, - H / 2, centerZ );
 		rim.visible = r > 0.05;

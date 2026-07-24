@@ -104,7 +104,7 @@ export const params = {
 	// assumee realiste : un vrai nid est bien plus profond que large.
 	// ------------------------------------------------------------------
 	nestScale: 1.0,                    // multiplie le nombre de loges (x la loi biologique)
-	nestDepth: 90,                     // profondeur totale du nid (unites monde)
+	nestDepth: 18,                     // profondeur totale du nid (unites monde)
 	nestTunnelW: 6,                    // demi-largeur des tunnels (texels) : >= 3 corps de fourmi
 	nestGrow: true,                    // le nid pousse avec la colonie
 
@@ -227,7 +227,7 @@ export const gfx = {
 
 	// Fourmilière souterraine (vue en fosse)
 	undergroundView: false,            // découpe le sol autour du nid pour voir les chambres
-	pitRadius: 26,                     // rayon de la fosse (unités monde)
+	pitRadius: 24,                     // rayon de la fosse (unités monde)
 	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
 	// Micro-dynamique du corps (démarche physique : le corps tangue et roule

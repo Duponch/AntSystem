@@ -72,6 +72,13 @@ const LEVEL = [
 const HELIX_R = 4.5;
 const HELIX_TURN = 1.9;                  // radians gagnés par niveau
 
+// profondeur nominale d'une nappe (unites monde, negative) — le rendu s'en sert
+// pour plaquer les sommets SANS cavite au niveau de leur propre etage au lieu
+// de la surface : sinon deux sommets voisins, l'un dans une chambre profonde et
+// l'autre dans la terre pleine, engendrent un triangle vertical de toute la
+// hauteur du nid — les "rideaux" parasites.
+export const layerDepth = ( l, depthMax ) => - depthMax * LEVEL[ Math.min( l, LEVEL.length - 1 ) ].zf;
+
 // van der Corput : une suite stratifiée pour n'importe quel préfixe. Contrairement
 // à un hash, tout préfixe [0, K) reste bien réparti — indispensable puisque K
 // grandit.
