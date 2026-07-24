@@ -125,6 +125,7 @@ export class AntSimulation {
 			deathPop: uniform( params.deathPop ),
 			deathFling: uniform( params.deathFling / TEXEL ),
 			chargeImpulse: uniform( params.chargeImpulse / TEXEL ),
+			landShock: uniform( params.landShock / TEXEL ),
 			walkAnim: uniform( params.walkAnim ),
 			queenScale: uniform( gfx.queenScale ),
 		};
@@ -599,6 +600,21 @@ export class AntSimulation {
 
 							} );
 
+							// ONDE DE CHOC (mode 3) : une araignee qui retombe de son bond bouscule
+							// PHYSIQUEMENT tout ce qui l'entoure. Les fourmis sont projetees en
+							// eventail, celles qui sont pile dessous decollent. C'est l'impact le
+							// plus brutal du jeu, et il ne casse rien : il ne concerne jamais la
+							// proie deja tenue aux crochets.
+							If( phys.and( alive.greaterThan( 0.5 ) ).and( sp.z.greaterThan( 2.5 ) )
+								.and( dSp.lessThan( sp.w ) ), () => {
+
+								const f = float( 1 ).sub( dSp.div( max( sp.w, 0.001 ) ) );
+								vel.addAssign( away.div( dSp ).mul( f.mul( u.landShock ) ) );
+								vHeight.addAssign( f.mul( u.landShock ).mul( TEXEL ).mul( 0.45 ) );
+								height.addAssign( 0.001 );
+
+							} );
+
 							// réactions des VIVANTES près d'une araignée
 							If( alive.greaterThan( 0.5 ).and( dSp.lessThan( u.fleeRadius ) ), () => {
 
@@ -666,12 +682,22 @@ export class AntSimulation {
 									// COUP PORTÉ : l'envenimation est continue (le modèle
 									// « rester sur la proie »), mais le CROCHET frappe par
 									// à-coups. Chaque franchissement d'une dose entière = une
-									// vraie frappe : impulsion de recul + projection verticale.
-									// La fourmi décolle, tourne en l'air, retombe et dérape.
+									// vraie frappe.
+									// L'impulsion est TANGENTIELLE (perpendiculaire à l'axe
+									// araignée→proie) et verticale, jamais radiale : une
+									// araignée ne REPOUSSE pas sa proie, elle la tient aux
+									// crochets et la SECOUE. Une impulsion radiale éjectait la
+									// fourmi entre deux doses et le venin ne montait jamais au
+									// seuil létal — mesuré : 1,26 pour un seuil de 2, plus
+									// aucune mise à mort. La secousse agite violemment le corps
+									// sans le sortir de la portée du prédateur.
 									If( phys.and( floor( venom ).greaterThan( floor( venomBefore ) ) ), () => {
 
-										const kick = away.div( dSp );
-										vel.addAssign( kick.mul( u.biteKnock ) );
+										const radial = away.div( dSp );
+										const tang = vec2( radial.y.negate(), radial.x );
+										const sway = select(
+											hash( iseed.add( uint( 0x5AC ) ) ).lessThan( 0.5 ), float( 1 ), float( - 1 ) );
+										vel.addAssign( tang.mul( sway ).mul( u.biteKnock ) );
 										vHeight.addAssign( u.bitePop );
 										height.addAssign( 0.001 );          // décollage franc
 

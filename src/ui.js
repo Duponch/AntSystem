@@ -220,6 +220,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fImpacts.add( params, 'chargeImpulse', 0, 15, 0.1 ).name( 'Contre-coup de la charge' )
 		.onChange( ( v ) => sim.u.chargeImpulse.value = v / TEXEL );
 	fImpacts.add( params, 'spiderKnockback', 0, 12, 0.1 ).name( 'Recul de l\'araignée (u/s)' );
+	fImpacts.add( params, 'landShock', 0, 40, 0.5 ).name( 'Onde de choc du bond (u/s)' )
+		.onChange( ( v ) => sim.u.landShock.value = v / TEXEL );
 	fImpacts.close();
 
 	const fRag = fPhys.addFolder( 'Ragdoll (cadavres articulés)' );

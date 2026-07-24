@@ -29,7 +29,7 @@ const CONTACT_ANIM = 2.6;              // corps→proie estimé sous lequel joue
 const CONSUME_MULT = 2.6;              // la zone de dévoration est plus large que la hitbox du corps
 const MAX_HP = 100;
 // modes diffusés au noyau (sectorA.z) : 0 rien, 1 morsure, 2 dévoration
-const MODE_NONE = 0, MODE_BITE = 1, MODE_EAT = 2;
+const MODE_NONE = 0, MODE_BITE = 1, MODE_EAT = 2, MODE_LAND = 3;
 const CLIP = { idle: 0, walk: 1, attack: 2, death: 3, jump: 4 };
 // distance parcourue par cycle de marche (unités monde) : c'est une propriété
 // de l'ANIMAL, pas de sa vitesse — d'où l'absence totale de patinage quel que
@@ -365,6 +365,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				// redresse (le tangage visé retombe à zéro tout seul)
 				sp.h = 0;
 				sp.pitchT += Math.min( 0.5, Math.abs( sp.vh ) * 0.05 );
+				// un atterrissage franc propage une onde de choc au sol (kernel)
+				if ( Math.abs( sp.vh ) > 3 ) sp.landShock = 1;
 				sp.vh = 0;
 				sp.vel.multiplyScalar( 0.45 );
 
@@ -990,7 +992,10 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const sy1 = Math.min( 7, Math.floor( ( g.y + reach ) / SECTOR_TX ) );
 			// rayon du corps (texels) = hitbox de morsure ; élargi en dévoration pour
 			// rattraper le cadavre même si l'araignée s'est un peu décalée
-			const mult = sp.biteMode === MODE_EAT ? CONSUME_MULT : 1;
+			// zone diffusee selon le mode : morsure = corps, devoration = plus large,
+			// ATTERRISSAGE = onde de choc de plusieurs longueurs de corps
+			const mult = sp.biteMode === MODE_EAT ? CONSUME_MULT
+				: ( sp.biteMode === MODE_LAND ? 4.5 : 1 );
 			const biteR = params.bodyRadius * mult * T * sp.scaleVar;
 
 			for ( let sy = sy0; sy <= sy1; sy ++ ) {
@@ -1063,6 +1068,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				if ( simDt > 0 ) {
 
 					updateSpider( sp, simDt );
+					// l'onde de choc ne dure qu'une frame et prime sur la morsure
+					if ( sp.landShock ) { sp.biteMode = MODE_LAND; sp.landShock = 0; }
 					advanceAnim( sp, simDt, sp.moved || 0 );
 
 				}

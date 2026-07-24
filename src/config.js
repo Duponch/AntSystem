@@ -131,8 +131,9 @@ export const params = {
 	airDrag: 0.5,                      // /s : traînée en vol (insecte = très léger)
 	restitution: 0.32,                 // rebond au contact du sol
 	wallBounce: 0.45,                  // restitution sur un mur (impact réel)
-	biteKnockback: 9,                   // u/s : recul horizontal encaissé à chaque morsure
-	bitePop: 2.2,                       // u/s : composante verticale du coup
+	biteKnockback: 7,                   // u/s : SECOUSSE latérale encaissée à chaque morsure
+	bitePop: 1.6,                       // u/s : composante verticale du coup
+	landShock: 15,                      // u/s : onde de choc quand une araignée retombe de son bond
 	deathPop: 2.7,                      // u/s : impulsion verticale à la mort (culbute)
 	deathFling: 2.5,                      // u/s : projection horizontale à la mort
 	chargeImpulse: 3.5,                 // u/s : recul de la soldate qui percute l'araignée
