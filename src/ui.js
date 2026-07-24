@@ -6,6 +6,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 import { params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL, saveSettings, clearSettings } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
 import { CATALOG } from './graphics/props.js';
+import { nestBudget, quantK } from './nest.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
@@ -49,6 +50,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		if ( v > prev ) sim.reinitAnts( prev );
 
 		setPopulation( v );
+		scheduleNestGrowth();
 
 	} );
 	fColony.add( params, 'simSpeed', 0, 4, 0.1 ).name( 'Vitesse ×' );
@@ -70,8 +72,85 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	} );
 
+	// ------------------------------------------------------------------
+	// LE NID : il POUSSE avec la colonie. Le registre est append-only, donc
+	// agrandir n'a jamais deplace une chambre existante — une fourmi deja sous
+	// terre ne peut pas se retrouver dans la terre pleine.
+	// ------------------------------------------------------------------
+	let growTimer = null;
+	const nestInfo = { etat: '' };
+
+	function refreshNestInfo() {
+
+		const L = sim.layout;
+		nestInfo.etat = `${L.K} loges · ${L.nodeCount} nœuds · `
+			+ `${L.depthMax} u de profondeur · rayon ${L.radiusWorld.toFixed( 1 )} u`;
+		if ( nestInfoCtrl ) nestInfoCtrl.updateDisplay();
+
+	}
+
+	function applyNest() {
+
+		// la fosse et le socle doivent suivre le nid, sinon on decoupe le terrain
+		// la ou il n'y a pas encore de plancher
+		gfx.pitRadius = Math.max( gfx.pitRadius, sim.layout.radiusWorld + 4 );
+		sim.applyLayout();
+		refreshNestInfo();
+		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
+
+	}
+
+	function scheduleNestGrowth() {
+
+		if ( ! params.nestGrow || ! params.colony ) return;
+		clearTimeout( growTimer );
+		// debounce : un balayage du curseur ne doit pas declencher mille creusages
+		growTimer = setTimeout( () => {
+
+			const K = quantK( nestBudget( params.antCount, params.nestScale ) );
+			if ( sim.layout.growTo( K ) ) applyNest();
+
+		}, 250 );
+
+	}
+
+	const fNest = fLife.addFolder( '🕳 Le nid' );
+	const nestInfoCtrl = fNest.add( nestInfo, 'etat' ).name( 'État' ).disable();
+	fNest.add( params, 'nestGrow' ).name( 'Pousse avec la colonie' );
+	fNest.add( params, 'nestScale', 0.3, 3, 0.1 ).name( 'Taille (× la loi biologique)' )
+		.onFinishChange( () => {
+
+			const K = quantK( nestBudget( params.antCount, params.nestScale ) );
+			if ( sim.layout.growTo( K ) ) applyNest();
+
+		} );
+	fNest.add( params, 'nestDepth', 10, 200, 5 ).name( 'Profondeur (u)' )
+		.onFinishChange( () => {
+
+			sim.layout.rebuild();
+			gfx.groundThickness = Math.max( 6, params.nestDepth + 4 );
+			env.setThickness( gfx.groundThickness );
+			applyNest();
+
+		} );
+	fNest.add( params, 'nestTunnelW', 3, 12, 0.5 ).name( 'Largeur des tunnels (texels)' )
+		.onFinishChange( () => {
+
+			sim.layout.rebuild();
+			applyNest();
+
+		} );
+	fNest.add( { creuser: () => {
+
+		const K = quantK( sim.layout.K + 4 );
+		if ( sim.layout.growTo( K ) ) applyNest();
+		overlayFlash( `⛏ Nid agrandi : ${sim.layout.K} loges` );
+
+	} }, 'creuser' ).name( '⛏ Creuser un étage de plus' );
+	refreshNestInfo();
+
 	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue souterraine (fosse)' );
-	fLife.add( gfx, 'pitRadius', 8, 20, 0.5 ).name( 'Rayon de la fosse (u)' );
+	fLife.add( gfx, 'pitRadius', 8, 60, 0.5 ).name( 'Rayon de la fosse (u)' );
 
 	const fCastes = fLife.addFolder( 'Castes' );
 	fCastes.add( params, 'nurseRatio', 0, 0.4, 0.01 ).name( 'Part de nourrices' )

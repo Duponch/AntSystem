@@ -98,6 +98,16 @@ export const params = {
 	granaryStart: 80,                  // stock de départ du grenier (survie le temps du 1er fourragement)
 	foodRegen: 3,                      // gisements régénérés par minute (0 = économie fermée → famine)
 
+	// ------------------------------------------------------------------
+	// LE NID : dimensions adaptatives. Le volume creuse suit la population
+	// (loi d'echelle des nids reels, exposant ~0,5), et la profondeur est
+	// assumee realiste : un vrai nid est bien plus profond que large.
+	// ------------------------------------------------------------------
+	nestScale: 1.0,                    // multiplie le nombre de loges (x la loi biologique)
+	nestDepth: 90,                     // profondeur totale du nid (unites monde)
+	nestTunnelW: 6,                    // demi-largeur des tunnels (texels) : >= 3 corps de fourmi
+	nestGrow: true,                    // le nid pousse avec la colonie
+
 	// Vie souterraine : ce qui empeche les fourmis de s'empiler et de tourner
 	// sur elles-memes dans les chambres
 	troughReach: 9,                    // texels : rayon d'echange autour d'une mangeoire
@@ -217,7 +227,7 @@ export const gfx = {
 
 	// Fourmilière souterraine (vue en fosse)
 	undergroundView: false,            // découpe le sol autour du nid pour voir les chambres
-	pitRadius: 18,                     // rayon de la fosse (unités monde)
+	pitRadius: 26,                     // rayon de la fosse (unités monde)
 	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
 	// Micro-dynamique du corps (démarche physique : le corps tangue et roule

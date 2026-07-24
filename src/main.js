@@ -168,6 +168,19 @@ async function main() {
 	// couvain + mangeoires (kernel dédié) et vue en fosse de la fourmilière
 	const colony = createColony( { scene, sim, renderer, layout } );
 	const underground = createUnderground( { scene, layout, env, grass, camera } );
+
+	// Le socle de terre doit ENGLOBER le nid : sans ca la chambre royale flotte
+	// sous le terrain (le bug existait deja avec une chambre a -3,9 pour un
+	// socle de 3 unites — il devient spectaculaire a 60).
+	if ( params.colony ) {
+
+		gfx.groundThickness = Math.max( gfx.groundThickness, layout.depthMax + 4 );
+		env.setThickness( gfx.groundThickness );
+		// la camera doit pouvoir descendre sous l'horizon pour voir la coupe
+		controls.maxPolarAngle = Math.PI * 0.94;
+		controls.maxDistance = Math.max( controls.maxDistance, layout.depthMax * 3 );
+
+	}
 	colony.setVisible( params.colony );
 	ants.queen.visible = params.colony;
 

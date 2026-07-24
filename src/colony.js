@@ -26,227 +26,160 @@ import {
 
 import { GRID, WORLD, NEST, MAX_BROOD, params, gfx } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
+import {
+	buildNest, growNest, nestParams, nestBudget, quantK,
+	LAYERS, K_MAX, DEPTH_SIZE as NEST_DEPTH_SIZE, NODE_CHAMBER0, ROOM,
+} from './nest.js';
 
 const TEXEL = WORLD / GRID;
 
-// région couverte par la carte de profondeur : carré de 256 texels sur le nid
-export const DEPTH_SIZE = 256;
+// région couverte par la carte de profondeur (voir nest.js)
+export const DEPTH_SIZE = NEST_DEPTH_SIZE;
+export { LAYERS };
 
 // ---------------------------------------------------------------------------
 // Topologie de la fourmilière (déterministe) — unités : TEXELS grille,
 // profondeurs : unités MONDE (y négatif).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Topologie de la fourmiliere : elle vient maintenant du REGISTRE (nest.js),
+// qui grandit avec la colonie et empile ses cavites sur 4 nappes.
+//
+// Cette fonction ne fait plus que l'habillage GPU : construire la texture de
+// profondeur (4 canaux = 4 planchers superposes), la table de navigation et
+// les tables de noeuds, et exposer l'interface que le reste du projet attend.
+// La texture est allouee UNE FOIS a sa taille maximale : en creer une nouvelle
+// a chaud recompilerait tous les materiaux qui l'echantillonnent.
+// ---------------------------------------------------------------------------
+const MAX_NODES = 128;                 // 7 bits dans antState
+const MAX_GOALS = 8;                   // 3 bits dans antState
+
 export function buildNestLayout() {
 
-	const cx = NEST.x, cy = NEST.y;
-	const T = 1 / TEXEL;                 // texels par unité monde
+	const np = nestParams();
+	let nest = buildNest( np.K, np.depthMax, np.tunnelW );
 
-	const P = ( r, angDeg, depth ) => ( {
-		x: cx + Math.cos( angDeg * Math.PI / 180 ) * r,
-		y: cy + Math.sin( angDeg * Math.PI / 180 ) * r,
-		depth,
-	} );
-
-	// --- tunnel d'entrée : SPIRALE descendante sous la fourmilière ---
-	// (r 8 → 38 texels, 300°, y 0 → −2.2 : lisible en coupe, navigable grâce
-	// aux nœuds intermédiaires du graphe. Profondeurs COMPRESSÉES : le socle
-	// de terre fait ~3 unités d'épaisseur, les chambres restent au-dessus de
-	// son fond — la hiérarchie se lit à la couleur et aux paliers, pas aux
-	// mètres.)
-	const spiral = [];
-	const SPIRAL_SEGS = 14;
-
-	for ( let i = 0; i <= SPIRAL_SEGS; i ++ ) {
-
-		const t = i / SPIRAL_SEGS;
-		spiral.push( P(
-			8 + t * 30,                        // rayon
-			90 + t * 300,                      // angle (départ plein nord)
-			- 0.4 - t * 1.8,                   // profondeur
-		) );
-
-	}
-
-	const hub = P( 40, 30, - 2.3 );        // carrefour au pied de la spirale
-	const granary = P( 78, 150, - 2.7 );   // grenier (stock de la colonie)
-	const brood1 = P( 62, 315, - 3.1 );    // chambre de couvain principale
-	const brood2 = P( 76, 275, - 3.3 );    // chambre de couvain secondaire
-	const queen = P( 60, 55, - 3.9 );      // chambre royale (la plus profonde)
-
-	// --- graphe de navigation (arbre) : 12 nœuds ---
-	// 0 entrée (surface), 1-6 spirale (un nœud par ~43° : la CORDE entre deux
-	// nœuds consécutifs doit rester DANS le tunnel — à ~85° d'arc la sagitta
-	// dépasse la demi-largeur et les fourmis s'écrasent contre la paroi),
-	// 7 hub, 8 grenier, 9 couvain-1, 10 couvain-2, 11 reine
-	const nodes = [
-		{ ...spiral[ 0 ], r: 7 },
-		{ ...spiral[ 2 ], r: 6 },
-		{ ...spiral[ 4 ], r: 6 },
-		{ ...spiral[ 6 ], r: 6 },
-		{ ...spiral[ 8 ], r: 6 },
-		{ ...spiral[ 10 ], r: 6 },
-		{ ...spiral[ 12 ], r: 6 },
-		{ ...hub, r: 9 },
-		{ ...granary, r: 12 },
-		{ ...brood1, r: 9 },
-		{ ...brood2, r: 8 },
-		{ ...queen, r: 10 },
-	];
-
-	const edges = [
-		[ 0, 1 ], [ 1, 2 ], [ 2, 3 ], [ 3, 4 ], [ 4, 5 ], [ 5, 6 ], [ 6, 7 ],
-		[ 7, 8 ], [ 7, 9 ], [ 9, 10 ], [ 7, 11 ],
-	];
-
-	// objectifs : 0 aucun, 1 grenier, 2 reine, 3 couvain, 4 sortie
-	const GOAL_NODE = [ - 1, 8, 11, 9, 0 ];
-
-	// table next-hop par BFS depuis chaque nœud-objectif
-	const adj = nodes.map( () => [] );
-	for ( const [ a, b ] of edges ) { adj[ a ].push( b ); adj[ b ].push( a ); }
-
-	const nextHop = new Float32Array( nodes.length * 8 );
-
-	for ( let goal = 1; goal < GOAL_NODE.length; goal ++ ) {
-
-		const target = GOAL_NODE[ goal ];
-		const parent = new Array( nodes.length ).fill( - 1 );
-		const queue = [ target ];
-		parent[ target ] = target;
-
-		while ( queue.length ) {
-
-			const n = queue.shift();
-
-			for ( const m of adj[ n ] ) {
-
-				if ( parent[ m ] === - 1 ) { parent[ m ] = n; queue.push( m ); }
-
-			}
-
-		}
-
-		for ( let n = 0; n < nodes.length; n ++ ) {
-
-			nextHop[ n * 8 + goal ] = parent[ n ] === - 1 ? n : parent[ n ];
-
-		}
-
-	}
-
-	// --- chambres (disques creusés) et tunnels (polylignes creusées) ---
-	const chamberMap = {
-		hub: { ...hub, R: 12 },
-		granary: { ...granary, R: 20 },
-		brood1: { ...brood1, R: 15 },
-		brood2: { ...brood2, R: 12 },
-		queen: { ...queen, R: 17 },
-	};
-	const chambers = Object.values( chamberMap );
-
-	const tunnels = [
-		{ pts: spiral, w: 6 },
-		{ pts: [ hub, granary ], w: 5 },
-		{ pts: [ hub, brood1 ], w: 5 },
-		{ pts: [ brood1, brood2 ], w: 4.5 },
-		{ pts: [ hub, queen ], w: 5 },
-	];
-
-	// --- carte de profondeur + praticabilité (256², RGBA float) ---
-	// R = profondeur du plancher (y monde, ≤ 0 ; 0 = non creusé)
-	// G = praticable (1 = creusé, une fourmi souterraine peut y marcher)
-	const ox = cx - DEPTH_SIZE / 2, oy = cy - DEPTH_SIZE / 2;
-	const field = new Float32Array( DEPTH_SIZE * DEPTH_SIZE * 4 );
-
-	const carveDisc = ( X, Y, R, depth ) => {
-
-		const bevel = 4;
-		const x0 = Math.max( 0, Math.floor( X - ox - R - bevel ) );
-		const x1 = Math.min( DEPTH_SIZE - 1, Math.ceil( X - ox + R + bevel ) );
-		const y0 = Math.max( 0, Math.floor( Y - oy - R - bevel ) );
-		const y1 = Math.min( DEPTH_SIZE - 1, Math.ceil( Y - oy + R + bevel ) );
-
-		for ( let gy = y0; gy <= y1; gy ++ ) {
-
-			for ( let gx = x0; gx <= x1; gx ++ ) {
-
-				const d = Math.hypot( gx + ox - X, gy + oy - Y );
-				if ( d > R + bevel ) continue;
-
-				const i = ( gy * DEPTH_SIZE + gx ) * 4;
-				// biseau : le bord remonte vers −0.4 (épaulement de terre)
-				const t = Math.max( 0, ( d - ( R - 2 ) ) / ( bevel + 2 ) );
-				const y = depth + ( - 0.4 - depth ) * Math.min( 1, t ) ** 0.8;
-				if ( y < field[ i ] ) field[ i ] = y;
-				if ( d < R - 1.2 ) field[ i + 1 ] = 1;
-
-			}
-
-		}
-
-	};
-
-	for ( const c of chambers ) carveDisc( c.x, c.y, c.R, c.depth );
-
-	for ( const t of tunnels ) {
-
-		for ( let s = 0; s < t.pts.length - 1; s ++ ) {
-
-			const a = t.pts[ s ], b = t.pts[ s + 1 ];
-			const segLen = Math.hypot( b.x - a.x, b.y - a.y );
-			const steps = Math.max( 2, Math.ceil( segLen / 1.5 ) );
-
-			for ( let k = 0; k <= steps; k ++ ) {
-
-				const u = k / steps;
-				carveDisc(
-					a.x + ( b.x - a.x ) * u,
-					a.y + ( b.y - a.y ) * u,
-					t.w,
-					a.depth + ( b.depth - a.depth ) * u,
-				);
-
-			}
-
-		}
-
-	}
-
+	// carte de profondeur : R,G,B,A = plancher des nappes 0..3 (0 = pas de cavite)
 	const depthTexture = new THREE.DataTexture(
-		field, DEPTH_SIZE, DEPTH_SIZE, THREE.RGBAFormat, THREE.FloatType,
-	);
+		nest.field, DEPTH_SIZE, DEPTH_SIZE, THREE.RGBAFormat, THREE.FloatType );
 	depthTexture.minFilter = THREE.NearestFilter;
 	depthTexture.magFilter = THREE.NearestFilter;
 	depthTexture.generateMipmaps = false;
 	depthTexture.needsUpdate = true;
 
-	// --- mangeoires : LA cellule où la nourriture s'échange ---
-	// (une seule cellule par chambre : le stock y est un entier, le rendu un
-	// tas dont la taille suit le stock — pas de dispersion à rattraper)
-	const troughCell = ( p ) => Math.floor( p.y ) * GRID + Math.floor( p.x );
-	const troughs = {
-		granary: { ...granary, cell: troughCell( granary ) },
-		queen: { ...queen, cell: troughCell( queen ) },
-		brood: { ...brood1, cell: troughCell( brood1 ) },
+	// table de navigation : ligne = noeud, colonne = objectif -> noeud suivant.
+	// En texture et non en uniformArray : la longueur d'un uniformArray est figee
+	// a la compilation du shader, or le graphe grandit.
+	const navData = new Float32Array( MAX_NODES * MAX_GOALS * 4 );
+	const navTexture = new THREE.DataTexture(
+		navData, MAX_NODES, MAX_GOALS, THREE.RGBAFormat, THREE.FloatType );
+	navTexture.minFilter = navTexture.magFilter = THREE.NearestFilter;
+	navTexture.generateMipmaps = false;
+
+	// table des noeuds : (x, y en texels, rayon d'arrivee, nappe)
+	const nodeData = new Float32Array( MAX_NODES * 4 );
+	const nodeTexture = new THREE.DataTexture(
+		nodeData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
+	nodeTexture.minFilter = nodeTexture.magFilter = THREE.NearestFilter;
+	nodeTexture.generateMipmaps = false;
+
+	const layout = {
+		depthTexture, navTexture, nodeTexture,
+		origin: nest.origin,
+		LAYERS, MAX_NODES,
 	};
 
-	// profondeur en un point (texels) — pour le CPU (placement, caméra)
-	const depthAt = ( x, y ) => {
+	function publish() {
 
-		const gx = Math.round( x - ox ), gy = Math.round( y - oy );
-		if ( gx < 0 || gy < 0 || gx >= DEPTH_SIZE || gy >= DEPTH_SIZE ) return 0;
-		return field[ ( gy * DEPTH_SIZE + gx ) * 4 ];
+		const n = Math.min( nest.nodes.length, MAX_NODES );
+		nodeData.fill( 0 );
+		for ( let i = 0; i < n; i ++ ) {
+
+			const nd = nest.nodes[ i ];
+			nodeData[ i * 4 ] = nd.x;
+			nodeData[ i * 4 + 1 ] = nd.y;
+			nodeData[ i * 4 + 2 ] = nd.r;
+			nodeData[ i * 4 + 3 ] = nd.layer;
+
+		}
+		nodeTexture.needsUpdate = true;
+
+		navData.fill( 0 );
+		for ( let g = 0; g < MAX_GOALS; g ++ ) {
+
+			for ( let i = 0; i < n; i ++ ) {
+
+				navData[ ( g * MAX_NODES + i ) * 4 ] = g === 0 ? i : nest.nextHop[ i * 16 + g ];
+
+			}
+
+		}
+		navTexture.needsUpdate = true;
+		depthTexture.needsUpdate = true;
+
+		// interface consommee par le reste du projet
+		layout.nodes = nest.nodes;
+		layout.edges = nest.edges;
+		layout.nextHop = nest.nextHop;
+		layout.GOAL_NODE = nest.GOAL_NODE;
+		layout.troughs = nest.troughs;
+		layout.field = nest.field;
+		layout.depthAt = nest.depthAt;
+		layout.nodeCount = n;
+		layout.K = nest.K;
+		layout.depthMax = nest.depthMax;
+		layout.radiusTexels = nest.radiusTexels;
+		layout.radiusWorld = nest.radiusWorld;
+		layout.units = nest.units;
+		// chambres remarquables, sous le nom historique
+		const nodeOf = ( g ) => nest.nodes[ nest.GOAL_NODE[ g ] ];
+		layout.chambers = {
+			granary: { ...nodeOf( 1 ), R: nodeOf( 1 ).r * 2 },
+			queen: { ...nodeOf( 2 ), R: nodeOf( 2 ).r * 2 },
+			brood1: { ...nodeOf( 3 ), R: nodeOf( 3 ).r * 2 },
+		};
+		layout.chamberDiscs = nest.units.slice( 0, nest.K ).map( ( u ) => ( {
+			x: u.x, y: u.y, R: u.R, depth: u.depth, layer: u.layer, type: u.type,
+		} ) );
+
+	}
+
+	publish();
+
+	// CROISSANCE : ajoute des loges sans jamais deplacer les anciennes.
+	// Renvoie true si quelque chose a change (l'appelant re-creuse et republie).
+	layout.growTo = function ( K ) {
+
+		const target = Math.min( K_MAX, K );
+		if ( target <= nest.K ) return false;
+		growNest( nest, target, params.nestTunnelW );
+		nest.K = target;
+		// le graphe doit etre recalcule : on rebatit a l'identique (l'invariant
+		// garantit que les loges deja creusees retombent aux memes coordonnees)
+		// on ne recalcule QUE le graphe : le creusage vient d'etre fait de maniere
+		// incrementale ci-dessus, re-creuser tout serait du travail jete
+		const rebuilt = buildNest( target, nest.depthMax, params.nestTunnelW, false );
+		rebuilt.field = nest.field;              // on garde le creusage cumule
+		rebuilt.depthAt = nest.depthAt;
+		nest = rebuilt;
+		publish();
+		return true;
 
 	};
 
-	return {
-		nodes, edges, nextHop, GOAL_NODE,
-		chambers: chamberMap,
-		chamberDiscs: chambers,
-		tunnels, troughs,
-		field, depthTexture, depthAt,
-		origin: { x: ox, y: oy },
+	// RECONSTRUCTION COMPLETE (profondeur ou largeur de tunnel changee, reset)
+	layout.rebuild = function () {
+
+		const p = nestParams();
+		const fresh = buildNest( p.K, p.depthMax, p.tunnelW );
+		nest.field.set( fresh.field );
+		fresh.field = nest.field;
+		nest = fresh;
+		publish();
+
 	};
+
+	return layout;
 
 }
 
@@ -433,7 +366,11 @@ export function createColony( { scene, sim, renderer, layout } ) {
 			ivec2( pos.sub( depthOrigin ) ),
 			ivec2( 0 ), ivec2( DEPTH_SIZE - 1 ),
 		);
-		return textureLoad( layout.depthTexture, c ).x;
+		// couvain et tas de nourriture : ils vivent dans une chambre donnee, on
+		// prend donc la cavite la plus PROFONDE de la colonne (celle qui les
+		// porte) plutot que la nappe 0
+		const t = textureLoad( layout.depthTexture, c );
+		return min( min( t.x, t.y ), min( t.z, t.w ) );
 
 	};
 

@@ -20,7 +20,7 @@
 import {
 	Fn, If, instanceIndex, uniform, instancedArray,
 	float, uint, vec2, vec3, vec4, ivec2,
-	cos, sin, abs, exp, floor, select, clamp, cross, textureLoad, PI2,
+	cos, sin, abs, exp, floor, min, select, clamp, cross, textureLoad, PI2,
 } from 'three/tsl';
 
 import { WORLD, TEXEL, MAX_ANTS, gfx } from './config.js';
@@ -80,14 +80,29 @@ export function createPose( sim, vat ) {
 		pivotY: uniform( PIVOT_Y ),
 	};
 
-	// profondeur du plancher souterrain au point (texels grille)
-	const floorDepth = ( gp ) => {
+	// Plancher souterrain au point (texels grille), SUR LA NAPPE DE LA FOURMI.
+	// La carte porte quatre planchers superposes par colonne : c'est ce qui
+	// permet a une chambre d'etre reellement au-dessus d'une autre. Si la nappe
+	// demandee est vide ici (cas de bord), on retombe sur la cavite la plus
+	// haute plutot que de renvoyer 0, qui projetterait la fourmi en surface.
+	const floorDepth = ( gp, layer ) => {
 
 		const lc = clamp(
 			ivec2( gp.sub( vec2( layout.origin.x, layout.origin.y ) ) ),
 			ivec2( 0 ), ivec2( depthSize - 1 ),
 		);
-		return textureLoad( layout.depthTexture, lc ).x;
+		const t = textureLoad( layout.depthTexture, lc ).toVar();
+		const own = select( layer.equal( uint( 0 ) ), t.x,
+			select( layer.equal( uint( 1 ) ), t.y,
+				select( layer.equal( uint( 2 ) ), t.z, t.w ) ) ).toVar();
+
+		If( own.greaterThan( - 1e-4 ), () => {
+
+			own.assign( min( min( t.x, t.y ), min( t.z, t.w ) ) );
+
+		} );
+
+		return own;
 
 	};
 
@@ -104,14 +119,16 @@ export function createPose( sim, vat ) {
 			const under = st.bitAnd( uint( 8 ) ).notEqual( uint( 0 ) );
 			const dead = state.equal( uint( 2 ) );
 			const gone = state.equal( uint( 3 ) );
-			const dw = st.shiftRight( uint( 11 ) ).bitAnd( uint( 255 ) );
+			const dw = st.shiftRight( uint( 16 ) ).bitAnd( uint( 255 ) );
+			// nappe : a quel etage superpose la fourmi se trouve (voir nest.js)
+			const layer = st.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) );
 
 			const { isQueen, isNurse, isSoldier, isScout } = sim.casteOf( instanceIndex );
 			const scale = select( isSoldier, float( 1.45 ),
 				select( isNurse, float( 0.85 ),
 					select( isScout, float( 0.92 ), float( 1 ) ) ) ).toVar();
 
-			const solY = select( under, floorDepth( a.xy ).add( 0.04 ), float( 0 ) ).toVar();
+			const solY = select( under, floorDepth( a.xy, layer ).add( 0.04 ), float( 0 ) ).toVar();
 
 			const yaw = float( Math.PI / 2 ).sub( a.z );
 			const pitch = float( 0 ).toVar();

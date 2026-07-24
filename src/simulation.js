@@ -145,11 +145,10 @@ export class AntSimulation {
 
 		// --- topologie souterraine (uniforms remplis depuis le layout) ---
 		// nœuds du graphe : (x, y texels, rayon d'arrivée, 0)
-		this._nodeVecs = layout.nodes.map( ( n ) => new THREE.Vector4( n.x, n.y, n.r, 0 ) );
-		u.nodes = uniformArray( this._nodeVecs );
-		u.nodeCount = uniform( layout.nodes.length );
-		// next-hop aplati : [nœud × 8 + objectif] → indice du nœud suivant
-		u.nextHop = uniformArray( Array.from( layout.nextHop ) );
+		u.nodeCount = uniform( layout.nodeCount );
+		// next-hop et table des nœuds vivent dans des TEXTURES (voir colony.js) :
+		// hors du budget de storage buffers, et surtout redimensionnables sans
+		// recompiler le noyau — le nid grandit en cours de partie.
 		// objectif → nœud terminal (0 aucun, 1 grenier, 2 reine, 3 couvain, 4 sortie)
 		const goals = layout.GOAL_NODE.slice();
 		while ( goals.length < 8 ) goals.push( - 1 );
@@ -165,6 +164,9 @@ export class AntSimulation {
 		u.troughQueen = uniform( layout.troughs.queen.cell );
 		u.troughBrood = uniform( layout.troughs.brood.cell );
 		u.broodNode = uniform( layout.GOAL_NODE[ 3 ] );   // nœud du couvain (spawn)
+		u.broodLayer = uniform( layout.nodes[ layout.GOAL_NODE[ 3 ] ].layer );
+		u.queenNode = uniform( layout.GOAL_NODE[ 2 ] );
+		u.queenLayer = uniform( layout.nodes[ layout.GOAL_NODE[ 2 ] ].layer );
 
 		// menace par SECTEURS (grille 8×8, 2 araignées les plus proches par secteur) :
 		// coût constant côté fourmis quel que soit le nombre de prédateurs.
@@ -287,9 +289,24 @@ export class AntSimulation {
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
 
+		// --- tables du nid, lues en texture ---
+		// nodeAt : (x, y en texels, rayon d'arrivee, nappe)
+		const nodeAt = ( i ) => textureLoad( layout.nodeTexture, ivec2( i, int( 0 ) ) );
+		// hop : noeud suivant pour aller de `n` vers l'objectif `g`
+		const hopOf = ( n, g ) => textureLoad( layout.navTexture, ivec2( n, g ) ).x.add( 0.5 ).toInt();
+
 		// --- murs packés en bits : bit 0 = mur de SURFACE, bit 1 = creusé ---
 		const surfaceWall = ( w ) => w.bitAnd( uint( 1 ) ).notEqual( uint( 0 ) );
 		const dug = ( w ) => w.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
+
+		// Le stock souterrain ne vit QUE dans les trois cellules de mangeoire.
+		// On excluait auparavant toute cellule creusee de la surface — tenable
+		// avec un nid de 40 texels de rayon, ca sterilise un quart de la
+		// clairiere maintenant qu'il en fait 100 : plus moyen de poser ni de
+		// ramasser de la nourriture au-dessus du nid.
+		const isTrough = ( ci ) => ci.equal( u.troughGranary.toInt() )
+			.or( ci.equal( u.troughQueen.toInt() ) )
+			.or( ci.equal( u.troughBrood.toInt() ) );
 
 		// --- caste par hashs INDÉPENDANTS (stables par fourmi, zéro stockage,
 		// même formule côté rendu — voir ants.js via this.casteOf) : bouger un
@@ -378,7 +395,9 @@ export class AntSimulation {
 					// la reine naît (et renaît) au fond de la chambre royale
 					pos.assign( u.queenPos.add( vec2( cos( around ), sin( around ) )
 						.mul( hash( i.add( uint( 531 ) ) ).mul( 4 ) ) ) );
-					st.assign( uint( 8 ) );        // souterraine, état 0, sans objectif
+					// souterraine, etat 0, sans objectif, sur la nappe de sa chambre
+					st.assign( uint( 8 ).bitOr( u.queenNode.toUint().shiftLeft( uint( 7 ) ) )
+						.bitOr( u.queenLayer.toUint().shiftLeft( uint( 14 ) ) ) );
 
 				} ).ElseIf( u.colonyOn.greaterThan( 0.5 )
 					.and( isNurse.or( u.spawnMode.greaterThan( 0.5 ) ) ), () => {
@@ -390,7 +409,8 @@ export class AntSimulation {
 					// nœud courant = chambre de couvain
 					const goal = select( isNurse, uint( 1 ), uint( 4 ) );
 					st.assign( uint( 8 ).bitOr( goal.shiftLeft( uint( 4 ) ) )
-						.bitOr( u.broodNode.toUint().shiftLeft( uint( 7 ) ) ) );
+						.bitOr( u.broodNode.toUint().shiftLeft( uint( 7 ) ) )
+						.bitOr( u.broodLayer.toUint().shiftLeft( uint( 14 ) ) ) );
 
 				} ).Else( () => {
 
@@ -477,9 +497,13 @@ export class AntSimulation {
 			If( lx.greaterThanEqual( int( 0 ) ).and( lx.lessThan( int( depthTexSize ) ) )
 				.and( ly.greaterThanEqual( int( 0 ) ) ).and( ly.lessThan( int( depthTexSize ) ) ), () => {
 
+				// la carte porte 4 planchers superposes : la cellule est praticable
+				// des qu'UNE nappe y a une cavite (la navigation est 2D, seule la
+				// hauteur de rendu depend de la nappe)
 				const t = textureLoad( layout.depthTexture, ivec2( lx, ly ) );
+				const anyDug = min( min( t.x, t.y ), min( t.z, t.w ) );
 
-				If( t.y.greaterThan( 0.5 ), () => {
+				If( anyDug.lessThan( - 1e-4 ), () => {
 
 					wall.element( gi ).assign( wall.element( gi ).bitOr( uint( 2 ) ) );
 
@@ -520,12 +544,18 @@ export class AntSimulation {
 				const state = stPacked.bitAnd( uint( 7 ) ).toVar();
 				const under = stPacked.shiftRight( uint( 3 ) ).bitAnd( uint( 1 ) ).toVar();
 				const goal = stPacked.shiftRight( uint( 4 ) ).bitAnd( uint( 7 ) ).toVar();
-				const node = stPacked.shiftRight( uint( 7 ) ).bitAnd( uint( 15 ) ).toVar();
+				// 7 bits de noeud (128 max) : le graphe du nid grandit avec la colonie,
+				// les 4 bits d'origine ne tenaient que 16 noeuds.
+				const node = stPacked.shiftRight( uint( 7 ) ).bitAnd( uint( 127 ) ).toVar();
+				// NAPPE courante (2 bits) : a quel etage superpose la fourmi se trouve.
+				// Ne sert qu'a savoir a quelle HAUTEUR la dessiner — la navigation,
+				// elle, reste strictement 2D.
+				const layer = stPacked.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) ).toVar();
 				// MOT DE MORT (bits 11-18) : figé à l'instant de la mort, il décrit
 				// la culbute (quadrant de repos, tours, tangage, sens). Il DOIT être
 				// relu ici et ré-inclus au re-pack, sinon tous les cadavres
 				// repartiraient à zéro dès la frame suivante.
-				const deathWord = stPacked.shiftRight( uint( 11 ) ).bitAnd( uint( 255 ) ).toVar();
+				const deathWord = stPacked.shiftRight( uint( 16 ) ).bitAnd( uint( 255 ) ).toVar();
 
 				const pos = a.xy.toVar();
 				const pos0 = a.xy.toVar();          // origine du pas : distance réelle → démarche
@@ -923,7 +953,7 @@ export class AntSimulation {
 
 							Loop( { start: int( 0 ), end: u.nodeCount.toInt(), type: 'int', condition: '<' }, ( { i } ) => {
 
-								const d = length( pos.sub( u.nodes.element( i ).xy ) );
+								const d = length( pos.sub( nodeAt( i ).xy ) );
 
 								If( d.lessThan( bestD ), () => {
 
@@ -939,8 +969,8 @@ export class AntSimulation {
 						} );
 
 						// saut courant ; nœud atteint → on avance d'une arête
-						const hop1 = u.nextHop.element( node.toInt().mul( 8 ).add( goal.toInt() ) ).toInt();
-						const hop1Node = u.nodes.element( hop1 );
+						const hop1 = hopOf( node.toInt(), goal.toInt() );
+						const hop1Node = nodeAt( hop1 );
 
 						If( length( pos.sub( hop1Node.xy ) ).lessThan( hop1Node.z ), () => {
 
@@ -951,11 +981,16 @@ export class AntSimulation {
 						// cible : la mangeoire de l'objectif quand on approche de sa
 						// chambre, sinon le prochain nœud du graphe (recalculé après
 						// la mise à jour du nœud courant)
-						const hop = u.nextHop.element( node.toInt().mul( 8 ).add( goal.toInt() ) ).toInt();
+						const hop = hopOf( node.toInt(), goal.toInt() );
+						// NAPPE : la fourmi adopte celle du noeud qu'elle VISE, pas de
+						// celui qu'elle quitte. La rampe est creusee dans la nappe de
+						// l'enfant depuis la chambre du parent : le changement de nappe
+						// se fait donc a hauteur identique, sans marche.
+						layer.assign( nodeAt( hop ).w.add( 0.5 ).toUint().bitAnd( uint( 3 ) ) );
 						const goalPos = select( goal.equal( uint( 1 ) ), u.granaryPos,
 							select( goal.equal( uint( 2 ) ), u.queenPos,
 								select( goal.equal( uint( 3 ) ), u.broodPos,
-									u.nodes.element( 0 ).xy ) ) ).toVar();
+									nodeAt( int( 0 ) ).xy ) ) ).toVar();
 
 						// SIÈGE PERSONNEL. Toutes les fourmis d'un même objectif visaient
 						// EXACTEMENT le même texel (une mangeoire = une cellule) : elles
@@ -971,7 +1006,7 @@ export class AntSimulation {
 							vec2( cos( seatB ), sin( seatB ) ).mul( sqrt( seatA ).mul( u.seatScatter ) ) ).toVar();
 
 						const dGoal = length( pos.sub( goalPos ) ).toVar();
-						const target = select( dGoal.lessThan( 14 ), seat, u.nodes.element( hop ).xy ).toVar();
+						const target = select( dGoal.lessThan( 14 ), seat, nodeAt( hop ).xy ).toVar();
 
 						// VOIES DE CIRCULATION : un décalage latéral stable, sur la
 						// perpendiculaire du trajet. Les montantes et les descendantes se
@@ -1138,7 +1173,7 @@ export class AntSimulation {
 						// proche du nid vise la BOUCHE du nid (tête de spirale) en direct
 						const wantsIn = u.colonyOn.greaterThan( 0.5 )
 							.and( carrying.or( hungry ).or( isNurse ) ).toVar();
-						const entry = u.nodes.element( 0 ).xy;
+						const entry = nodeAt( int( 0 ) ).xy;
 						const dNestHere = length( pos.sub( u.nest ) );
 
 						If( wantsIn.and( dNestHere.lessThan( u.nestRadius.mul( 1.8 ) ) ), () => {
@@ -1353,13 +1388,14 @@ export class AntSimulation {
 						// hauts remis à zéro (INVARIANT araignées, voir antState)
 						If( goal.equal( uint( 4 ) ), () => {
 
-							const dExit = length( pos.sub( u.nodes.element( 0 ).xy ) );
+							const dExit = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
 
 							If( dExit.lessThan( u.entranceR ), () => {
 
 								under.assign( uint( 0 ) );
 								goal.assign( uint( 0 ) );
 								node.assign( uint( 0 ) );
+								layer.assign( uint( 0 ) );
 								timer.assign( 0 );          // elle sort du nid : fraîcheur pleine
 
 							} );
@@ -1375,10 +1411,9 @@ export class AntSimulation {
 						const dNest = length( pos.sub( u.nest ) ).toVar();
 						// une cellule creusée appartient au monde d'en bas : sa
 						// nourriture (grenier, mangeoires) est INVISIBLE en surface
-						const dugHere = dug( wall.element( ci ) ).toVar();
 						const foodOk = foodHere.greaterThan( uint( 0 ) )
 							.and( foodHere.lessThan( uint( 0x80000000 ) ) )
-							.and( dugHere.not() ).toVar();
+							.and( isTrough( ci ).not() ).toVar();
 
 						If( carrying.not(), () => {
 
@@ -1415,7 +1450,7 @@ export class AntSimulation {
 								// affamée ou nourrice égarée : elle DESCEND par l'entrée
 								If( u.colonyOn.greaterThan( 0.5 ).and( hungry.or( isNurse ) ), () => {
 
-									const dEntry = length( pos.sub( u.nodes.element( 0 ).xy ) );
+									const dEntry = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
 
 									If( dEntry.lessThan( u.entranceR ), () => {
 
@@ -1437,7 +1472,7 @@ export class AntSimulation {
 
 									// COLONIE : la porteuse passe par l'entrée et va déposer
 									// sa bille au grenier (la livraison est comptée en bas)
-									const dEntry = length( pos.sub( u.nodes.element( 0 ).xy ) );
+									const dEntry = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
 
 									If( dEntry.lessThan( u.entranceR ), () => {
 
@@ -1576,7 +1611,8 @@ export class AntSimulation {
 					state.bitOr( under.shiftLeft( uint( 3 ) ) )
 						.bitOr( goal.shiftLeft( uint( 4 ) ) )
 						.bitOr( node.shiftLeft( uint( 7 ) ) )
-						.bitOr( deathWord.shiftLeft( uint( 11 ) ) ),
+						.bitOr( layer.shiftLeft( uint( 14 ) ) )
+						.bitOr( deathWord.shiftLeft( uint( 16 ) ) ),
 				);
 				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, gait ) );
 				antDyn.element( instanceIndex ).assign( vec4( vel, height, vHeight ) );
@@ -1631,7 +1667,9 @@ export class AntSimulation {
 			// (grenier, mangeoires) n'apparaît JAMAIS sur les cartes de surface.
 			const foodHere = atomicLoad( food.element( i ) );
 			const wallHere = wall.element( i );
-			const isDug = wallHere.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
+			const isDug = i.toInt().equal( u.troughGranary.toInt() )
+				.or( i.toInt().equal( u.troughQueen.toInt() ) )
+				.or( i.toInt().equal( u.troughBrood.toInt() ) );
 			const isWall = wallHere.bitAnd( uint( 1 ) ).notEqual( uint( 0 ) );
 			const p = vec2( ix.toFloat(), iy.toFloat() );
 
@@ -1743,7 +1781,7 @@ export class AntSimulation {
 				If( d.lessThanEqual( s.z ), () => {
 
 					const wallHere = wall.element( gi );
-					const isDug = wallHere.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
+					const isDug = isTrough( gi.toInt() );
 
 					If( s.w.lessThan( 0.5 ), () => {
 
@@ -1751,7 +1789,8 @@ export class AntSimulation {
 						// centre jitteré de son bloc (même formule que le rendu des
 						// billes dans graphics/foodballs.js). Jamais sur une cellule
 						// creusée : son stock appartient au grenier souterrain.
-						If( wallHere.bitAnd( uint( 3 ) ).equal( uint( 0 ) ), () => {
+						If( wallHere.bitAnd( uint( 1 ) ).equal( uint( 0 ) )
+							.and( isTrough( gi.toInt() ).not() ), () => {
 
 							const P = u.ballSpacing;
 							const bloc = floor( p.div( P ) );
@@ -1799,7 +1838,7 @@ export class AntSimulation {
 
 							wall.element( gi ).assign( wall.element( gi ).bitOr( uint( 1 ) ) );
 
-							If( isDug.not(), () => {
+							If( isTrough( gi.toInt() ).not(), () => {
 
 								atomicStore( food.element( gi ), uint( 0 ) );
 
@@ -1813,7 +1852,7 @@ export class AntSimulation {
 						// surface — le réseau creusé et le grenier restent intacts
 						wall.element( gi ).assign( wall.element( gi ).bitAnd( uint( 0xFFFFFFFE ) ) );
 
-						If( isDug.not(), () => {
+						If( isTrough( gi.toInt() ).not(), () => {
 
 							atomicStore( food.element( gi ), uint( 0 ) );
 
@@ -1866,6 +1905,28 @@ export class AntSimulation {
 		this._regenAccum = 0;
 		this.statsData = { delivered: 0, picked: 0, eaten: 0, devoured: 0, laid: 0, hatched: 0, granary: 0, queenEnergy: 1 };
 		await this.init();
+
+	}
+
+	// Le nid a change (croissance ou reconstruction) : republier ce qui en derive
+	// et re-creuser. Les positions des trois mangeoires, elles, ne bougent JAMAIS
+	// — c'est l'invariant du registre (nest.js) qui garantit que les stocks de
+	// nourriture atomiques ne deviennent pas orphelins.
+	applyLayout() {
+
+		const l = this.layout;
+		this.u.nodeCount.value = l.nodeCount;
+		this.u.granaryPos.value.set( l.troughs.granary.x, l.troughs.granary.y );
+		this.u.queenPos.value.set( l.troughs.queen.x, l.troughs.queen.y );
+		this.u.broodPos.value.set( l.troughs.brood.x, l.troughs.brood.y );
+		this.u.troughGranary.value = l.troughs.granary.cell;
+		this.u.troughQueen.value = l.troughs.queen.cell;
+		this.u.troughBrood.value = l.troughs.brood.cell;
+		this.u.broodNode.value = l.GOAL_NODE[ 3 ];
+		this.u.queenNode.value = l.GOAL_NODE[ 2 ];
+		this.u.broodLayer.value = l.nodes[ l.GOAL_NODE[ 3 ] ].layer;
+		this.u.queenLayer.value = l.nodes[ l.GOAL_NODE[ 2 ] ].layer;
+		this.renderer.compute( this.kDig );
 
 	}
 
