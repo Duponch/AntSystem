@@ -36,8 +36,6 @@ const CLIP = { idle: 0, walk: 1, attack: 2, death: 3, jump: 4 };
 // soit le réglage de vitesse.
 const STRIDE = BODY_LENGTH * 0.72;
 const SP_GRAV = 26;                    // gravité ressentie par l'araignée (u/s²)
-const JUMP_RANGE = [ 4.5, 11 ];        // distance de déclenchement du bond (u)
-const JUMP_COOLDOWN = 2.6;             // s entre deux bonds
 const T = GRID / WORLD;
 const SAMPLE = 1024;                   // fourmis échantillonnées pour la détection
 const WINDOW = 64;                     // fenêtre de recherche par araignée
@@ -237,7 +235,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			pitchT: 0,                 // tangage visé
 			rollT: 0,                  // roulis visé
 			gait: Math.random(),       // phase de marche, pilotée par la DISTANCE
-			jumpCd: Math.random() * JUMP_COOLDOWN,
+			jumpCd: Math.random() * params.spiderJumpCooldown,
 			heading: Math.random() * Math.PI * 2,
 			target: new THREE.Vector2(),
 			detectTimer: Math.random() * 0.4,
@@ -465,32 +463,64 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	// nearest ant sample within a per-spider window (bornée : coût constant)
 	const nearest = new THREE.Vector2();
 
-	function findNearest( sp, maxDist ) {
+	// CHOIX DE CIBLE — le cœur du problème « toupie ».
+	//
+	// Prendre bêtement la proie la plus proche fait osciller le prédateur entre
+	// deux fourmis situées de part et d'autre de lui : il amorce un demi-tour,
+	// change d'avis, repart dans l'autre sens. Vu de l'extérieur, c'est une
+	// araignée qui tourne sur elle-même au milieu de la mêlée.
+	//
+	// On note donc chaque candidate par un COÛT, pas par une distance :
+	//   coût = distance
+	//        + pénalité d'angle   (une proie dans le dos coûte très cher : il
+	//                              faut se retourner, donc perdre du temps et
+	//                              se découvrir)
+	//        + pénalité de grappe (une proie loin de la cible engagée coûte
+	//                              cher : dans un amas serré on change de proie
+	//                              librement, entre deux amas presque jamais)
+	// et on n'abandonne la cible engagée que si la nouvelle est nettement
+	// meilleure (hystérésis `spiderCommit`). Résultat : dans un peloton de
+	// soldates l'araignée frappe de proche en proche ; une isolée dans son dos
+	// ne la fait plus pivoter.
+	//
+	// `cur` = cible actuellement engagée (null en phase d'acquisition).
+	function findNearest( sp, maxDist, cur ) {
 
 		if ( sampleN === 0 ) return false;
 
-		let best = maxDist * maxDist;
-		let found = false;
 		const start = ( sp.id * 97 ) % sampleN;
 		// CÔNE DE VISION : l'araignée ne « voit » que devant elle (comme la fourmi).
-		// Ça l'empêche de sauter d'une proie à l'autre de gauche à droite (tremblement)
-		// et rend la chasse directionnelle. Une proie collée au corps reste vue.
 		const cosHalf = Math.cos( params.spiderFOV * 0.5 * Math.PI / 180 );
 		const fx = Math.cos( sp.heading ), fy = Math.sin( sp.heading );
+		const turnBias = params.spiderTurnBias * maxDist;
+		const clusterBias = params.spiderClusterBias;
+
+		const costOf = ( px, py ) => {
+
+			const dx = px - sp.pos.x, dy = py - sp.pos.y;
+			const dl = Math.hypot( dx, dy );
+			if ( dl > maxDist ) return Infinity;
+			// cos du cap → angle relatif normalisé 0 (pile devant) … 1 (dans le dos)
+			const c = dl > 1e-4 ? ( dx * fx + dy * fy ) / dl : 1;
+			if ( dl > 1.5 && c < cosHalf ) return Infinity;              // hors du cône
+			let cost = dl + turnBias * ( 1 - c ) * 0.5;
+			if ( cur ) cost += clusterBias * Math.hypot( px - cur.x, py - cur.y );
+			return cost;
+
+		};
+
+		// coût de la cible déjà engagée : c'est elle qu'il faut battre
+		let best = cur ? costOf( cur.x, cur.y ) * ( 1 - params.spiderCommit ) : Infinity;
+		if ( ! isFinite( best ) ) best = maxDist * ( 1 + params.spiderTurnBias );
+		let found = false;
 
 		for ( let k = 0; k < WINDOW; k ++ ) {
 
 			const j = ( start + k ) % sampleN;
-			const dx = antSample[ j * 2 ] - sp.pos.x;
-			const dy = antSample[ j * 2 + 1 ] - sp.pos.y;
-			const d = dx * dx + dy * dy;
+			const cost = costOf( antSample[ j * 2 ], antSample[ j * 2 + 1 ] );
+			if ( cost >= best ) continue;
 
-			if ( d >= best ) continue;
-
-			const dl = Math.sqrt( d );
-			if ( dl > 1.5 && ( dx * fx + dy * fy ) / dl < cosHalf ) continue;   // hors du cône
-
-			best = d;
+			best = cost;
 			nearest.set( antSample[ j * 2 ], antSample[ j * 2 + 1 ] );
 			found = true;
 
@@ -738,7 +768,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( sp.detectTimer <= 0 ) {
 
 				sp.detectTimer = 0.25 + Math.random() * 0.3;
-				if ( findNearest( sp, detect ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); }
+				if ( findNearest( sp, detect, null ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); sp.lostT = 0; }
 
 			}
 
@@ -762,7 +792,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( sp.detectTimer <= 0 ) {
 
 				sp.detectTimer = 0.25 + Math.random() * 0.3;
-				if ( findNearest( sp, detect ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); }
+				if ( findNearest( sp, detect, null ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); sp.lostT = 0; }
 
 			}
 
@@ -786,10 +816,27 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			// la MÊME cible, cap lissé.
 			sp.retargetT = ( sp.retargetT || 0 ) - dt;
 			sp.lostT = ( sp.lostT || 0 ) + dt;
-			if ( sp.retargetT <= 0 ) {
 
-				sp.retargetT = 0.28;
-				if ( findNearest( sp, detect * 1.4 ) ) { sp.target.copy( nearest ); sp.lostT = 0; }
+			// ENGAGEMENT DE VIRAGE. Deuxieme moitie du remede a la toupie : une
+			// fois qu'elle a decide de se retourner, l'araignee VA AU BOUT. Sans
+			// ca elle amorce un demi-tour, une proie repasse devant elle a
+			// mi-parcours, elle repart dans l'autre sens — et ainsi de suite : vue
+			// de l'exterieur, elle pivote sur place sans jamais attaquer.
+			// Le verrou se leve quand elle fait de nouveau face a sa cible.
+			const toTarget = Math.atan2( sp.target.y - sp.pos.y, sp.target.x - sp.pos.x );
+			const off = Math.abs( Math.atan2( Math.sin( toTarget - sp.heading ), Math.cos( toTarget - sp.heading ) ) );
+			if ( off > 1.75 ) sp.turnLock = 1;          // au-dela de 100 degres : elle s'engage
+			if ( off < 0.7 ) sp.turnLock = 0;           // face a la cible : verrou leve
+
+			if ( sp.retargetT <= 0 && ! sp.turnLock ) {
+
+				// on re-evalue a cadence reglable, en PARTANT de la cible engagee :
+				// findNearest ne la remplace que si une autre est nettement moins
+				// couteuse (angle + grappe + hysteresis). Voir findNearest.
+				sp.retargetT = params.spiderRetarget;
+				const engaged = sp.lostT < 1.2 ? sp.target : null;
+				if ( findNearest( sp, detect * 1.4, engaged ) ) { sp.target.copy( nearest ); sp.lostT = 0; }
+				else if ( engaged ) sp.lostT = 0;   // on garde la cible engagee
 
 			}
 			const hasTarget = sp.lostT < 1.2;
@@ -815,20 +862,29 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			// plus personne ne pilote : la gravité fait le reste. La proie peut
 			// esquiver, l'araignée peut manquer. Le clip « Jump » du GLB, jamais
 			// utilisé jusqu'ici, sert enfin.
-			if ( params.physics && ! airborne && ! contact && sp.jumpCd <= 0 && hasTarget
-				&& bodyToPrey > JUMP_RANGE[ 0 ] && bodyToPrey < JUMP_RANGE[ 1 ] ) {
+			const jumpMax = params.spiderJumpRange;
+			const jumpMin = Math.min( jumpMax * 0.55, CONTACT_ANIM + 1.2 );
+
+			if ( params.physics && jumpMax > jumpMin && ! airborne && ! contact
+				&& ! sp.turnLock && sp.jumpCd <= 0 && hasTarget
+				&& bodyToPrey > jumpMin && bodyToPrey < jumpMax ) {
 
 				const dx = sp.target.x - sp.pos.x, dy = sp.target.y - sp.pos.y;
 				const toAim = Math.atan2( dy, dx );
 				// il faut lui faire face : on ne saute pas de travers
 				if ( Math.cos( toAim - sp.heading ) > 0.86 ) {
 
-					const apex = 1.1 + Math.random() * 0.5;
-					const flight = 2 * Math.sqrt( 2 * apex / SP_GRAV );
+					// hauteur du bond PROPORTIONNELLE a la distance a franchir : un
+					// salticide rase le sol sur un petit bond et se cabre sur un
+					// grand. Une parabole a hauteur fixe donnait des cloches
+					// absurdes sur les courtes distances.
+					const apex = params.spiderJumpHeight
+						* ( 0.45 + 0.55 * ( bodyToPrey - jumpMin ) / Math.max( jumpMax - jumpMin, 0.1 ) );
+					const flight = 2 * Math.sqrt( 2 * Math.max( apex, 0.02 ) / SP_GRAV );
 					sp.vel.set( dx / flight, dy / flight );
 					sp.vh = SP_GRAV * flight * 0.5;
 					sp.h = 1e-3;
-					sp.jumpCd = JUMP_COOLDOWN;
+					sp.jumpCd = params.spiderJumpCooldown;
 					play( sp, 'jump', 0.06, 1 / Math.max( flight, 0.1 ) * clipDur[ CLIP.jump ] );
 
 				}

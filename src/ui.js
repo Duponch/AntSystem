@@ -169,6 +169,21 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fPredators.add( params, 'eatDuration', 0.5, 8, 0.5 ).name( 'Durée du repas (s)' );
 	fPredators.add( params, 'alarmFleeThreshold', 0, 1, 0.05 ).name( 'Seuil de fuite (alarme)' );
 	fPredators.add( params, 'alarmWait', 1, 15, 0.5 ).name( 'Attente après fuite (s)' );
+	// --- BOND : c'est ici qu'on règle un prédateur qui saute de trop loin ou trop haut ---
+	const fJump = fPredators.addFolder( 'Bond' );
+	fJump.add( params, 'spiderJumpRange', 0, 20, 0.5 ).name( 'Portée du bond (u)' );
+	fJump.add( params, 'spiderJumpHeight', 0.05, 3, 0.05 ).name( 'Hauteur du bond (u)' );
+	fJump.add( params, 'spiderJumpCooldown', 0.5, 12, 0.1 ).name( 'Délai entre deux bonds (s)' );
+	fJump.close();
+
+	// --- CIBLAGE : les réglages anti-toupie ---
+	const fAim = fPredators.addFolder( 'Ciblage' );
+	fAim.add( params, 'spiderRetarget', 0.1, 2, 0.05 ).name( 'Cadence de re-visée (s)' );
+	fAim.add( params, 'spiderTurnBias', 0, 3, 0.05 ).name( 'Coût d’une proie de côté' );
+	fAim.add( params, 'spiderClusterBias', 0, 3, 0.05 ).name( 'Préférence pour l’amas' );
+	fAim.add( params, 'spiderCommit', 0, 0.9, 0.05 ).name( 'Ténacité sur la cible' );
+	fAim.close();
+
 	fPredators.add( gfx, 'debugSpider' ).name( '🔍 Hitbox & vision (debug)' )
 		.onChange( ( v ) => { spiders.setDebugVisible( v ); ants.setHitboxVisible( v ); } );
 	fPredators.close();

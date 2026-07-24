@@ -112,6 +112,17 @@ export const params = {
 	venomRecovery: 0.25,               // dissipation du venin /s (guérison si l'araignée décroche)
 	eatDuration: 3.0,                  // s de dévoration (araignée immobile) avant disparition du cadavre
 	alarmFleeThreshold: 0.45,          // pression d'alarme locale qui fait fuir l'araignée (0..1)
+	// --- BOND (salticide) : la parabole est resolue pour retomber sur la proie ---
+	spiderJumpRange: 7,                 // portee max du bond (u) ; 0 = plus de bond
+	spiderJumpHeight: 0.55,             // hauteur du sommet de la parabole (u)
+	spiderJumpCooldown: 3.2,            // s entre deux bonds
+
+	// --- CHOIX DE CIBLE : ce qui empeche l'araignee de tourner sur elle-meme ---
+	spiderRetarget: 0.5,                // s entre deux re-evaluations de la proie
+	spiderTurnBias: 1.0,                // cout d'une proie hors de l'axe (0 = la plus proche gagne toujours)
+	spiderClusterBias: 0.6,             // cout d'une proie eloignee de la cible engagee (favorise les amas)
+	spiderCommit: 0.35,                 // marge d'amelioration exigee pour abandonner la cible engagee
+
 	alarmWait: 6.0,                    // s d'attente à distance avant de retenter
 
 	// ------------------------------------------------------------------
