@@ -115,6 +115,23 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => { ants.uQueenScale.value = v; sim.u.queenScale.value = v; } );
 	fQueen.close();
 
+	// ------------------------------------------------------------------
+	// Vie souterraine : la micro-gestion qui empêche les fourmis de
+	// s'empiler dans les chambres et de tourner sur elles-mêmes
+	// ------------------------------------------------------------------
+	const fUnder = fLife.addFolder( '🕳 Vie souterraine' );
+	fUnder.add( params, 'troughReach', 2, 16, 0.5 ).name( 'Rayon d’échange (mangeoire)' )
+		.onChange( ( v ) => sim.u.troughReach.value = v );
+	fUnder.add( params, 'seatScatter', 0, 16, 0.2 ).name( 'Dispersion dans la chambre' )
+		.onChange( ( v ) => sim.u.seatScatter.value = v );
+	fUnder.add( params, 'laneOffset', 0, 6, 0.2 ).name( 'Écart des voies (tunnel)' )
+		.onChange( ( v ) => sim.u.laneOffset.value = v );
+	fUnder.add( params, 'lazyFrac', 0, 0.8, 0.05 ).name( 'Part d\'inactives' )
+		.onChange( ( v ) => sim.u.lazyFrac.value = v );
+	fUnder.add( params, 'speedSpread', 0, 1.2, 0.05 ).name( 'Dispersion des vitesses' )
+		.onChange( ( v ) => sim.u.speedSpread.value = v );
+	fUnder.close();
+
 	const fBrood = fLife.addFolder( 'Couvain' );
 	fBrood.add( params, 'eggDuration', 5, 120, 1 ).name( 'Durée œuf (s)' )
 		.onChange( ( v ) => colony.u.eggDuration.value = v );

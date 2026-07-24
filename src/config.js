@@ -98,6 +98,14 @@ export const params = {
 	granaryStart: 80,                  // stock de départ du grenier (survie le temps du 1er fourragement)
 	foodRegen: 3,                      // gisements régénérés par minute (0 = économie fermée → famine)
 
+	// Vie souterraine : ce qui empeche les fourmis de s'empiler et de tourner
+	// sur elles-memes dans les chambres
+	troughReach: 9,                    // texels : rayon d'echange autour d'une mangeoire
+	seatScatter: 7,                    // texels : rayon du siege personnel autour d'une mangeoire
+	laneOffset: 2.4,                   // texels : ecart des voies de circulation en tunnel
+	lazyFrac: 0.28,                    // part de fourmis durablement inactives (mesure : ~45 % au total)
+	speedSpread: 0.5,                  // dispersion des vitesses individuelles (0 = toutes pareilles)
+
 	// Prédation (calibrée sur la biologie : morsure → envenimation graduée →
 	// paralysie croissante → mort après quelques morsures → dévoration)
 	spiderSpeed: 8,                    // vitesse de pointe de l'araignée (unités monde/s)

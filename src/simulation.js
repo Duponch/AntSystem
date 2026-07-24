@@ -127,6 +127,19 @@ export class AntSimulation {
 			chargeImpulse: uniform( params.chargeImpulse / TEXEL ),
 			landShock: uniform( params.landShock / TEXEL ),
 			walkAnim: uniform( params.walkAnim ),
+			// --- VIE SOUTERRAINE (micro-gestion) ---
+			// simTime : horloge globale de la simulation, seule source du cycle de
+			// repos. Repliee modulo 840 s pour ne pas perdre la precision float32
+			// (un saut de phase collectif toutes les 14 min, invisible).
+			simTime: uniform( 0 ),
+			seatScatter: uniform( params.seatScatter ),
+			// rayon d'echange a une mangeoire : c'est LUI qui decide de la taille
+			// de l'attroupement. A 4 texels tout le monde devait toucher le meme
+			// point ; elargi, la foule s'etale sur un disque au lieu d'un point.
+			troughReach: uniform( params.troughReach ),
+			laneOffset: uniform( params.laneOffset ),
+			lazyFrac: uniform( params.lazyFrac ),
+			speedSpread: uniform( params.speedSpread ),
 			queenScale: uniform( gfx.queenScale ),
 		};
 
@@ -943,20 +956,81 @@ export class AntSimulation {
 							select( goal.equal( uint( 2 ) ), u.queenPos,
 								select( goal.equal( uint( 3 ) ), u.broodPos,
 									u.nodes.element( 0 ).xy ) ) ).toVar();
+
+						// SIÈGE PERSONNEL. Toutes les fourmis d'un même objectif visaient
+						// EXACTEMENT le même texel (une mangeoire = une cellule) : elles
+						// s'empilaient littéralement les unes dans les autres. Chacune vise
+						// maintenant son propre point, tiré une fois pour toutes par un hash
+						// stable dans un disque autour de la mangeoire — assez petit pour
+						// que le rayon d'arrivée (4 texels) reste franchi, donc l'économie
+						// est intacte. Racine carrée = distribution uniforme en AIRE, sinon
+						// tout le monde se retasse au centre.
+						const seatA = hash( instanceIndex.add( uint( 0x5EA7 ) ) );
+						const seatB = hash( instanceIndex.add( uint( 0x5EA8 ) ) ).mul( PI2 );
+						const seat = goalPos.add(
+							vec2( cos( seatB ), sin( seatB ) ).mul( sqrt( seatA ).mul( u.seatScatter ) ) ).toVar();
+
 						const dGoal = length( pos.sub( goalPos ) ).toVar();
-						const target = select( dGoal.lessThan( 14 ), goalPos, u.nodes.element( hop ).xy );
+						const target = select( dGoal.lessThan( 14 ), seat, u.nodes.element( hop ).xy ).toVar();
 
-						// virage vers la cible + légère errance (files organiques)
-						const dir = vec2( cos( ang ), sin( ang ) );
-						const to = target.sub( pos );
-						const toN = to.div( max( length( to ), 0.0001 ) );
-						const crossZ = dir.x.mul( toN.y ).sub( dir.y.mul( toN.x ) );
-						const dotv = dir.x.mul( toN.x ).add( dir.y.mul( toN.y ) );
-						ang.addAssign( select( crossZ.greaterThanEqual( 0 ), float( 1 ), float( - 1 ) )
-							.mul( u.steer ).mul( 2.6 ).mul( u.dt ).mul( float( 1.3 ).sub( dotv.mul( 0.9 ) ) ) );
-						ang.addAssign( hash( iseed.add( uint( 0x77 ) ) ).sub( 0.5 ).mul( 0.9 ).mul( u.dt ) );
+						// VOIES DE CIRCULATION : un décalage latéral stable, sur la
+						// perpendiculaire du trajet. Les montantes et les descendantes se
+						// séparent en deux files au lieu de se rentrer dedans au milieu du
+						// tunnel. Borné bien en deçà de la demi-largeur praticable.
+						If( dGoal.greaterThanEqual( 14 ), () => {
 
-						moveMult.assign( float( 0.8 ).mul( paralysis ) );
+							const tv = target.sub( pos );
+							const tn = tv.div( max( length( tv ), 0.0001 ) );
+							target.addAssign( vec2( tn.y.negate(), tn.x )
+								.mul( hash( instanceIndex.add( uint( 0x1A4E ) ) ).sub( 0.5 ).mul( u.laneOffset ) ) );
+
+						} );
+
+						// REPOS. Une part importante d'une vraie colonie ne fait rien à un
+						// instant donné (immobilité prolongée mesurée chez plusieurs
+						// espèces). Ici c'est surtout ce qui supprime la fourmi qui
+						// « tourne sur elle-même » : quand sa course est impossible
+						// (grenier vide), elle restait à virer indéfiniment autour de la
+						// mangeoire. Le cycle est dérivé de hashs stables + horloge globale
+						// — AUCUN bit d'état, AUCUN buffer.
+						const period = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
+						const phaseR = fract( u.simTime.add(
+							hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( period ) );
+						const lazy = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( u.lazyFrac );
+						// le curseur pilote AUSSI la sieste des actives, pour qu'a 0 il
+						// n'y ait vraiment plus aucun repos (temoin de comparaison)
+						const duty = select( lazy, float( 0.82 ),
+							hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( u.lazyFrac ).mul( 0.5 ) );
+						// GARDE-FOU : jamais de repos pour une porteuse ni une affamée, et
+						// pas pour une nourrice tant que la reine n'est pas rassasiée —
+						// sinon la navette s'arrête et la colonie meurt.
+						const qFed = atomicLoad( stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
+						const mayRest = carrying.not().and( hungry.not() ).and( isNurse.not().or( qFed ) );
+						const resting = phaseR.lessThan( duty ).and( mayRest ).toVar();
+
+						// virage vers la cible + légère errance (files organiques).
+						// AU REPOS ON NE VIRE PAS : sans cette garde, une fourmi immobile
+						// continuerait de tourner sur place — le bug qu'on corrige.
+						If( resting.not(), () => {
+
+							const dir = vec2( cos( ang ), sin( ang ) );
+							const to = target.sub( pos );
+							const toN = to.div( max( length( to ), 0.0001 ) );
+							const crossZ = dir.x.mul( toN.y ).sub( dir.y.mul( toN.x ) );
+							const dotv = dir.x.mul( toN.x ).add( dir.y.mul( toN.y ) );
+							ang.addAssign( select( crossZ.greaterThanEqual( 0 ), float( 1 ), float( - 1 ) )
+								.mul( u.steer ).mul( 2.6 ).mul( u.dt ).mul( float( 1.3 ).sub( dotv.mul( 0.9 ) ) ) );
+							ang.addAssign( hash( iseed.add( uint( 0x77 ) ) ).sub( 0.5 ).mul( 0.9 ).mul( u.dt ) );
+
+						} );
+
+						// DIVERSITÉ DE VITESSE : toutes les souterraines avançaient à
+						// exactement 0,8× — d'où l'aspect « banc de poissons ». Chaque
+						// fourmi a maintenant son tempérament, stable dans le temps.
+						const speedTrait = hash( instanceIndex.add( uint( 0x5E01 ) ) )
+							.mul( u.speedSpread ).add( float( 1 ).sub( u.speedSpread.mul( 0.5 ) ) );
+						moveMult.assign( float( 0.8 ).mul( speedTrait )
+							.mul( select( resting, float( 0 ), float( 1 ) ) ).mul( paralysis ) );
 
 					} ).Else( () => {
 
@@ -1199,7 +1273,7 @@ export class AntSimulation {
 						const dQueenT = length( pos.sub( u.queenPos ) );
 						const dBroodT = length( pos.sub( u.broodPos ) );
 
-						If( goal.equal( uint( 1 ) ).and( dGranary.lessThan( 4 ) ), () => {
+						If( goal.equal( uint( 1 ) ).and( dGranary.lessThan( u.troughReach ) ), () => {
 
 							If( state.equal( uint( 1 ) ), () => {
 
@@ -1251,7 +1325,7 @@ export class AntSimulation {
 						} );
 
 						// livraison à la mangeoire royale / du couvain
-						If( goal.equal( uint( 2 ) ).and( dQueenT.lessThan( 4 ) ), () => {
+						If( goal.equal( uint( 2 ) ).and( dQueenT.lessThan( u.troughReach ) ), () => {
 
 							If( state.equal( uint( 1 ) ), () => {
 
@@ -1263,7 +1337,7 @@ export class AntSimulation {
 
 						} );
 
-						If( goal.equal( uint( 3 ) ).and( dBroodT.lessThan( 4 ) ), () => {
+						If( goal.equal( uint( 3 ) ).and( dBroodT.lessThan( u.troughReach ) ), () => {
 
 							If( state.equal( uint( 1 ) ), () => {
 
@@ -1835,6 +1909,8 @@ export class AntSimulation {
 	step( dt ) {
 
 		this.u.dt.value = dt;
+		this._clock = ( ( this._clock || 0 ) + dt ) % 840;
+		this.u.simTime.value = this._clock;
 		// alarme ressentie par les araignées : instantanée → on la vide avant le
 		// noyau fourmis, qui la re-remplit selon la panique locale de cette frame
 		if ( this.u.spiderCount.value > 0 ) this.renderer.compute( this.kClearSpiderAlarm );
