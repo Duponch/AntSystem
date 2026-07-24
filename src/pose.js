@@ -62,6 +62,10 @@ export function createPose( sim, vat ) {
 	// [3i+1] = quaternion d'attitude ( lacet ∘ tangage ∘ roulis )
 	// [3i+2] = ( phase de démarche , venin 0..1 , id de caste , drapeaux )
 	const antPose = instancedArray( MAX_ANTS * 3, 'vec4' );
+	// slot de ragdoll possédé par chaque fourmi (+1 ; 0 = aucun). Vit ici et non
+	// dans ragdoll.js pour que kPose puisse marquer la fourmi comme « rendue par
+	// le ragdoll » — sinon elle serait dessinée deux fois.
+	const antRagSlot = instancedArray( MAX_ANTS, 'uint' );
 
 	const u = {
 		time: uniform( 0 ),
@@ -198,8 +202,10 @@ export function createPose( sim, vat ) {
 				a.y.mul( TEXEL ).sub( WORLD / 2 ),
 			);
 
-			const kind = select( gone, float( POSE_GONE ),
-				select( dead, float( POSE_CORPSE ), float( POSE_ALIVE ) ) );
+			const ragdolled = antRagSlot.element( instanceIndex ).notEqual( uint( 0 ) );
+			const kind = select( ragdolled.and( dead ), float( POSE_RAGDOLL ),
+				select( gone, float( POSE_GONE ),
+					select( dead, float( POSE_CORPSE ), float( POSE_ALIVE ) ) ) );
 			const flags = kind
 				.add( select( under, float( 4 ), float( 0 ) ) )
 				.add( select( isQueen, float( 8 ), float( 0 ) ) )
@@ -222,6 +228,7 @@ export function createPose( sim, vat ) {
 
 	return {
 		antPose,
+		antRagSlot,
 		kPose,
 		u,
 		PIVOT_Y,
@@ -248,6 +255,7 @@ export function createPose( sim, vat ) {
 				venom: m.y,
 				caste: m.z,
 				kind,
+				ragdolled: kind.greaterThan( 2.5 ),
 				under: f1.sub( f2.mul( 2 ) ).greaterThan( 0.5 ),
 				isQueen: f2.sub( f3.mul( 2 ) ).greaterThan( 0.5 ),
 				carrying: f3.greaterThan( 0.5 ),

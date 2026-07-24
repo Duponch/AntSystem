@@ -222,6 +222,17 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fImpacts.add( params, 'spiderKnockback', 0, 12, 0.1 ).name( 'Recul de l\'araignée (u/s)' );
 	fImpacts.close();
 
+	const fRag = fPhys.addFolder( 'Ragdoll (cadavres articulés)' );
+	fRag.add( gfx, 'rdBudget', 0, 512, 16 ).name( 'Ragdolls simultanés' )
+		.onFinishChange( () => {
+
+			saveSettings();
+			location.reload();   // la taille du pool est figée à la compilation des noyaux
+
+		} );
+	fRag.add( gfx, 'rdDist', 0, 60, 1 ).name( 'Distance de ragdoll (u)' );
+	fRag.close();
+
 	const fBody = fPhys.addFolder( 'Démarche' );
 	fBody.add( gfx, 'bobAmp', 0, 0.08, 0.002 ).name( 'Rebond du corps' )
 		.onChange( ( v ) => ants.pose.u.bobAmp.value = v );

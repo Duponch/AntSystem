@@ -22,6 +22,7 @@ import { createBench } from './bench.js';
 import { createColonyTests } from './tests.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
+import { createRagdoll } from './ragdoll.js';
 import { createUI } from './ui.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
@@ -160,6 +161,10 @@ async function main() {
 
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
 
+	// ragdoll GPU : pool borné, dispatch indirect (voir ragdoll.js)
+	const ragdoll = createRagdoll( { sim, vat: ants.vat, pose: ants.pose, renderer, camera } );
+	scene.add( ragdoll.mesh );
+
 	// couvain + mangeoires (kernel dédié) et vue en fosse de la fourmilière
 	const colony = createColony( { scene, sim, renderer, layout } );
 	const underground = createUnderground( { scene, layout, env, grass, camera } );
@@ -295,6 +300,8 @@ async function main() {
 		underground.update( rawDt );                 // anim d'ouverture de la fosse
 		ants.uReveal.value = underground.reveal;     // vue fermée → souterraines non rendues
 		ants.tick( simDt, camera );
+		// APRÈS ants.tick : le ragdoll lit la pose que kPose vient d'écrire
+		if ( running ) ragdoll.tick();
 		spiders.update( simDt );
 		sky.update( camera );
 		grass.update( camera, rawDt );
@@ -341,7 +348,7 @@ async function main() {
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

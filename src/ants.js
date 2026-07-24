@@ -101,10 +101,12 @@ export async function createAnts( sim ) {
 
 			const P = pose.read( instanceIndex );
 			// vue fermée → les souterraines sont invisibles sous le sol opaque ;
-			// la reine (index 0, colonie active) a son mesh dédié
+			// la reine (index 0, colonie active) a son mesh dédié ; une fourmi
+			// RAGDOLLÉE est dessinée par son propre pipeline (sinon elle
+			// apparaîtrait deux fois)
 			const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
 
-			If( P.isQueen.not().and( hidden.not() ), () => {
+			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
 
 				// centre de la sphère de culling : on retire le pivot pour rester
 				// sur le même point qu'avant le passage par antPose (sinon les
@@ -500,6 +502,7 @@ export async function createAnts( sim ) {
 	return {
 		group,
 		pose,
+		vat,
 		grainMat,
 		uBodyColor,
 		uAccentColor,

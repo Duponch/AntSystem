@@ -57,17 +57,95 @@ Le dossier **🧪 Banc d'essai** (ou l'URL `?bench=5x90`, ou `__antsys.bench.run
 - **Araignées** (dossier « 🕷 Prédateurs & défense », jusqu'à 1024) rendues en **VAT multi-clips** : les 4 animations du GLB rigué (Idle/Walk/Attack/Death) sont bakées dans une seule texture ; chaque instance mélange deux clips (transition douce) sans coût de skinning — **1024 araignées animées à ~7 ms/frame**. Chacune suit une machine à états (guet → déambulation → chasse → frappe → retraite → mort → réapparition).
 - La menace passe par une **grille de secteurs 8×8** : chaque fourmi ne teste que les 2 araignées les plus proches de son secteur — coût constant côté GPU quel que soit le nombre de prédateurs.
 - **Défense émergente** : une part réglable de la colonie forme des **soldates** (plus grosses) qui *chargent* l'araignée au lieu de fuir et la mordent ; leurs morsures s'accumulent (buffer GPU par araignée) jusqu'à la faire **reculer, puis mourir** (animation Death). Une **phéromone d'alarme** rouge, déposée par les paniquées, *repousse* les ouvrières et *attire* les soldates — le recrutement au combat émerge du même mécanisme à 3 capteurs que le fourragement.
-- **Mort permanente** : une fourmi croquée devient un **cadavre figé, sur le dos, pattes en l'air** (état 2 : pose retournée, inanimée, assombrie) — elle ne réapparaît pas.
+- **Mort permanente** : une fourmi croquée est **projetée par le coup**, retombe, dérape et s'immobilise dans la pose où la physique la laisse (voir ⚙️ Physique) — elle ne réapparaît pas.
+
+## ⚙️ Physique
+
+Le dossier **⚙️ Physique** du panneau porte un interrupteur maître. Coupé, la
+simulation reprend **exactement** le chemin historique (déplacement cinématique
+`pos += direction × vitesse × dt`, cycle de marche piloté par une horloge
+globale, cadavre plaqué sur le dos) : c'est le témoin de comparaison. Activé :
+
+- **La vitesse est un état.** Le muscle ne place plus la fourmi, il tire sa
+  vitesse vers la vitesse voulue — d'où l'inertie : les démarrages, les arrêts et
+  les virages ont une durée. Les impacts s'ajoutent directement à cette vitesse
+  et se dissipent par la friction du sol. Dès qu'une fourmi décolle, plus aucun
+  contrôle : c'est un projectile balistique.
+- **Vrais coups.** Chaque crochet de l'araignée projette réellement sa proie
+  (recul + soulèvement) : elle décolle, tournoie, retombe, dérape et se relève.
+  Une soldate qui percute le corps du prédateur encaisse le contre-coup ; les
+  morsures accumulées repoussent physiquement l'araignée.
+- **Cadavres non figés.** Ils volent, rebondissent, dérapent et s'immobilisent là
+  où la physique les mène. Leur position reste celle de la simulation — donc
+  l'araignée qui vient dévorer trouve vraiment le corps.
+- **Pose de mort entomologique.** Chez l'insecte, l'extension des pattes est
+  hydraulique et la flexion musculaire : à la mort la pression tombe et les
+  fléchisseurs l'emportent seuls. Cette pose (pattes recroquevillées sous le
+  corps, tête et gastre retombés) est bakée dans la VAT, et le quadrant de repos
+  — sur les pattes, sur un flanc, sur le dos — est ATTEINT par la culbute au lieu
+  d'être plaqué.
+- **Fin du patinage.** La phase du cycle de marche avance avec la DISTANCE
+  réellement parcourue, jamais avec le temps (allométrie de la fourmi : longueur
+  de foulée ∝ v^0,42). Une fourmi bloquée contre un mur cesse de pédaler, une
+  envenimée traîne vraiment la patte, une soldate a une foulée plus ample.
+- **Le bond de l'araignée.** Le clip `Jump` du GLB, jamais utilisé jusqu'ici,
+  sert enfin : la parabole est résolue pour retomber sur la proie, et en vol
+  plus personne ne pilote — la proie peut esquiver, l'araignée peut manquer.
+  L'araignée meurt en basculant sur le flanc et son cadavre garde l'orientation
+  où la physique l'a laissé.
+
+### Ragdoll XPBD sur GPU
+
+Les cadavres proches de la caméra passent en **ragdoll articulé** : 15 particules
+(tronc + genou et tarse par patte), 25 contraintes de distance à compliance,
+8 sous-pas XPBD par frame. Les pattes retombent avec leur propre inertie, le
+corps drape sur le relief, et deux cadavres ne se ressemblent jamais.
+
+Trois décisions font tout le coût :
+
+1. **Ragdoll en espace-pose.** Les particules vivent en coordonnées locales
+   autour du pivot de la fourmi. La trajectoire reste possédée par le noyau de
+   simulation : aucune dérive float32, et aucune désynchronisation avec la
+   prédation.
+2. **Pool + dispatch INDIRECT.** Un compute compacte les ragdolls réveillés et
+   écrit lui-même le nombre de workgroups à lancer — le CPU n'apprend jamais
+   combien il y en a, et zéro réveillé = zéro workgroup.
+3. **Sommeil.** Un ragdoll immobile sort de la liste active et continue de
+   s'afficher pour zéro coût de simulation.
+
+Le rig de la fourmi est *rigide* (une seule influence par sommet) : un ragdoll
+n'a donc besoin que d'**une** transformation par sommet — un quaternion et une
+origine — au lieu des quatre matrices d'un skinning classique.
+
+### Coût mesuré (RTX, `?perf=1`, chronos GPU par passe)
+
+| Mesure | Coût |
+|---|---|
+| Mode physique ON vs OFF, 65 536 fourmis, positions gelées | **+0,006 ms** compute · **0,000 ms** rendu |
+| Noyau de simulation (`kAnt` + `kGrid`), physique ON vs OFF | **0,000 ms** (le noyau est borné mémoire, l'arithmétique se cache dedans) |
+| 192 ragdolls en train de tomber, tous à l'écran | +0,082 ms compute · +0,25 ms rendu |
+| 192 ragdolls stabilisés et affichés | **+0,006 ms** (le dispatch indirect ne lance aucun workgroup) |
+
+Pour comparer soi-même : `?physics=0` et `?physics=1` dans **deux onglets
+rechargés** (l'HMR ne recompile pas un noyau déjà instancié — un test « ça n'a
+rien changé » après hot-reload est un faux négatif). `?perf=1` affiche les
+chronos GPU dans l'overlay.
 
 ## Structure
 
 ```
 src/
-  config.js         constantes, paramètres simulation + graphismes
-  simulation.js     kernels TSL : fourmis, grille, pinceau, obstacles, stats
-  vat.js            bake d'animations squelettiques en texture (1 ou N clips)
+  config.js         constantes, paramètres simulation + graphismes + physique
+  simulation.js     kernels TSL : fourmis (dynamique, impacts, balistique),
+                    grille, pinceau, obstacles, stats
+  pose.js           passe kPose : la transformation complète d'un corps
+                    (position, attitude quaternion, démarche) en un buffer
+  ragdoll.js        ragdoll XPBD sur GPU : pool, dispatch indirect, sommeil
+  vat.js            bake d'animations squelettiques en texture (1 ou N clips),
+                    pose de mort entomologique, extraction du rig
   ants.js           rendu instancié VAT + LOD + cadavres + grain porté
-  spiders.js        prédateurs : VAT multi-clips, FSM, secteurs de menace
+  spiders.js        prédateurs : VAT multi-clips, FSM, bond balistique,
+                    secteurs de menace
   environment.js    sol (visualisation du champ), nid
   graphics/sky.js   dôme, lune, étoiles, lumières, brouillard
   graphics/grass.js tapis d'herbe GPU (disque suivant la caméra)

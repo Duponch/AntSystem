@@ -337,12 +337,22 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 
 	}
 
-	// position de bind de chaque os, dans l'espace VAT normalisé (le ragdoll y
-	// place ses particules et y reconstruit ses repères)
+	// Repères de bind de chaque os, dans l'espace VAT normalisé — c'est là que
+	// le ragdoll place ses particules et reconstruit ses rotations.
+	//   boneRest = origine de l'os
+	//   boneAxis = son axe propre (+Y local : le rig fait pointer chaque os vers
+	//              son enfant par cette translation, vérifié au parse du GLB)
+	//   boneLen  = extension maximale de la chair portée par cet os le long de
+	//              son axe → donne la position du TARSE (bout de patte), qu'aucun
+	//              os ne matérialise
 	mixer.setTime( 0 );
 	root.updateMatrixWorld( true );
-	const boneRest = new Float32Array( skeleton.bones.length * 3 );
+	const nBones = skeleton.bones.length;
+	const boneRest = new Float32Array( nBones * 3 );
+	const boneAxis = new Float32Array( nBones * 3 );
+	const boneLen = new Float32Array( nBones );
 	const bp = new THREE.Vector3();
+	const ba = new THREE.Vector3();
 
 	skeleton.bones.forEach( ( b, i ) => {
 
@@ -350,8 +360,27 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 		boneRest[ i * 3 ] = ( bp.x - cx ) * scale;
 		boneRest[ i * 3 + 1 ] = ( bp.y - min.y ) * scale;
 		boneRest[ i * 3 + 2 ] = ( bp.z - cz ) * scale;
+		// axe = colonne Y de la matrice monde (l'échelle uniforme ne le tourne pas)
+		ba.set( b.matrixWorld.elements[ 4 ], b.matrixWorld.elements[ 5 ], b.matrixWorld.elements[ 6 ] ).normalize();
+		boneAxis[ i * 3 ] = ba.x;
+		boneAxis[ i * 3 + 1 ] = ba.y;
+		boneAxis[ i * 3 + 2 ] = ba.z;
 
 	} );
+
+	// extension de chaque os : le sommet le plus éloigné le long de son axe
+	// parmi ceux qu'il pilote (rig rigide → appartenance sans ambiguïté)
+	for ( let v = 0; v < totalVerts; v ++ ) {
+
+		const b = boneOf[ v ];
+		const o = v * 4;                       // ligne 0 = frame 0, déjà normalisée
+		const dx = data[ o ] - boneRest[ b * 3 ];
+		const dy = data[ o + 1 ] - boneRest[ b * 3 + 1 ];
+		const dz = data[ o + 2 ] - boneRest[ b * 3 + 2 ];
+		const t = dx * boneAxis[ b * 3 ] + dy * boneAxis[ b * 3 + 1 ] + dz * boneAxis[ b * 3 + 2 ];
+		if ( t > boneLen[ b ] ) boneLen[ b ] = t;
+
+	}
 
 	console.info(
 		`AntSystem rig : ${skeleton.bones.length} os, pivot Y = ${pivotY.toFixed( 4 )} `
@@ -366,7 +395,10 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 		deathRow: frames,       // rangée de la pose de mort dans la VAT
 		pivotY,                 // hauteur du pivot corporel (espace normalisé)
 		restY,                  // hauteur de repos du cadavre par quadrant de roulis
-		rig: { boneNames, boneOf, boneRest, parentOf: skeleton.bones.map( ( b ) => skeleton.bones.indexOf( b.parent ) ) },
+		rig: {
+			boneNames, boneOf, boneRest, boneAxis, boneLen,
+			parentOf: skeleton.bones.map( ( b ) => skeleton.bones.indexOf( b.parent ) ),
+		},
 	};
 
 }
