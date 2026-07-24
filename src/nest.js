@@ -57,14 +57,22 @@ export const ROOM = {
 // mesurée sur les moulages de nids réels. C'est aussi ce qui fait que les
 // étages profonds passent SOUS les étages hauts : la superposition est une
 // conséquence de la biologie, pas un effet cherché.
+// Une chambre de nid n'est PAS une sphere : c'est une LENTILLE, bien plus large
+// que haute — une fourmi a besoin de surface au sol, pas de volume. Rapport
+// mesure sur les moulages : hauteur ~ 0,25 x largeur. C'est ce qui donne la
+// silhouette aplatie caracteristique des coupes de nid.
 const LEVEL = [
-	// zf = fraction de la profondeur · rw = rayon de chambre (unités monde)
-	// spread = rayon du disque où se répartissent les loges (unités monde)
-	{ zf: 0.05, rw: 3.60, spread: 15.0, rooms: [ ROOM.GARDE, ROOM.SOLARIUM, ROOM.SOLARIUM, ROOM.GARDE ] },
-	{ zf: 0.26, rw: 3.20, spread: 12.5, rooms: [ ROOM.GRENIER, ROOM.ETABLE, ROOM.GRENIER ] },
-	{ zf: 0.58, rw: 2.90, spread: 10.0, rooms: [ ROOM.CRECHE, ROOM.NURSERIE, ROOM.COMPOST ] },
-	{ zf: 1.00, rw: 2.60, spread: 7.5, rooms: [ ROOM.ROYALE, ROOM.COUVEUSE, ROOM.DORTOIR ] },
+	// zf = fraction de la profondeur · rw = demi-largeur de chambre (unites monde)
+	// rh = demi-HAUTEUR · spread = rayon du disque ou se repartissent les loges
+	{ zf: 0.10, rw: 4.20, rh: 0.85, spread: 17.0, rooms: [ ROOM.GARDE, ROOM.SOLARIUM, ROOM.SOLARIUM, ROOM.GARDE ] },
+	{ zf: 0.40, rw: 3.80, rh: 0.80, spread: 16.0, rooms: [ ROOM.GRENIER, ROOM.ETABLE, ROOM.GRENIER ] },
+	{ zf: 0.71, rw: 3.30, rh: 0.72, spread: 14.5, rooms: [ ROOM.CRECHE, ROOM.NURSERIE, ROOM.COMPOST ] },
+	{ zf: 1.00, rw: 2.90, rh: 0.66, spread: 12.5, rooms: [ ROOM.ROYALE, ROOM.COUVEUSE, ROOM.DORTOIR ] },
 ];
+
+// pente maximale d'un tunnel (dz / distance horizontale). 0,42 ~ 23 degres :
+// au-dela, une descente se lit comme une falaise et non comme un couloir.
+const MAX_SLOPE = 0.50;
 
 // rayon de l'hélice de la série centrale (unités monde). Un puits PARFAITEMENT
 // vertical est impossible dans une carte de hauteurs — et les vrais nids n'en
@@ -127,17 +135,24 @@ export function nestUnit( k, depthMax ) {
 	const { q, s } = EMISSION[ k ];
 	const L = LEVEL[ s ];
 
-	// rayon de chambre : varié mais déterministe
-	const R = ( L.rw * ( 0.80 + 0.40 * vdc( k + 1, 5 ) ) ) / TEXEL;
+	// demi-axes de la lentille : varies mais deterministes, et ANISOTROPES
+	// (une chambre reelle n'est jamais un disque parfait)
+	const g = 0.78 + 0.44 * vdc( k + 1, 5 );
+	const rwx = L.rw * g * ( 0.85 + 0.30 * vdc( k + 1, 11 ) );
+	const rwz = L.rw * g * ( 0.85 + 0.30 * vdc( k + 2, 11 ) );
+	const R = ( ( rwx + rwz ) * 0.5 ) / TEXEL;      // rayon equivalent, en texels
 
-	// La série 0 descend en HÉLICE autour de l'axe du nid ; les suivantes
-	// s'écartent en spirale d'or. Dans les deux cas l'angle tourne d'un niveau
-	// à l'autre : aucune rampe n'est verticale, donc toutes sont représentables
-	// dans une carte de hauteurs — et ça donne l'escalier en colimaçon des
-	// vrais nids.
-	const r = q === 0 ? HELIX_R / TEXEL
-		: ( L.spread / TEXEL ) * ( 0.34 + 0.66 * vdc( q, 3 ) );
-	const th = GOLD * q + HELIX_TURN * s + 0.5 * ( vdc( k + 1, 2 ) - 0.5 );
+	// PLACEMENT ETALE. Les loges etaient auparavant empilees en colonnes quasi
+	// verticales : leurs tunnels n'avaient alors aucune distance horizontale a
+	// jouer, d'ou des rampes a 50 degres. Elles sont maintenant dispersees a
+	// TOUS les niveaux, sur un disque a peine plus etroit en profondeur. Un
+	// tunnel dispose ainsi d'une dizaine d'unites d'elan pour descendre de cinq,
+	// ce qui donne des pentes douces — et un nid plus large que profond, comme
+	// une vraie coupe.
+	// L'angle est tire de k (et non de q) : la couverture angulaire reste bonne
+	// pour n'importe quel prefixe du registre.
+	const r = ( L.spread / TEXEL ) * ( 0.30 + 0.70 * vdc( k + 1, 3 ) );
+	const th = GOLD * ( k + 1 ) + 0.7 * ( vdc( k + 1, 2 ) - 0.5 );
 
 	// profondeur : le niveau donne la strate, un léger décalage par loge évite
 	// que tout un étage soit rigoureusement plan
@@ -145,7 +160,8 @@ export function nestUnit( k, depthMax ) {
 
 	return {
 		k, q, level: s, layer: s,
-		R,
+		R,                                          // rayon equivalent (texels)
+		rwx, rwz, rh: L.rh * g,                     // demi-axes de la lentille (monde)
 		x: NEST.x + Math.cos( th ) * r,
 		y: NEST.y + Math.sin( th ) * r,
 		depth,
@@ -157,29 +173,116 @@ export function nestUnit( k, depthMax ) {
 // parent : le niveau du dessus DE LA MÊME SÉRIE ; pour une tête de série, la
 // loge de niveau 0 déjà émise la plus proche. Ne regarde JAMAIS que j < k, ce
 // qui rend la structure append-only.
+// PARENT : la loge du niveau juste au-dessus dont la distance horizontale est
+// la plus PROCHE DE L'IDEAL — pas la plus proche tout court. L'ideal est la
+// distance qu'il faut pour descendre le denivele a MAX_SLOPE. Choisir le voisin
+// le plus proche donnerait systematiquement les tunnels les plus raides ;
+// choisir a la bonne distance donne des couloirs qui descendent en pente douce.
+// Ne regarde JAMAIS que j < k : la structure reste append-only.
 export function parentOf( k, U ) {
 
 	const c = U[ k ];
+	if ( c.level === 0 ) return - 1;              // -1 = rattache au puits d'entree
 
-	if ( c.level > 0 ) {
+	const dz = Math.abs( c.depth );
+	let best = - 1, bs = Infinity;
 
-		for ( let j = k - 1; j >= 0; j -- ) {
-
-			if ( U[ j ].q === c.q && U[ j ].level === c.level - 1 ) return j;
-
-		}
-
-	}
-
-	let best = - 1, bd = Infinity;
 	for ( let j = 0; j < k; j ++ ) {
 
-		if ( U[ j ].level !== 0 ) continue;
+		if ( U[ j ].level !== c.level - 1 ) continue;
 		const d = Math.hypot( U[ j ].x - c.x, U[ j ].y - c.y );
-		if ( d < bd ) { bd = d; best = j; }
+		const ideal = Math.abs( c.depth - U[ j ].depth ) / ( MAX_SLOPE * TEXEL );
+		// on penalise surtout le TROP COURT (pente raide) ; trop long est benin
+		const score = d < ideal ? ( ideal - d ) * 2 : ( d - ideal );
+		if ( score < bs ) { bs = score; best = j; }
 
 	}
-	return best;                                  // -1 = pied du puits d'entrée
+
+	return best;
+
+}
+
+// ---------------------------------------------------------------------------
+// TRACE D'UN TUNNEL — arc de colimacon a pente douce
+// ---------------------------------------------------------------------------
+// Un segment DROIT entre deux chambres a des profondeurs differentes donne une
+// rampe raide et rectiligne : c'est ce qui se lisait comme une "pente
+// geometrique" et non comme un couloir. On trace donc un ARC DE CERCLE dans le
+// plan horizontal, dont la longueur est calculee pour que la pente reste sous
+// MAX_SLOPE : plus la descente est raide, plus l'arc s'enroule. C'est
+// exactement la strategie d'un vrai nid, ou les puits profonds descendent en
+// colimacon plutot qu'a la verticale.
+//
+// La profondeur suit un profil en S (smoothstep) : le tunnel QUITTE et REJOINT
+// ses chambres a l'horizontale, jamais en piquant du nez.
+export function tunnelPath( a, b, seed, steps = 10 ) {
+
+	const dx = b.x - a.x, dy = b.y - a.y;
+	const chord = Math.hypot( dx, dy );
+	const dz = Math.abs( b.depth - a.depth );
+
+	// longueur horizontale necessaire pour tenir la pente maximale
+	const need = dz / ( MAX_SLOPE * TEXEL );        // en texels
+	const ratio = Math.max( 1, need / Math.max( chord, 1e-3 ) );
+
+	// angle balaye par l'arc : 0 si la ligne droite suffit, jusqu'a ~2,6 rad
+	// (presque un demi-tour) pour les descentes les plus raides
+	const sweep = Math.min( 2.6, 2 * Math.acos( 1 / Math.min( ratio, 4 ) ) )
+		* ( vdc( seed + 1, 2 ) < 0.5 ? 1 : - 1 );
+
+	const pts = [];
+	const wig = 0.10 + 0.10 * vdc( seed + 1, 7 );   // sinuosite residuelle
+
+	if ( Math.abs( sweep ) < 0.05 || chord < 1e-3 ) {
+
+		// assez plat : segment presque droit, juste ondule
+		const px = - dy / ( chord || 1 ), py = dx / ( chord || 1 );
+		for ( let i = 0; i <= steps; i ++ ) {
+
+			const t = i / steps;
+			const w = Math.sin( t * Math.PI * 2 + seed ) * chord * wig * 0.35;
+			pts.push( {
+				x: a.x + dx * t + px * w,
+				y: a.y + dy * t + py * w,
+				depth: a.depth + ( b.depth - a.depth ) * ( 0.5 * t + 0.5 * t * t * ( 3 - 2 * t ) ),
+			} );
+
+		}
+		return pts;
+
+	}
+
+	// --- arc de cercle passant par a et b, balayant `sweep` ---
+	const half = sweep / 2;
+	const R = chord / ( 2 * Math.sin( Math.abs( half ) ) );
+	const mx = ( a.x + b.x ) / 2, my = ( a.y + b.y ) / 2;
+	const nx = - dy / chord, ny = dx / chord;
+	const h = R * Math.cos( half );                 // distance centre <-> corde
+	const sgn = Math.sign( sweep );
+	const cx = mx - nx * h * sgn, cy = my - ny * h * sgn;
+
+	const a0 = Math.atan2( a.y - cy, a.x - cx );
+
+	// La sinuosite est un decalage ABSOLU (en texels), jamais un facteur sur le
+	// rayon : un arc presque droit a un rayon enorme, et un facteur y devenait un
+	// ecart de plusieurs dizaines de texels. Elle s'annule aux deux extremites
+	// pour que le tunnel arrive bien dans ses chambres.
+	const amp = chord * wig * 0.12;
+
+	for ( let i = 0; i <= steps; i ++ ) {
+
+		const t = i / steps;
+		const ang = a0 + sweep * t;
+		const w = Math.sin( t * Math.PI * 3 + seed ) * amp * Math.sin( t * Math.PI );
+		pts.push( {
+			x: cx + Math.cos( ang ) * ( R + w ),
+			y: cy + Math.sin( ang ) * ( R + w ),
+			depth: a.depth + ( b.depth - a.depth ) * ( 0.5 * t + 0.5 * t * t * ( 3 - 2 * t ) ),
+		} );
+
+	}
+
+	return pts;
 
 }
 
@@ -265,6 +368,17 @@ function carveTube( field, ox, oy, a, b, w, layer ) {
 
 }
 
+// creuse une polyligne : une capsule par segment
+function carvePath( field, ox, oy, pts, w, layer ) {
+
+	for ( let i = 0; i < pts.length - 1; i ++ ) {
+
+		carveTube( field, ox, oy, pts[ i ], pts[ i + 1 ], w, layer );
+
+	}
+
+}
+
 // ---------------------------------------------------------------------------
 // CONSTRUCTION COMPLÈTE
 // ---------------------------------------------------------------------------
@@ -305,7 +419,7 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 
 			const c = U[ k ];
 			const p = PAR[ k ] < 0 ? shaft : U[ PAR[ k ] ];
-			carveTube( field, ox, oy, p, c, tunnelW, c.layer );
+			carvePath( field, ox, oy, tunnelPath( p, c, k ), tunnelW, c.layer );
 			carveDisc( field, ox, oy, c.x, c.y, c.R, c.depth, c.layer );
 
 		}
@@ -314,8 +428,10 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 
 	// --- graphe de navigation ---
 	const nodes = [
-		{ x: entry.x, y: entry.y, r: 5, layer: 0, type: ROOM.TUNNEL, depth: entry.depth },
-		{ x: shaft.x, y: shaft.y, r: 5, layer: 0, type: ROOM.TUNNEL, depth: shaft.depth },
+		{ x: entry.x, y: entry.y, r: 5, layer: 0, type: ROOM.TUNNEL, depth: entry.depth,
+			cx: entry.x, cy: entry.y },
+		{ x: shaft.x, y: shaft.y, r: 5, layer: 0, type: ROOM.TUNNEL, depth: shaft.depth,
+			cx: shaft.x, cy: shaft.y },
 	];
 	for ( let k = 0; k < K; k ++ ) {
 
@@ -323,9 +439,19 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 		// rayon d'ARRIVÉE : franchement plus petit que la chambre, sinon la fourmi
 		// valide le nœud avant d'y être et vise déjà le suivant — donc traverse la
 		// paroi. Borné aussi par la largeur du tunnel.
+		// POINT DE CONTROLE : le milieu de l'arc du tunnel qui mene ici. Une
+		// fourmi qui vise ce noeud passe d'abord par lui, ce qui lui fait suivre
+		// la COURBE du tunnel au lieu d'en couper la corde — et donc de racler la
+		// terre pleine. Un point suffit : la sagitta de chaque demi-arc reste
+		// sous la demi-largeur du tunnel.
+		const par = PAR[ k ] < 0 ? shaft : U[ PAR[ k ] ];
+		const path = tunnelPath( par, c, k );
+		const mid = path[ Math.floor( path.length / 2 ) ];
+
 		nodes.push( {
 			x: c.x, y: c.y, r: Math.min( c.R * 0.5, tunnelW + 2 ),
 			layer: c.layer, type: c.type, depth: c.depth,
+			cx: mid.x, cy: mid.y,
 		} );
 
 	}
@@ -427,7 +553,7 @@ export function growNest( nest, Knew, tunnelW ) {
 
 		const c = U[ k ];
 		const p = PAR[ k ] < 0 ? nest.shaft : U[ PAR[ k ] ];
-		carveTube( field, ox, oy, p, c, tunnelW, c.layer );
+		carvePath( field, ox, oy, tunnelPath( p, c, k ), tunnelW, c.layer );
 		carveDisc( field, ox, oy, c.x, c.y, c.R, c.depth, c.layer );
 
 	}

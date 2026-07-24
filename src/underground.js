@@ -1,186 +1,280 @@
-// Vue en fosse de la fourmilière : quand « Vue souterraine » est activée,
-// le sol et le socle DISCARDENT leurs fragments dans un disque autour du nid
-// (voir environment.js), révélant un diorama creusé dans la terre :
-//   - plancher continu généré depuis la carte de profondeur du layout
-//     (même source de vérité que le y des fourmis souterraines) ;
-//   - paroi circulaire de la découpe (l'épaisseur de terre du bord) ;
-//   - lueur chaude discrète pour rester lisible en pleine nuit.
+// VUE EN COUPE — la terre est un VOLUME traversé au rayon, plus une surface.
 //
-// L'ouverture est animée (rayon qui s'étend), l'herbe s'efface dans le
-// disque, la fourmilière (GLB) se retire le temps de la vue.
+// Ce que remplace ce fichier : quatre maillages de plancher déformés dans le
+// vertex shader, une découpe en disque dans le sol, un cylindre de paroi. Ça
+// donnait des rideaux verticaux, un tube flottant et la skybox en arrière-plan.
+//
+// Le principe ici est inverse. Une BOÎTE de terre pleine englobe le nid. Pour
+// chaque pixel on lance un rayon depuis la caméra et on avance jusqu'à trouver
+// de la matière (champ de distance de nestvolume.js). Trois conséquences :
+//
+//   • ON NE PEUT PAS VOIR À TRAVERS de la terre pleine. Plus de skybox derrière
+//     le nid, plus de trou : le volume est fermé par construction.
+//   • LA COUPE est un simple décalage du départ du rayon. On démarre au plan de
+//     coupe : là où il tombe dans la terre, on voit la tranche ; là où il tombe
+//     dans une cavité, le rayon continue et révèle l'intérieur de la galerie.
+//     C'est exactement la lecture d'une planche naturaliste.
+//   • LA PROFONDEUR est écrite par le shader (depthNode) : les fourmis et le
+//     décor se composent correctement avec la terre, sans tri ni transparence.
+//
+// La plupart des pixels touchent la tranche au PREMIER pas — seuls ceux qui
+// tombent dans une ouverture de galerie marchent réellement. C'est ce qui rend
+// le raymarching abordable ici.
 
 import * as THREE from 'three/webgpu';
 import {
-	Fn, If, positionWorld, positionLocal, uniform, vec3, float, ivec2, color,
-	mix, min, clamp, select, smoothstep, normalize, textureLoad, Discard, mx_noise_float,
+	Fn, If, Loop, Break, Discard, uniform, texture3D,
+	positionWorld, cameraPosition, cameraNear, cameraFar, cameraViewMatrix,
+	viewZToPerspectiveDepth,
+	vec3, vec4, float, max, min, abs, clamp, mix, dot, length, normalize,
+	select, smoothstep, color, mx_noise_float,
 } from 'three/tsl';
 
 import { GRID, WORLD, NEST, gfx } from './config.js';
 import { uPitR } from './environment.js';
-import { DEPTH_SIZE, LAYERS } from './colony.js';
-import { layerDepth } from './nest.js';
 
-const TEXEL = WORLD / GRID;
-
-export function createUnderground( { scene, layout, env, grass, camera } ) {
+export function createUnderground( { scene, layout, env, grass, camera, volume } ) {
 
 	const group = new THREE.Group();
-	group.visible = true;   // occlus naturellement par le sol tant que la vue est fermée
 	scene.add( group );
-
-	// ------------------------------------------------------------------
-	// PLANCHERS : une nappe par etage de cavites.
-	//
-	// La carte porte quatre planchers superposes par colonne. On dessine donc
-	// QUATRE nappes, chacune ne s'affichant que la ou sa cavite existe : c'est
-	// ce qui donne des chambres reellement empilees en coupe, au lieu de
-	// cuvettes creusees dans une seule surface.
-	//
-	// Le relief est applique dans le VERTEX SHADER et non sur le maillage CPU :
-	// le nid grandit en cours de partie, et reconstruire quatre grilles a chaque
-	// palier couterait plusieurs millisecondes. Ici la geometrie est statique et
-	// ne change jamais.
-	// ------------------------------------------------------------------
-	const RES = 288;                                   // sommets par côté
-	const SIZE = DEPTH_SIZE * TEXEL;                   // étendue monde de la région
-	const SHELF = - 0.3;                               // « épaule » de terre non creusée
 
 	const centerX = ( NEST.x / GRID - 0.5 ) * WORLD;
 	const centerZ = ( NEST.y / GRID - 0.5 ) * WORLD;
 
-	const uDepthMax = uniform( layout.depthMax || 60 );
+	// ------------------------------------------------------------------
+	const uCutN = uniform( new THREE.Vector3( 0, 0, 1 ) );   // normale du plan, vers la caméra
+	const uCutP = uniform( new THREE.Vector3() );            // point du plan
+	const uOpen = uniform( 0 );                              // 0 fermé → 1 ouvert
+	const uDepthMax = uniform( 18 );
+	const uSurfaceY = uniform( 0 );
+	const uHeadLight = uniform( 1 );
+	const uAO = uniform( 1 );
 
-	// position monde -> texel de la carte de profondeur
-	const mapTexel = ( p ) => clamp(
-		ivec2(
-			p.x.div( TEXEL ).add( GRID / 2 ).sub( layout.origin.x ),
-			p.z.div( TEXEL ).add( GRID / 2 ).sub( layout.origin.y ) ),
-		ivec2( 0 ), ivec2( DEPTH_SIZE - 1 ) );
+	const vMin = volume.uMin;
+	const vSize = volume.uSize;
 
-	const layerOf = ( t, l ) => ( l === 0 ? t.x : l === 1 ? t.y : l === 2 ? t.z : t.w );
+	// ------------------------------------------------------------------
+	// Échantillonnage du champ de distance.
+	// Hors du volume on renvoie une grande valeur POSITIVE : de la terre pleine.
+	// C'est ce qui ferme le décor — jamais de trou vers la skybox.
+	// ------------------------------------------------------------------
+	const sampleSDF = ( p ) => {
 
-	// TERRE : horizons pedologiques empiles. Le profil ne depend que de la
-	// profondeur, avec une frontiere ondulee par un seul bruit — le reste est
-	// une suite de melanges, donc quasi gratuit par fragment.
-	const soilAt = ( y ) => {
-
-		const n = mx_noise_float( vec3( positionWorld.x.mul( 0.25 ), y.mul( 0.9 ), positionWorld.z.mul( 0.25 ) ) )
-			.mul( 0.5 ).add( 0.5 );
-		const f = clamp( y.negate().div( uDepthMax ).add( n.sub( 0.5 ).mul( 0.06 ) ), 0, 1 ).toVar();
-		const c = mix( color( 0x4a3a22 ), color( 0x6b4a26 ), smoothstep( 0.00, 0.10, f ) ).toVar();
-		c.assign( mix( c, color( 0x8a5c2c ), smoothstep( 0.10, 0.34, f ) ) );   // horizon A
-		c.assign( mix( c, color( 0x9c7040 ), smoothstep( 0.34, 0.58, f ) ) );   // horizon B compact
-		c.assign( mix( c, color( 0x7a6a52 ), smoothstep( 0.58, 0.82, f ) ) );   // horizon C
-		c.assign( mix( c, color( 0x4c4a45 ), smoothstep( 0.82, 1.00, f ) ) );   // roche mère
-		return c.mul( n.mul( 0.28 ).add( 0.82 ) );
+		const uvw = p.sub( vMin ).div( vSize );
+		const inside = uvw.x.greaterThan( 0 ).and( uvw.x.lessThan( 1 ) )
+			.and( uvw.y.greaterThan( 0 ) ).and( uvw.y.lessThan( 1 ) )
+			.and( uvw.z.greaterThan( 0 ) ).and( uvw.z.lessThan( 1 ) );
+		return select( inside, texture3D( volume.volume, uvw ).x, float( 4 ) );
 
 	};
 
-	const floors = [];
-	const plates = [];
+	// gradient du champ : sert à la normale ET à détecter la tranche plate
+	const gradSDF = ( p ) => {
 
-	for ( let l = 0; l < LAYERS; l ++ ) {
+		const e = float( 0.35 );
+		return vec3(
+			sampleSDF( p.add( vec3( 0.35, 0, 0 ) ) ).sub( sampleSDF( p.sub( vec3( 0.35, 0, 0 ) ) ) ),
+			sampleSDF( p.add( vec3( 0, 0.35, 0 ) ) ).sub( sampleSDF( p.sub( vec3( 0, 0.35, 0 ) ) ) ),
+			sampleSDF( p.add( vec3( 0, 0, 0.35 ) ) ).sub( sampleSDF( p.sub( vec3( 0, 0, 0.35 ) ) ) ),
+		).mul( float( 1 ).div( e ) );
 
-		const geo = new THREE.PlaneGeometry( SIZE, SIZE, RES - 1, RES - 1 )
-			.rotateX( - Math.PI / 2 ).translate( centerX, 0, centerZ );
+	};
 
-		const mat = new THREE.MeshStandardNodeMaterial( { roughness: 0.96, metalness: 0 } );
-		mat.side = THREE.DoubleSide;
+	// ------------------------------------------------------------------
+	// Terre : horizons pédologiques. Le profil ne dépend que de la profondeur,
+	// avec une frontière ondulée par UN seul bruit — trois octaves par fragment
+	// coûteraient dix fois le budget pour un gain invisible.
+	// ------------------------------------------------------------------
+	const soilAt = ( p ) => {
 
-		// Un sommet SANS cavite est plaque a la profondeur nominale de SA nappe,
-		// jamais a la surface. Le fragment sera de toute facon jete, mais la
-		// geometrie, elle, reste plate : sinon deux sommets voisins (l'un dans une
-		// chambre profonde, l'autre dans la terre pleine) engendrent un triangle
-		// vertical de toute la hauteur du nid. C'etaient les rideaux parasites.
-		const uPlate = uniform( layerDepth( l, layout.depthMax || 60 ) );
-		plates.push( uPlate );
+		const n = mx_noise_float( p.mul( 0.22 ) ).mul( 0.5 ).add( 0.5 );
+		const f = clamp( p.y.negate().div( uDepthMax ).add( n.sub( 0.5 ).mul( 0.10 ) ), 0, 1 ).toVar();
+		const c = mix( color( 0x6f5330 ), color( 0x9a6b3c ), smoothstep( 0.00, 0.16, f ) ).toVar();
+		c.assign( mix( c, color( 0xb07d46 ), smoothstep( 0.16, 0.42, f ) ) );   // horizon A
+		c.assign( mix( c, color( 0xa07c55 ), smoothstep( 0.42, 0.70, f ) ) );   // horizon B compact
+		c.assign( mix( c, color( 0x827260 ), smoothstep( 0.70, 1.00, f ) ) );   // horizon C
+		// grain : agrégats et cailloux, l'échelle qui donne la matière « terre »
+		const g = mx_noise_float( p.mul( 2.6 ) ).mul( 0.5 ).add( 0.5 );
+		return c.mul( g.mul( 0.30 ).add( 0.85 ) );
 
-		mat.positionNode = Fn( () => {
+	};
 
-			const d = layerOf( textureLoad( layout.depthTexture, mapTexel( positionLocal ) ), l );
-			return vec3( positionLocal.x, select( d.lessThan( - 1e-4 ), d, uPlate ), positionLocal.z );
+	// ------------------------------------------------------------------
+	// LE RAYMARCH — partagé par la couleur et la profondeur
+	// ------------------------------------------------------------------
+	const march = Fn( () => {
 
-		} )();
+		const ro = cameraPosition;
+		const rd = normalize( positionWorld.sub( cameraPosition ) ).toVar();
 
-		// normales en differences finies sur la carte : le relief n'existe que
-		// dans le shader, three ne peut pas les calculer pour nous
-		mat.normalNode = Fn( () => {
+		// --- intersection avec la boîte du volume (méthode des dalles) ---
+		const safe = ( v ) => select( abs( v ).lessThan( 1e-4 ), float( 1e-4 ), v );
+		const inv = vec3( 1 ).div( vec3( safe( rd.x ), safe( rd.y ), safe( rd.z ) ) );
+		const t0v = vMin.sub( ro ).mul( inv );
+		const t1v = vMin.add( vSize ).sub( ro ).mul( inv );
+		const tsm = min( t0v, t1v ), tbg = max( t0v, t1v );
+		const tEnter = max( max( max( tsm.x, tsm.y ), tsm.z ), 0.02 ).toVar();
+		const tExit = min( min( tbg.x, tbg.y ), tbg.z ).toVar();
 
-			const e = 1.5;
-			const px = positionWorld.add( vec3( e * TEXEL, 0, 0 ) );
-			const mx = positionWorld.sub( vec3( e * TEXEL, 0, 0 ) );
-			const pz = positionWorld.add( vec3( 0, 0, e * TEXEL ) );
-			const mz = positionWorld.sub( vec3( 0, 0, e * TEXEL ) );
-			const dx = layerOf( textureLoad( layout.depthTexture, mapTexel( px ) ), l )
-				.sub( layerOf( textureLoad( layout.depthTexture, mapTexel( mx ) ), l ) );
-			const dz = layerOf( textureLoad( layout.depthTexture, mapTexel( pz ) ), l )
-				.sub( layerOf( textureLoad( layout.depthTexture, mapTexel( mz ) ), l ) );
-			return normalize( vec3( dx.negate(), float( 2 * e * TEXEL ), dz.negate() ) );
+		// --- PLAN DE COUPE : on démarre le rayon derrière lui ---
+		// C'est TOUT le mécanisme de la coupe. Devant le plan rien n'existe ;
+		// derrière, la terre est pleine. La tranche apparaît là où le plan tombe
+		// dans la matière, et les galeries s'ouvrent là où il tombe dans le vide.
+		const dn = dot( rd, uCutN ).toVar();
+		const tPlane = dot( uCutP.sub( ro ), uCutN ).div( safe( dn ) );
 
-		} )();
+		If( dn.lessThan( 0 ), () => {
 
-		mat.colorNode = Fn( () => {
+			tEnter.assign( max( tEnter, tPlane ) );
 
-			const d = layerOf( textureLoad( layout.depthTexture, mapTexel( positionWorld ) ), l );
-			Discard( d.greaterThan( - 1e-4 ) );
-			return soilAt( positionWorld.y );
+		} ).Else( () => {
 
-		} )();
+			tExit.assign( min( tExit, tPlane ) );
 
-		mat.emissiveNode = Fn( () => {
+		} );
 
-			// la terre garde une lueur interne : sans elle, un nid de 60 unites
-			// de profondeur est illisible en pleine nuit
-			const t = clamp( positionWorld.y.negate().div( uDepthMax ), 0, 1 );
-			return mix( color( 0x1c1409 ), color( 0x2b1d10 ), t ).mul( 0.45 );
+		// --- on ne marche que SOUS la surface ---
+		If( ro.y.add( rd.y.mul( tEnter ) ).greaterThan( uSurfaceY ), () => {
 
-		} )();
+			tEnter.assign( max( tEnter, uSurfaceY.sub( ro.y ).div( safe( rd.y ) ) ) );
 
-		const mesh = new THREE.Mesh( geo, mat );
-		mesh.receiveShadow = false;
-		// le relief vit dans le vertex shader : la sphere englobante de three est
-		// restee plate a y = 0, elle ne couvre plus la descente
-		mesh.frustumCulled = false;
-		mesh.renderOrder = - 1 + l * 0.001;
-		group.add( mesh );
-		floors.push( mesh );
+		} );
+
+		const hit = float( 0 ).toVar();
+		const t = tEnter.toVar();
+
+		If( tEnter.lessThan( tExit ), () => {
+
+			Loop( { start: 0, end: 72, condition: '<' }, () => {
+
+				const p = ro.add( rd.mul( t ) );
+				const d = sampleSDF( p ).toVar();
+
+				If( d.greaterThanEqual( 0 ).and( p.y.lessThan( uSurfaceY ) ), () => {
+
+					hit.assign( 1 );
+					Break();
+
+				} );
+
+				// dans une cavité : on avance de la distance à sa paroi. Le bruit
+				// casse le caractère 1-lipschitzien du champ, d'où le facteur 0,8
+				// qui évite de traverser une paroi mince.
+				t.addAssign( max( d.negate().mul( 0.8 ), 0.1 ) );
+
+				If( t.greaterThan( tExit ), () => {
+
+					Break();
+
+				} );
+
+			} );
+
+		} );
+
+		return vec4( ro.add( rd.mul( t ) ), hit );
+
+	} );
+
+	// ------------------------------------------------------------------
+	const material = new THREE.MeshBasicNodeMaterial();
+	material.side = THREE.BackSide;      // la boîte reste valide caméra à l'intérieur
+	material.depthWrite = true;
+
+	material.colorNode = Fn( () => {
+
+		Discard( uOpen.lessThan( 0.01 ) );
+
+		const r = march();
+		Discard( r.w.lessThan( 0.5 ) );
+		const p = r.xyz;
+
+		// --- normale ---
+		const g = gradSDF( p ).toVar();
+		const gl = length( g ).toVar();
+		// sur la TRANCHE le champ est plat : la normale du plan prend le relais,
+		// sinon la face coupée serait éclairée n'importe comment
+		// « paroi réelle » : 0 sur la tranche (le champ y est plat, c'est une
+		// coupe virtuelle), 1 sur une vraie paroi de galerie
+		const wallness = clamp( gl.mul( 1.4 ), 0, 1 ).toVar();
+		const n = normalize( mix( uCutN, g.negate().div( max( gl, 1e-4 ) ), wallness ) ).toVar();
+
+		// --- OCCLUSION AMBIANTE dérivée du champ ---
+		// C'est ELLE qui rend les cavités lisibles : au fond d'une galerie la
+		// matière est proche de tous côtés, donc sombre ; sur la tranche elle est
+		// dégagée, donc claire. Quatre échantillons suffisent.
+		// On mesure l'OUVERTURE : combien d'espace libre au-dessus du point, le
+		// long de sa normale. Le champ est négatif dans le vide, d'où le
+		// `negate()` — sans lui l'occlusion s'inverse et ce sont les parois qui
+		// noircissent au lieu des recoins.
+		const ao = float( 0 ).toVar();
+		const wsum = float( 0 ).toVar();
+
+		for ( let i = 1; i <= 4; i ++ ) {
+
+			const h = 0.45 * i;
+			const w = 1 / i;
+			ao.addAssign( clamp( sampleSDF( p.add( n.mul( h ) ) ).negate().div( h ), 0, 1 ).mul( w ) );
+			wsum.addAssign( w );
+
+		}
+
+		// Sur la TRANCHE, l'occlusion n'a aucun sens (la matière continue vers la
+		// caméra) : on n'applique le noircissement que sur les vraies parois.
+		const open = ao.div( wsum ).mul( 0.75 ).add( 0.25 );
+		const occ = mix( float( 1 ), open, wallness.mul( uAO ) ).toVar();
+
+		// --- lumière ---
+		// Une lampe frontale attachée à la caméra : sans elle une galerie
+		// souterraine est un trou noir, et c'est précisément ce qu'on veut voir.
+		const toCam = cameraPosition.sub( p );
+		const dist = length( toCam ).toVar();
+		const l = toCam.div( max( dist, 1e-4 ) );
+		const lambert = clamp( dot( n, l ), 0, 1 );
+		const falloff = clamp( float( 1 ).sub( dist.div( uDepthMax.mul( 3 ).add( 60 ) ) ), 0.06, 1 );
+
+		const base = soilAt( p );
+		const lit = base.mul( lambert.mul( uHeadLight ).mul( falloff ).mul( 1.9 ).add( 0.38 ) ).mul( occ );
+
+		// halo chaud vers le fond du nid : donne la profondeur et guide l'œil
+		const warm = color( 0xff9a4a ).mul( clamp( p.y.negate().div( uDepthMax ), 0, 1 ).mul( 0.14 ) ).mul( occ );
+
+		return lit.add( warm );
+
+	} )();
+
+	// PROFONDEUR RÉELLE du point touché : c'est ce qui permet aux fourmis de
+	// s'afficher DANS les galeries et non devant ou derrière en bloc.
+	material.depthNode = Fn( () => {
+
+		const r = march();
+		return viewZToPerspectiveDepth(
+			cameraViewMatrix.mul( vec4( r.xyz, 1 ) ).z, cameraNear, cameraFar );
+
+	} )();
+
+	// ------------------------------------------------------------------
+	// La boîte porteuse
+	// ------------------------------------------------------------------
+	const box = new THREE.Mesh( new THREE.BoxGeometry( 1, 1, 1 ), material );
+	box.frustumCulled = false;
+	box.renderOrder = - 2;
+	box.visible = false;
+	group.add( box );
+
+	function fitBox() {
+
+		const s = vSize.value, m = vMin.value;
+		box.scale.set( s.x, s.y, s.z );
+		box.position.set( m.x + s.x / 2, m.y + s.y / 2, m.z + s.z / 2 );
 
 	}
 
 	// ------------------------------------------------------------------
-	// Paroi de la découpe : anneau de terre entre le sol (y=0) et le fond
+	// Animation d'ouverture
 	// ------------------------------------------------------------------
-	const rimGeo = new THREE.CylinderGeometry( 1, 1, 1, 96, 1, true );
-	const rimMat = new THREE.MeshStandardNodeMaterial( {
-		roughness: 1, metalness: 0, side: THREE.BackSide,
-	} );
-	rimMat.colorNode = Fn( () => soilAt( positionWorld.y ) )();
-	rimMat.emissiveNode = Fn( () => {
-
-		const t = clamp( positionWorld.y.negate().div( uDepthMax ), 0, 1 );
-		return mix( color( 0x1c1409 ), color( 0x2b1d10 ), t ).mul( 0.35 );
-
-	} )();
-
-	const rim = new THREE.Mesh( rimGeo, rimMat );
-	rim.frustumCulled = false;
-	group.add( rim );
-
-	// ------------------------------------------------------------------
-	// Lueur chaude de la fourmilière (uniquement quand la vue est ouverte)
-	// ------------------------------------------------------------------
-	// deux sources : une pres de la surface, une au fond. Avec un nid de
-	// plusieurs dizaines d'unites de profondeur, une seule lampe laisse les
-	// etages bas dans le noir absolu.
-	const glow = new THREE.PointLight( 0xffb060, 0, 60, 1.4 );
-	group.add( glow );
-	const glowDeep = new THREE.PointLight( 0xff9a50, 0, 70, 1.3 );
-	group.add( glowDeep );
-
-	// ------------------------------------------------------------------
-	// Animation d'ouverture / fermeture
-	// ------------------------------------------------------------------
-	let reveal = 0;          // 0 fermé → 1 ouvert (lissé)
+	let reveal = 0;
+	const camDir = new THREE.Vector3();
 
 	function update( dt ) {
 
@@ -189,33 +283,35 @@ export function createUnderground( { scene, layout, env, grass, camera } ) {
 		reveal += ( target - reveal ) * k;
 		if ( Math.abs( reveal - target ) < 0.002 ) reveal = target;
 
-		const eased = reveal * reveal * ( 3 - 2 * reveal );     // smoothstep
-		const r = gfx.pitRadius * eased;
+		const eased = reveal * reveal * ( 3 - 2 * reveal );
+		uOpen.value = eased;
+		box.visible = eased > 0.01;
+		uDepthMax.value = layout.depthMax || 18;
+		uHeadLight.value = gfx.nestLight;
+		uAO.value = gfx.nestAO;
+		fitBox();
 
-		uPitR.value = r;
+		// LE PLAN DE COUPE SUIT LA CAMÉRA : sa normale est la direction
+		// horizontale nid→caméra, si bien qu'on regarde toujours une tranche
+		// fraîche quelle que soit l'orbite.
+		camDir.set( camera.position.x - centerX, 0, camera.position.z - centerZ );
+		if ( camDir.lengthSq() < 1e-6 ) camDir.set( 0, 0, 1 );
+		camDir.normalize();
+		uCutN.value.copy( camDir );
+		uCutP.value.set(
+			centerX + camDir.x * gfx.cutOffset, 0, centerZ + camDir.z * gfx.cutOffset );
 
-		// la paroi doit descendre jusqu'au fond du nid, pas seulement sous
-		// l'epaule : le nid fait desormais des dizaines d'unites de profondeur
-		const H = ( layout.depthMax || 60 ) + 2;
-		uDepthMax.value = layout.depthMax || 60;
-		for ( let l = 0; l < plates.length; l ++ ) plates[ l ].value = layerDepth( l, layout.depthMax || 60 );
-		rim.scale.set( Math.max( 0.001, r ), Math.max( 0.001, H ), Math.max( 0.001, r ) );
-		rim.position.set( centerX, - H / 2, centerZ );
-		rim.visible = r > 0.05;
-		glow.position.set( centerX, - H * 0.12, centerZ );
-		glowDeep.position.set( centerX, - H * 0.62, centerZ );
-		glow.intensity = eased * 22;
-		glowDeep.intensity = eased * 26;
+		// le sol de surface s'ouvre en même temps, sur un disque un peu plus
+		// large que le nid pour qu'on voie la tranche depuis le dessus
+		uPitR.value = eased * Math.max( gfx.pitRadius, ( layout.radiusWorld || 20 ) + 3 );
 
-		// l'herbe s'efface dans le disque (jamais en-deçà du trou du nid)
 		if ( grass && grass.u && grass.u.holeIn ) {
 
-			grass.u.holeIn.value = Math.max( 3.6, r - 1.4 );
-			grass.u.holeOut.value = Math.max( 5.2, r );
+			grass.u.holeIn.value = Math.max( 3.6, uPitR.value - 1.4 );
+			grass.u.holeOut.value = Math.max( 5.2, uPitR.value );
 
 		}
 
-		// la fourmilière (GLB) se retire pendant la vue souterraine
 		if ( env.anthill ) {
 
 			const s = 1 - eased;
@@ -224,16 +320,8 @@ export function createUnderground( { scene, layout, env, grass, camera } ) {
 
 		}
 
-		// caméra trop rasante à l'ouverture : on la relève en douceur, sinon
-		// on ne voit que la paroi de la fosse (jamais les chambres)
-		if ( gfx.undergroundView && reveal < 0.97 && camera && camera.position.y < 24 ) {
-
-			camera.position.y += ( 26 - camera.position.y ) * k;
-
-		}
-
 	}
 
-	return { group, update, get reveal() { return reveal; } };
+	return { group, update, box, get reveal() { return reveal; } };
 
 }

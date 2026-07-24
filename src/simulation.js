@@ -292,6 +292,22 @@ export class AntSimulation {
 		// --- tables du nid, lues en texture ---
 		// nodeAt : (x, y en texels, rayon d'arrivee, nappe)
 		const nodeAt = ( i ) => textureLoad( layout.nodeTexture, ivec2( i, int( 0 ) ) );
+		// point de controle du tunnel qui MENE a ce noeud (ligne 1 de la table)
+		const ctrlAt = ( i ) => textureLoad( layout.nodeTexture, ivec2( i, int( 1 ) ) );
+
+		// Cible de deplacement vers le noeud `h` : tant que la fourmi est plus
+		// loin du noeud que ne l'est le point de controle, elle vise ce dernier.
+		// Elle EPOUSE ainsi la courbe du tunnel au lieu d'en couper la corde et
+		// de racler la terre pleine — les tunnels sont des arcs, plus des droites.
+		const hopTarget = ( h, pos ) => {
+
+			const hn = nodeAt( h );
+			const hc = ctrlAt( h );
+			const dNode = length( pos.sub( hn.xy ) );
+			const dCtrl = length( hc.xy.sub( hn.xy ) );
+			return select( dNode.greaterThan( dCtrl.mul( 1.08 ) ), hc.xy, hn.xy );
+
+		};
 		// hop : noeud suivant pour aller de `n` vers l'objectif `g`
 		const hopOf = ( n, g ) => textureLoad( layout.navTexture, ivec2( n, g ) ).x.add( 0.5 ).toInt();
 
@@ -1006,7 +1022,7 @@ export class AntSimulation {
 							vec2( cos( seatB ), sin( seatB ) ).mul( sqrt( seatA ).mul( u.seatScatter ) ) ).toVar();
 
 						const dGoal = length( pos.sub( goalPos ) ).toVar();
-						const target = select( dGoal.lessThan( 14 ), seat, nodeAt( hop ).xy ).toVar();
+						const target = select( dGoal.lessThan( 14 ), seat, hopTarget( hop, pos ) ).toVar();
 
 						// VOIES DE CIRCULATION : un décalage latéral stable, sur la
 						// perpendiculaire du trajet. Les montantes et les descendantes se

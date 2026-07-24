@@ -11,7 +11,7 @@ import { nestBudget, quantK } from './nest.js';
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -95,6 +95,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		// la ou il n'y a pas encore de plancher
 		gfx.pitRadius = Math.max( gfx.pitRadius, sim.layout.radiusWorld + 4 );
 		sim.applyLayout();
+		nestVolume.rebuild();          // la forme a change : on refait le champ 3D
 		refreshNestInfo();
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
@@ -149,7 +150,17 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	} }, 'creuser' ).name( '⛏ Creuser un étage de plus' );
 	refreshNestInfo();
 
-	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue souterraine (fosse)' );
+	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue en coupe' );
+
+	const fCut = fLife.addFolder( '🔍 Coupe & matière' );
+	fCut.add( gfx, 'cutOffset', - 25, 25, 0.5 ).name( 'Décalage du plan de coupe' );
+	fCut.add( gfx, 'nestLight', 0, 3, 0.05 ).name( 'Lampe frontale' );
+	fCut.add( gfx, 'nestAO', 0, 1, 0.05 ).name( 'Occlusion (relief)' );
+	fCut.add( gfx, 'nestBlend', 0.3, 4, 0.1 ).name( 'Fusion des cavités' )
+		.onFinishChange( ( v ) => { nestVolume.u.blend.value = v; nestVolume.rebuild(); } );
+	fCut.add( gfx, 'nestNoise', 0, 1.5, 0.05 ).name( 'Irrégularité des parois' )
+		.onFinishChange( ( v ) => { nestVolume.u.noiseAmp.value = v; nestVolume.rebuild(); } );
+	fCut.close();
 	fLife.add( gfx, 'pitRadius', 8, 60, 0.5 ).name( 'Rayon de la fosse (u)' );
 
 	const fCastes = fLife.addFolder( 'Castes' );

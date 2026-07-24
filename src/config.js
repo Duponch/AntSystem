@@ -241,6 +241,13 @@ export const gfx = {
 	rdDist: 26,                        // distance caméra max pour ragdoller (u)
 	rdSubsteps: 8,                     // sous-pas XPBD par pas fixe
 
+	// Vue en coupe (nid volumetrique)
+	nestLight: 1.0,                    // lampe frontale : lisibilite des galeries
+	nestAO: 1.0,                       // occlusion ambiante derivee du champ
+	cutOffset: 0,                      // decalage du plan de coupe (unites monde)
+	nestBlend: 1.6,                    // fusion des cavites (organicite)
+	nestNoise: 0.45,                   // deformation des parois
+
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis
 	debugSpider: false,                // hitbox (corps araignée + fourmis) et cône de vision de l'araignée

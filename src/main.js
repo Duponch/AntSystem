@@ -10,6 +10,7 @@ import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
 import { buildNestLayout, createColony } from './colony.js';
 import { createUnderground } from './underground.js';
+import { createNestVolume } from './nestvolume.js';
 import { createEnvironment, uShowWalls, uTrailGamma } from './environment.js';
 import { createSky } from './graphics/sky.js';
 import { createGrass } from './graphics/grass.js';
@@ -167,7 +168,11 @@ async function main() {
 
 	// couvain + mangeoires (kernel dédié) et vue en fosse de la fourmilière
 	const colony = createColony( { scene, sim, renderer, layout } );
-	const underground = createUnderground( { scene, layout, env, grass, camera } );
+	// champ de distance 3D du nid (rendu en coupe) : bake une fois ici, puis a
+	// chaque fois que le nid change de forme
+	const nestVolume = createNestVolume( { renderer, layout } );
+	nestVolume.rebuild();
+	const underground = createUnderground( { scene, layout, env, grass, camera, volume: nestVolume } );
 
 	// Le socle de terre doit ENGLOBER le nid : sans ca la chambre royale flotte
 	// sous le terrain (le bug existait deja avec une chambre a -3,9 pour un
@@ -226,7 +231,7 @@ async function main() {
 	// --- interface ---
 	const ui = createUI( {
 		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
-		godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer,
+		godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume,
 		onReset: async () => {
 
 			await sim.reset();
@@ -361,7 +366,7 @@ async function main() {
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
 
 	// accès console pour le débogage
-	window.__antsys = { renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

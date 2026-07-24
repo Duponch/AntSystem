@@ -76,10 +76,11 @@ export function buildNestLayout() {
 	navTexture.minFilter = navTexture.magFilter = THREE.NearestFilter;
 	navTexture.generateMipmaps = false;
 
-	// table des noeuds : (x, y en texels, rayon d'arrivee, nappe)
-	const nodeData = new Float32Array( MAX_NODES * 4 );
+	// table des noeuds : ligne 0 = (x, y en texels, rayon d'arrivee, nappe)
+	//                    ligne 1 = (point de controle x, y du tunnel d'acces)
+	const nodeData = new Float32Array( MAX_NODES * 2 * 4 );
 	const nodeTexture = new THREE.DataTexture(
-		nodeData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
+		nodeData, MAX_NODES, 2, THREE.RGBAFormat, THREE.FloatType );
 	nodeTexture.minFilter = nodeTexture.magFilter = THREE.NearestFilter;
 	nodeTexture.generateMipmaps = false;
 
@@ -100,6 +101,8 @@ export function buildNestLayout() {
 			nodeData[ i * 4 + 1 ] = nd.y;
 			nodeData[ i * 4 + 2 ] = nd.r;
 			nodeData[ i * 4 + 3 ] = nd.layer;
+			nodeData[ ( MAX_NODES + i ) * 4 ] = nd.cx;
+			nodeData[ ( MAX_NODES + i ) * 4 + 1 ] = nd.cy;
 
 		}
 		nodeTexture.needsUpdate = true;
@@ -131,6 +134,10 @@ export function buildNestLayout() {
 		layout.radiusTexels = nest.radiusTexels;
 		layout.radiusWorld = nest.radiusWorld;
 		layout.units = nest.units;
+		layout.parents = nest.parents;
+		layout.shaft = nest.shaft;
+		layout.entry = nest.entry;
+		layout.tunnelW = params.nestTunnelW;
 		// chambres remarquables, sous le nom historique
 		const nodeOf = ( g ) => nest.nodes[ nest.GOAL_NODE[ g ] ];
 		layout.chambers = {
