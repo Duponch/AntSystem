@@ -225,10 +225,8 @@ export const gfx = {
 	// Pistes
 	trailGamma: 1.7,                   // contraste des pistes (1 = faibles visibles)
 
-	// Fourmilière souterraine (vue en fosse)
-	undergroundView: false,            // découpe le sol autour du nid pour voir les chambres
-	scannerView: true,                 // hologramme fil-de-fer du nid, auto quand la caméra plonge sous terre
-	pitRadius: 24,                     // rayon de la fosse (unités monde)
+	// Fourmilière souterraine
+	scannerView: true,                 // hologramme fil-de-fer du nid, quand la caméra est dans le bloc de terre
 	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
 	// Micro-dynamique du corps (démarche physique : le corps tangue et roule
@@ -242,10 +240,9 @@ export const gfx = {
 	rdDist: 26,                        // distance caméra max pour ragdoller (u)
 	rdSubsteps: 8,                     // sous-pas XPBD par pas fixe
 
-	// Vue en coupe (nid volumetrique)
+	// Vue souterraine (nid volumetrique, caméra dans le bloc de terre)
 	nestLight: 1.0,                    // lampe frontale : lisibilite des galeries
 	nestAO: 1.0,                       // occlusion ambiante derivee du champ
-	cutOffset: 0,                      // decalage du plan de coupe (unites monde)
 	nestBlend: 0.85,                   // fusion des cavites (organicite)
 	nestNoise: 0.42,                   // deformation des parois
 	nestGhost: 0.75,                   // galeries devinees a travers la tranche

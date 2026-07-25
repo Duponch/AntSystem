@@ -169,11 +169,11 @@ async function main() {
 
 	// couvain + mangeoires (kernel dédié) et vue en fosse de la fourmilière
 	const colony = createColony( { scene, sim, renderer, layout } );
-	// champ de distance 3D du nid (rendu en coupe) : bake une fois ici, puis a
+	// champ de distance 3D du nid (rendu souterrain) : bake une fois ici, puis a
 	// chaque fois que le nid change de forme
 	const nestVolume = createNestVolume( { renderer, layout } );
 	nestVolume.rebuild();
-	const underground = createUnderground( { scene, layout, env, grass, camera, volume: nestVolume } );
+	const underground = createUnderground( { scene, layout, env, camera, volume: nestVolume } );
 
 	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
 	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
@@ -312,7 +312,7 @@ async function main() {
 	let fpsAccum = 0;
 	let fpsCount = 0;
 	let fps = 0;
-	let wasDived = false;      // mémoire de la bascule surface/sous-sol (scanner)
+	let wasDived = false;      // mémoire de la bascule surface/sous-sol
 	const perf = { compute: 0, render: 0, computeCalls: 0 };
 
 	// Chronos GPU. Le pool de requêtes de three est BORNÉ (256 paires) : avec
@@ -360,9 +360,8 @@ async function main() {
 
 		}
 
-		underground.update( rawDt );                 // anim d'ouverture de la fosse
-		ants.uReveal.value = underground.reveal;     // vue fermée → souterraines non rendues
-		ants.uScanMode.value = underground.scanMode; // plongée → scanner + surface fantomatique
+		underground.update( rawDt );                 // plongée = caméra dans le bloc de terre
+		ants.uDive.value = underground.dive ? 1 : 0; // plongée → surface fantomatique
 		ants.tick( simDt, camera );
 		antfollow.update( rawDt );   // APRÈS ants.tick : lit la pose fraîche de kPose
 		// surbrillance jaune émissive de la fourmi suivie (visible à travers tout)
@@ -372,16 +371,16 @@ async function main() {
 		if ( running ) ragdoll.tick();
 		spiders.update( simDt );
 
-		// PLONGÉE SOUS TERRE (vue scanner) : le décor de surface disparaît.
-		// La bascule arrive à mi-fondu, quand le voile de terre (underground)
-		// est déjà assez opaque pour masquer la disparition — pas de « pop ».
-		// Les fourmis de surface, elles, RESTENT : rendues semi-transparentes.
-		const dived = underground.scanMode > 0.65;
+		// PLONGÉE SOUS TERRE : bascule BINAIRE à y < 0, sans transition. Le
+		// décor de surface disparaît d'un coup (comme une vraie caméra qu'on
+		// enfonce dans la terre), le fond de terre d'underground prend le
+		// relais au même instant. Les fourmis de surface, elles, RESTENT :
+		// rendues semi-transparentes.
+		const dived = underground.dive;
 		if ( dived !== wasDived ) {
 
 			wasDived = dived;
 			props.group.visible = ! dived;
-			grass.mesh.visible = ! dived;
 			sky.dome.visible = ! dived;
 			sky.moon.visible = ! dived;
 			foodballs.balls.visible = ! dived;
@@ -394,6 +393,8 @@ async function main() {
 
 		sky.update( camera );
 		grass.update( camera, rawDt );
+		// grass.update() aussi réécrit mesh.visible chaque frame : on force après
+		if ( dived ) grass.mesh.visible = false;
 		cinematic.update( rawDt );
 
 		// OrbitControls.update() repositionne la caméra même désactivé :
@@ -401,8 +402,8 @@ async function main() {
 		if ( ! params.cinematic ) controls.update();
 
 		// early-out réel : sans godrays, aucun post-processing n'est payé ;
-		// sous terre (scanner) les rayons de lune n'ont plus de sens
-		if ( gfx.godrays && underground.scanMode < 0.65 ) godrays.render();
+		// sous terre les rayons de lune n'ont plus de sens
+		if ( gfx.godrays && ! underground.dive ) godrays.render();
 		else renderer.render( scene, camera );
 
 		frame ++;
@@ -456,8 +457,8 @@ async function main() {
 		};
 
 		if ( q.get( 'ants' ) ) ui.setPopulation( + q.get( 'ants' ) );
-		if ( q.get( 'ug' ) === '1' ) gfx.undergroundView = true;
 		if ( q.get( 'scan' ) === '1' ) gfx.scannerView = true;
+		if ( q.get( 'scan' ) === '0' ) gfx.scannerView = false;
 		if ( q.get( 'follow' ) ) antfollow.select( + q.get( 'follow' ) );
 
 		const c = v3( 'cam' ), l = v3( 'look' );

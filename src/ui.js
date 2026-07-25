@@ -67,7 +67,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		await sim.setColonyEnabled( v );
 		ants.queen.visible = v;
 		colony.setVisible( v );
-		if ( ! v ) { gfx.undergroundView = false; gfx.scannerView = false; }
+		if ( ! v ) { gfx.scannerView = false; }
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
 	} );
@@ -91,9 +91,6 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	function applyNest() {
 
-		// la fosse et le socle doivent suivre le nid, sinon on decoupe le terrain
-		// la ou il n'y a pas encore de plancher
-		gfx.pitRadius = Math.max( gfx.pitRadius, sim.layout.radiusWorld + 4 );
 		sim.applyLayout();
 		nestVolume.rebuild();          // la forme a change : on refait le champ 3D
 		refreshNestInfo();
@@ -150,11 +147,9 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	} }, 'creuser' ).name( '⛏ Creuser un étage de plus' );
 	refreshNestInfo();
 
-	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue en coupe' );
 	fLife.add( gfx, 'scannerView' ).name( '📡 Vue scanner' );
 
-	const fCut = fLife.addFolder( '🔍 Coupe & matière' );
-	fCut.add( gfx, 'cutOffset', - 25, 25, 0.5 ).name( 'Décalage du plan de coupe' );
+	const fCut = fLife.addFolder( '🔍 Sous-sol & matière' );
 	fCut.add( gfx, 'nestLight', 0, 3, 0.05 ).name( 'Lampe frontale' );
 	fCut.add( gfx, 'nestAO', 0, 1, 0.05 ).name( 'Occlusion (relief)' );
 	fCut.add( gfx, 'nestGhost', 0, 1.5, 0.05 ).name( 'Galeries en transparence' );
@@ -170,8 +165,6 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fScan.addColor( gfx, 'nestScanColor' ).name( 'Couleur' );
 	fScan.add( gfx, 'nestScanPulse', 0, 2, 0.05 ).name( 'Impulsion de balayage' );
 	fScan.close();
-
-	fLife.add( gfx, 'pitRadius', 8, 60, 0.5 ).name( 'Rayon de la fosse (u)' );
 
 	const fCastes = fLife.addFolder( 'Castes' );
 	fCastes.add( params, 'nurseRatio', 0, 0.4, 0.01 ).name( 'Part de nourrices' )
@@ -445,7 +438,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 			location.reload();
 
 		} );
-	fMap.add( gfx, 'groundThickness', 0.2, 10, 0.1 ).name( 'Épaisseur du sol' )
+	fMap.add( gfx, 'groundThickness', 0.2, 60, 0.1 ).name( 'Épaisseur du sol' )
 		.onChange( ( v ) => env.setThickness( v ) );
 
 	const fColors = fGfx.addFolder( 'Couleurs' );

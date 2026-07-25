@@ -33,7 +33,6 @@ import {
 import { loadAntVAT, buildLodGeometry } from './vat.js';
 import { createPose, qrot } from './pose.js';
 import { GRID, WORLD, MAX_ANTS, params, gfx } from './config.js';
-import { uPitR, uCutOn, uCutN, uCutP } from './environment.js';
 
 const LOD_DIST = [ 16, 42 ];          // limites LOD0→1 et LOD1→2 (unités monde)
 const CULL_MARGIN = 1.6;              // rayon de sécurité autour d'une fourmi
@@ -80,12 +79,10 @@ export async function createAnts( sim ) {
 	};
 
 	const uPhase = uniform( 0 );
-	// vue souterraine ouverte (0..1) : fermée, les souterraines sont SAUTÉES
-	// par le classement (invisibles sous le sol opaque : ni VAT ni ombres)
-	const uReveal = uniform( 0 );
-	// plongée scanner (0..1) : les souterraines deviennent visibles même vue
-	// fermée, et les fourmis de SURFACE passent en fantomatique (opacityNode)
-	const uScanMode = uniform( 0 );
+	// plongée (0/1 binaire) : caméra DANS le bloc de terre → les souterraines
+	// deviennent visibles, et les fourmis de SURFACE passent en fantomatique
+	// (opacityNode) — elles restent présentes mais ne font plus écran
+	const uDive = uniform( 0 );
 	let phaseAcc = 0;
 
 	const framesF = float( vat.frames );
@@ -104,19 +101,12 @@ export async function createAnts( sim ) {
 		If( instanceIndex.toFloat().lessThan( sim.u.antCount ), () => {
 
 			const P = pose.read( instanceIndex );
-			// vue fermée → les souterraines sont invisibles sous le sol opaque ;
+			// caméra hors du bloc de terre → les souterraines sont invisibles
+			// sous le sol opaque, on les SAUTE au classement (ni VAT ni ombres) ;
 			// la reine (index 0, colonie active) a son mesh dédié ; une fourmi
 			// RAGDOLLÉE est dessinée par son propre pipeline (sinon elle
 			// apparaîtrait deux fois)
-			// Vue fermée → les souterraines sont invisibles sous le sol opaque.
-			// Vue en coupe → ce sont les fourmis de SURFACE qui doivent
-			// disparaître du côté découpé : sinon elles marchent dans le vide
-			// au-dessus de la tranche, ce qui ruine la lecture de la coupe.
-			const inCut = uCutOn.greaterThan( 0.5 ).and(
-				P.world.xz.sub( uCutP.xz ).dot( uCutN.xz ).greaterThan( - 1 )
-					.or( length( P.world.xz ).lessThan( uPitR ) ) );
-			const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) )
-				.or( P.under.not().and( inCut ) );
+			const hidden = P.under.and( uDive.lessThan( 0.01 ) );
 
 			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
 
@@ -310,7 +300,7 @@ export async function createAnts( sim ) {
 
 		} )();
 
-		// PLONGÉE SCANNER : les fourmis de SURFACE deviennent semi-transparentes
+		// PLONGÉE : les fourmis de SURFACE deviennent semi-transparentes
 		// (on plonge sous elles, elles ne doivent plus faire écran) tandis que
 		// les souterraines restent pleines — elles sont le sujet de la vue.
 		// opacity constante par instance → pas de tri à faire, depthWrite resté
@@ -318,7 +308,7 @@ export async function createAnts( sim ) {
 		material.opacityNode = Fn( () => {
 
 			return mix( float( 1 ), float( 0.25 ),
-				varyingProperty( 'float', 'vUnder' ).oneMinus().mul( uScanMode ) );
+				varyingProperty( 'float', 'vUnder' ).oneMinus().mul( uDive ) );
 
 		} )();
 		material.transparent = true;
@@ -517,8 +507,8 @@ export async function createAnts( sim ) {
 	grainMat.positionNode = Fn( () => {
 
 		const P = pose.read( instanceIndex );
-		// grain caché avec sa porteuse : souterraine + vue fermée
-		const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) );
+		// grain caché avec sa porteuse : souterraine + caméra hors du bloc
+		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
 		const offset = qrot( P.q, mouthOffset( P.scale ) );
 
@@ -550,7 +540,7 @@ export async function createAnts( sim ) {
 	haloMat.positionNode = Fn( () => {
 
 		const P = pose.read( instanceIndex );
-		const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) );
+		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
 		const center = qrot( P.q, mouthOffset( P.scale ) ).add( P.world );
 
@@ -623,8 +613,7 @@ export async function createAnts( sim ) {
 		uQueenScale,
 		uGrainHalo,
 		uGrainHaloIntensity,
-		uReveal,
-		uScanMode,
+		uDive,
 		uFollowIdx,
 		followMesh,
 		queen,

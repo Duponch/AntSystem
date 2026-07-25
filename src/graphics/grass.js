@@ -18,7 +18,7 @@ import {
 } from 'three/tsl';
 
 import { WORLD, gfx } from '../config.js';
-import { makeFieldSampler, groundAlbedo, groundEmissive, uCutOn, uCutN, uCutP } from '../environment.js';
+import { makeFieldSampler, groundAlbedo, groundEmissive } from '../environment.js';
 
 const MAX_BLADES = 2_000_000;
 
@@ -84,12 +84,7 @@ export function createGrass( scene, sim ) {
 		const mask = float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bx.abs() ) ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bz.abs() ) ) )
-			.mul( smoothstep( u.holeIn, u.holeOut, length( root ) ) )
-			// PLAN DE COUPE : l'herbe située entre la caméra et le nid masquerait
-			// la tranche. On la fait disparaître sur un fondu court plutôt que net,
-			// sinon la limite se lit comme une ligne de coupe dans la pelouse.
-			.mul( float( 1 ).sub( uCutOn.mul(
-				smoothstep( - 1.5, 1.5, root.sub( uCutP.xz ).dot( uCutN.xz ) ) ) ) );
+			.mul( smoothstep( u.holeIn, u.holeOut, length( root ) ) );
 
 		// irrégularité : le chaos élargit les écarts de taille et couche les
 		// brins dans des directions aléatoires (mêmes hash, coût négligeable)

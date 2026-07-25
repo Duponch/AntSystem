@@ -41,7 +41,6 @@ import {
 
 import { qrot } from './pose.js';
 import { MAX_ANTS, TEXEL, WORLD, params, gfx } from './config.js';
-import { cutHidden } from './environment.js';
 
 // --- topologie du ragdoll -------------------------------------------------
 // 15 particules : le tronc (3) + un genou et un tarse par patte (12).
@@ -572,9 +571,7 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 		const world = local.mul( anchor.w ).add( anchor.xyz );
 
-		// meme masquage que les fourmis vivantes : un cadavre reste sur le sol
-		// retire par la coupe flotterait devant la tranche
-		return select( cutHidden( anchor.xz, anchor.y ), vec3( 0, - 1e5, 0 ), world );
+		return world;
 
 	} )();
 

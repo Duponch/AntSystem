@@ -1,49 +1,43 @@
-// VUE EN COUPE — la terre est un VOLUME traversé au rayon, plus une surface.
+// LE BLOC DE TERRE — la map est un pavé de terre, et c'est tout.
 //
 // Ce que remplace ce fichier : quatre maillages de plancher déformés dans le
-// vertex shader, une découpe en disque dans le sol, un cylindre de paroi. Ça
-// donnait des rideaux verticaux, un tube flottant et la skybox en arrière-plan.
+// vertex shader, une découpe en disque dans le sol, un cylindre de paroi, puis
+// un « mode coupe » avec plan de coupe et fosse. Rideaux verticaux, tube
+// flottant, skybox en arrière-plan, bascules de mode : tout cela est supprimé.
 //
-// Le principe ici est inverse. Une BOÎTE de terre pleine englobe le nid. Pour
-// chaque pixel on lance un rayon depuis la caméra et on avance jusqu'à trouver
-// de la matière (champ de distance de nestvolume.js). Trois conséquences :
+// Le principe : IL N'Y A AUCUN MODE. Depuis la surface le bloc est un simple
+// pavé opaque (environment.js) — la fourmilière est enterrée, invisible. La
+// caméra qui ENTRE dans le bloc (comme une caméra au bout d'une forreuse qui
+// ne creuse pas) voit simplement ce qui l'entoure :
 //
-//   • ON NE PEUT PAS VOIR À TRAVERS de la terre pleine. Plus de skybox derrière
-//     le nid, plus de trou : le volume est fermé par construction.
-//   • LA COUPE est un simple décalage du départ du rayon. On démarre au plan de
-//     coupe : là où il tombe dans la terre, on voit la tranche ; là où il tombe
-//     dans une cavité, le rayon continue et révèle l'intérieur de la galerie.
-//     C'est exactement la lecture d'une planche naturaliste.
-//   • LA PROFONDEUR est écrite par le shader (depthNode) : les fourmis et le
-//     décor se composent correctement avec la terre, sans tri ni transparence.
+//   • LA TERRE au contact : une boîte englobe le nid et lance un rayon par
+//     pixel jusqu'au champ de distance de nestvolume.js. Dans la terre pleine
+//     le contact est immédiat — on voit la texture de terre ; dans une cavité
+//     le rayon la traverse et révèle ses parois éclairées. On ne voit que ce
+//     qui entoure réellement la caméra : tunnels et loges autour d'elle.
+//   • UN FOND DE TERRE uniforme (grande boîte vue de l'intérieur) : la skybox
+//     n'existe plus. La strate est prise à la profondeur de la caméra (une
+//     seule couche, aucun horizon), le grain en 3D réel (pas de rayures).
+//   • Le décor de surface disparaît (main.js), les fourmis de surface
+//     deviennent semi-transparentes (ants.js, uDive), les souterraines
+//     apparaissent — tout cela au franchissement exact de la paroi du bloc.
 //
-// La plupart des pixels touchent la tranche au PREMIER pas — seuls ceux qui
-// tombent dans une ouverture de galerie marchent réellement. C'est ce qui rend
-// le raymarching abordable ici.
+// La plupart des pixels touchent la matière au PREMIER pas — seuls ceux qui
+// tombent dans une cavité marchent réellement : le raymarching reste
+// abordable. La PROFONDEUR est écrite par le shader (depthNode) : fourmis et
+// œufs se composent correctement avec la terre, sans tri ni transparence.
 //
-// LE SCANNER (style Deep Rock Galactic) — VUE AUTONOME, SANS COUPE. La vue en
-// coupe reste une planche naturaliste pure : aucun fil de fer, aucune teinte.
-// Le scanner est un mode à part entière qui s'active TOUT SEUL quand la caméra
-// plonge sous terre (s'il est armé par la case « Vue scanner » de l'UI), en
-// fondu sur la hauteur de descente — c'est ce fondu qui fait la transition :
-//
-//   • HOLOGRAMME : une boîte additive SANS test de profondeur dessine le nid
-//     COMPLET en fil de fer à travers le terrain. Le rayon traverse tout le
-//     volume et chaque franchissement de paroi (changement de signe du canal
-//     G, le champ PROPRE sans bruit) émet une ligne de la cage 3D à la
-//     position affinée par bissection : 100 % de la fourmilière, de tout
-//     angle, sans masque lié à la caméra.
-//   • FOND DE TERRE : une grande boîte vue de l'intérieur repeint l'arrière-
-//     plan en horizons de sol — sous terre, la skybox n'existe plus. Sans
-//     écriture de profondeur : fourmis, œufs et hologramme passent devant.
-//   • Pendant la plongée le décor de surface s'efface (piloté par main.js),
-//     les fourmis de surface deviennent semi-transparentes (ants.js) et les
-//     souterraines apparaissent : on passe de la surface au sous-sol d'un
-//     mouvement continu.
+// LE SCANNER (style Deep Rock Galactic) est un simple BONUS par-dessus, armé
+// par la case « Vue scanner » de l'UI et affiché seulement caméra dans le
+// bloc : une boîte additive SANS test de profondeur dessine le nid COMPLET en
+// fil de fer. Le rayon traverse tout le volume et chaque franchissement de
+// paroi (changement de signe du canal G, le champ PROPRE sans bruit) émet une
+// ligne de la cage 3D à la position affinée par bissection : 100 % de la
+// fourmilière, de tout angle, sans masque lié à la caméra.
 //
 // Une impulsion sphérique (périodique + une grosse à l'activation) fait
-// flamboyer l'hologramme à son passage. Coût : quelques ALU par pas de marche,
-// ZÉRO passe ni texture ajoutée ; l'ensemble est sauté quand le fondu est à 0.
+// flamboyer l'hologramme à son passage. Coût : quelques ALU par pas de
+// marche, ZÉRO passe ni texture ajoutée ; la boîte est cachée hors plongée.
 
 import * as THREE from 'three/webgpu';
 import {
@@ -55,9 +49,8 @@ import {
 } from 'three/tsl';
 
 import { GRID, WORLD, NEST, gfx, params } from './config.js';
-import { uPitR, uCutOn, uCutN, uCutP } from './environment.js';
 
-export function createUnderground( { scene, layout, env, grass, camera, volume } ) {
+export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	const group = new THREE.Group();
 	scene.add( group );
@@ -66,21 +59,17 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 	const centerZ = ( NEST.y / GRID - 0.5 ) * WORLD;
 
 	// ------------------------------------------------------------------
-	// le plan de coupe est PARTAGÉ avec le terrain et l'herbe (environment.js) :
-	// c'est la seule façon d'obtenir une vraie tranche — sans ça le sol situé
-	// entre la caméra et le nid masque toute la moitié basse de la coupe
-	const uOpen = uniform( 0 );                              // 0 fermé → 1 ouvert
 	const uDepthMax = uniform( 18 );
 	const uSurfaceY = uniform( 0 );
 	const uHeadLight = uniform( 1 );
 	const uAO = uniform( 1 );
 	const uGhost = uniform( gfx.nestGhost );
 
-	// --- scanner : fondu de plongée + impulsion (voir en-tête) ---
+	// --- scanner : activation binaire + impulsion (voir en-tête) ---
 	const uScan = uniform( gfx.nestScan );         // intensité maître (UI)
 	const uScanPulse = uniform( gfx.nestScanPulse );
 	const uScanColor = uniform( new THREE.Color( gfx.nestScanColor ) );
-	// fondu de plongée : 0 = surface (rien de souterrain), 1 = scanner plein
+	// hologramme actif : 0/1 BINAIRE (plus de fondu — voir en-tête)
 	const uScanMode = uniform( 0 );
 	// âge (s) de l'impulsion d'activation — compté côté CPU, 1e6 = jamais tirée
 	const uScanFire = uniform( 1e6 );
@@ -148,8 +137,12 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 	// Terre : horizons pédologiques. Le profil ne dépend que de la profondeur,
 	// avec une frontière ondulée par UN seul bruit — trois octaves par fragment
 	// coûteraient dix fois le budget pour un gain invisible.
+	// `detail` = point où évaluer le GRAIN (par défaut le même que la strate).
+	// Le fond de plongée prend la strate à la profondeur de la caméra mais le
+	// grain à la vraie position : strate uniforme SANS aplatir le bruit (sinon
+	// y constant dégénère le bruit 3D en rayures verticales sur les murs).
 	// ------------------------------------------------------------------
-	const soilAt = ( p ) => {
+	const soilAt = ( p, detail = p ) => {
 
 		const n = mx_noise_float( p.mul( 0.22 ) ).mul( 0.5 ).add( 0.5 );
 		const f = clamp( p.y.negate().div( uDepthMax ).add( n.sub( 0.5 ).mul( 0.10 ) ), 0, 1 ).toVar();
@@ -160,8 +153,8 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 		// grain : agregats et cailloux, l'echelle qui donne la matiere « terre ».
 		// Il DOIT s'estomper avec la distance : a 40 unites un motif de periode
 		// 0,4 tombe sous le pixel et moire en damier sur toute la tranche.
-		const g = mx_noise_float( p.mul( 2.6 ) ).mul( 0.5 ).add( 0.5 );
-		const fade = clamp( float( 1 ).sub( length( p.sub( cameraPosition ) ).mul( 0.028 ) ), 0, 1 );
+		const g = mx_noise_float( detail.mul( 2.6 ) ).mul( 0.5 ).add( 0.5 );
+		const fade = clamp( float( 1 ).sub( length( detail.sub( cameraPosition ) ).mul( 0.028 ) ), 0, 1 );
 		return c.mul( g.sub( 0.5 ).mul( fade ).mul( 0.34 ).add( 1 ) );
 
 	};
@@ -208,23 +201,6 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 		const tsm = min( t0v, t1v ), tbg = max( t0v, t1v );
 		const tEnter = max( max( max( tsm.x, tsm.y ), tsm.z ), 0.02 ).toVar();
 		const tExit = min( min( tbg.x, tbg.y ), tbg.z ).toVar();
-
-		// --- PLAN DE COUPE : on démarre le rayon derrière lui ---
-		// C'est TOUT le mécanisme de la coupe. Devant le plan rien n'existe ;
-		// derrière, la terre est pleine. La tranche apparaît là où le plan tombe
-		// dans la matière, et les galeries s'ouvrent là où il tombe dans le vide.
-		const dn = dot( rd, uCutN ).toVar();
-		const tPlane = dot( uCutP.sub( ro ), uCutN ).div( safe( dn ) );
-
-		If( dn.lessThan( 0 ), () => {
-
-			tEnter.assign( max( tEnter, tPlane ) );
-
-		} ).Else( () => {
-
-			tExit.assign( min( tExit, tPlane ) );
-
-		} );
 
 		// --- on ne marche que SOUS la surface ---
 		If( ro.y.add( rd.y.mul( tEnter ) ).greaterThan( uSurfaceY ), () => {
@@ -404,30 +380,31 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 
 	material.colorNode = Fn( () => {
 
-		Discard( uOpen.lessThan( 0.01 ) );
-
 		const r = march();
 		Discard( r.w.lessThan( 0 ) );
 		const p = r.xyz;
 
-		// --- TRANCHE ou VRAIE PAROI ? ---
+		// --- TERRE AU CONTACT ou VRAIE PAROI ? ---
 		// Piege : on ne peut PAS le deduire du gradient du champ. Un champ de
 		// distance a un gradient unitaire PARTOUT, y compris au milieu de la terre
 		// pleine — il pointe simplement vers la cavite la plus proche. Le test
-		// |grad| ~ 0 ne repere que les zones saturees du champ, pas la coupe : la
-		// tranche entiere passait pour une paroi, se prenait la lampe frontale en
+		// |grad| ~ 0 ne repere que les zones saturees du champ : la terre au
+		// contact entiere passait pour une paroi, se prenait la lampe frontale en
 		// pleine face et saturait en beige.
 		//
-		// Le vrai critere est geometrique. Tout rayon demarre AU plan de coupe ;
-		// s'il touche de la matiere sans avoir parcourt un pouce de vide, c'est
-		// qu'il est tombe sur la tranche. w (distance parcourue dans le vide) est
-		// donc exactement le discriminant, et il donne en prime un degrade doux
-		// aux bouches de galerie.
+		// Le vrai critere est geometrique : si le rayon touche de la matiere
+		// sans avoir parcouru un pouce de vide, c'est de la terre pleine au
+		// contact de l'objectif. w (distance parcourue dans le vide) est donc
+		// exactement le discriminant, et il donne en prime un degrade doux aux
+		// bouches de galerie.
 		const wallness = smoothstep( 0.04, 0.55, r.w ).toVar();
 
 		const g = gradSDF( p ).toVar();
 		const gl = length( g ).toVar();
-		const n = normalize( mix( uCutN, g.negate().div( max( gl, 1e-4 ) ), wallness ) ).toVar();
+		// au contact (wallness ≈ 0) la « paroi » fait face à la caméra :
+		// normale = rayon inversé, comme une tranche de planche naturaliste
+		const rd = normalize( positionWorld.sub( cameraPosition ) );
+		const n = normalize( mix( rd.negate(), g.negate().div( max( gl, 1e-4 ) ), wallness ) ).toVar();
 
 		// --- OCCLUSION AMBIANTE dérivée du champ ---
 		// C'est ELLE qui rend les cavités lisibles : au fond d'une galerie la
@@ -455,24 +432,24 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 		const occ = mix( float( 1 ), open, wallness.mul( uAO ) ).toVar();
 
 		// --- lumiere ---
-		// DEUX REGIMES, et c'est le point cle du rendu. La TRANCHE est une coupe
-		// virtuelle : sa normale est celle du plan, donc face a la camera, donc
-		// lambert y vaut 1 partout. L'eclairer comme une vraie paroi la saturait
-		// en beige uniforme — les horizons pedologiques disparaissaient et les
-		// cavites, elles eclairees de biais, ressortaient PLUS CLAIRES que la
-		// terre : on lisait des bosses au lieu de trous. La tranche recoit donc
-		// un eclairage plat de planche naturaliste, les vraies parois la lampe.
+		// DEUX REGIMES, et c'est le point cle du rendu. La TERRE AU CONTACT fait
+		// face a la camera (normale = rayon inverse), donc lambert y vaut 1
+		// partout. L'eclairer comme une vraie paroi la saturait en beige
+		// uniforme — les horizons pedologiques disparaissaient et les cavites,
+		// elles eclairees de biais, ressortaient PLUS CLAIRES que la terre : on
+		// lisait des bosses au lieu de trous. Le contact recoit donc un
+		// eclairage plat, les vraies parois la lampe frontale.
 		const toCam = cameraPosition.sub( p );
 		const dist = length( toCam ).toVar();
 		const l = toCam.div( max( dist, 1e-4 ) );
 		const lambert = clamp( dot( n, l ), 0, 1 );
 		const falloff = clamp( float( 1 ).sub( dist.div( uDepthMax.mul( 3 ).add( 60 ) ) ), 0.06, 1 );
 
-		// La TRANCHE recoit un eclairage plat et SOMBRE : c'est de la terre en
-		// coupe, pas une paroi eclairee. Les vraies parois, elles, recoivent la
-		// lampe frontale. L'inversion de contraste est volontaire — sur une
-		// planche naturaliste ce sont les cavites qui sont claires et ouvertes,
-		// la terre qui fait le fond sombre. C'est ce qui les fait lire comme des
+		// La TERRE AU CONTACT recoit un eclairage plat et SOMBRE : c'est de la
+		// terre contre l'objectif, pas une paroi eclairee. Les vraies parois,
+		// elles, recoivent la lampe frontale. L'inversion de contraste est
+		// volontaire : ce sont les cavites qui sont claires et ouvertes, la
+		// terre qui fait le fond sombre. C'est ce qui les fait lire comme des
 		// creux et non comme des bosses.
 		const wallLight = lambert.mul( uHeadLight ).mul( falloff ).mul( 2.2 ).add( 0.10 );
 		const faceLight = float( 0.72 );
@@ -489,12 +466,12 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 		const cave = exp( r.w.mul( - 0.16 ) ).toVar();
 
 		// --- LES GALERIES PAR TRANSPARENCE ---
-		// Une coupe stricte ne montre que ce que le plan traverse : le reste du
-		// nid, a un metre derriere, reste invisible. On sonde donc le champ
-		// DERRIERE la tranche le long du rayon et on assombrit la terre la ou du
-		// vide se cache dessous. Meme principe qu'une vision a travers les murs de
-		// jeu AAA, mais gratuit : le champ de distance est deja la. La branche est
-		// coherente (des regions entieres sont soit tranche soit paroi), donc
+		// Le contact immediat ne montre que de la terre : les cavites a un
+		// metre derriere restent invisibles. On sonde donc le champ DERRIERE le
+		// contact le long du rayon et on assombrit la terre la ou du vide se
+		// cache dessous. Meme principe qu'une vision a travers les murs de jeu
+		// AAA, mais gratuit : le champ de distance est deja la. La branche est
+		// coherente (des regions entieres sont soit contact soit paroi), donc
 		// reellement sautee par le GPU.
 		const ghost = float( 0 ).toVar();
 
@@ -554,13 +531,12 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 	group.add( box );
 
 	// ------------------------------------------------------------------
-	// Le FOND DE TERRE du mode scanner : sous terre, la skybox n'existe plus.
-	// Grande boîte vue de l'intérieur, dessinée en PREMIER (renderOrder −3),
-	// SANS écriture de profondeur → fourmis, œufs et hologramme passent
-	// toujours devant. Son opacité suit le fondu de plongée : c'est le voile
-	// qui fait la transition surface → sous-sol (le décor de surface se cache
-	// DERRIÈRE ce voile, jamais à découvert). Hors brouillard : le fond doit
-	// rester de la terre, pas se laver vers la couleur du ciel.
+	// Le FOND DE TERRE de la plongée : sous terre, la skybox n'existe plus.
+	// Grande boîte OPAQUE vue de l'intérieur, dessinée en PREMIER
+	// (renderOrder −3), SANS écriture de profondeur → fourmis, œufs et
+	// hologramme passent toujours devant. Bascule binaire avec la plongée :
+	// pas de voile progressif, pas de transition. Hors brouillard : le fond
+	// doit rester de la terre, pas se laver vers la couleur du ciel.
 	// ------------------------------------------------------------------
 	const SOIL_TOP = 0.02;        // juste sous le niveau du sol
 	const SOIL_BOTTOM = - 60;     // bien sous le nid le plus profond
@@ -568,17 +544,22 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 
 	const soilMat = new THREE.MeshBasicNodeMaterial();
 	soilMat.side = THREE.BackSide;
-	soilMat.transparent = true;
 	soilMat.depthWrite = false;
 	soilMat.fog = false;
 
 	soilMat.colorNode = Fn( () => {
 
-		// même matière que la tranche, assombrie : un fond, pas une paroi
-		return soilAt( positionWorld ).mul( 0.6 );
+		// La strate est prise À LA PROFONDEUR DE LA CAMÉRA : une caméra
+		// enfoncée dans la terre voit UNE seule couche de sol, uniforme.
+		// Échantillonner la strate à la profondeur du fragment donnait un
+		// dégradé vertical — un faux horizon avec bandes haut/bas, exactement
+		// l'effet « filtre sur la skybox » à proscrire. Le grain, lui, reste
+		// évalué à la position réelle : à y constant le bruit 3D dégénérerait
+		// en rayures verticales sur les murs de la boîte.
+		return soilAt(
+			vec3( positionWorld.x, cameraPosition.y, positionWorld.z ), positionWorld ).mul( 0.6 );
 
 	} )();
-	soilMat.opacityNode = uScanMode;
 
 	const soilBox = new THREE.Mesh( new THREE.BoxGeometry( 1, 1, 1 ), soilMat );
 	soilBox.frustumCulled = false;
@@ -626,25 +607,15 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 	}
 
 	// ------------------------------------------------------------------
-	// Animation d'ouverture (coupe) et de plongée (scanner)
+	// Plongée binaire (fond de terre, raymarch du nid, scanner)
 	// ------------------------------------------------------------------
-	let reveal = 0;
-	let scanMode = 0;          // fondu brut de plongée (0 = surface, 1 = scanner)
-	let scanEased = 0;         // le même lissé en smoothstep — lu par main.js
-	let prevScanEased = 0;     // détection du front (impulsion d'activation)
+	let dive = false;          // caméra DANS le bloc de terre (binaire, sans fondu)
+	let scanOn = false;        // hologramme actif = plongée + case UI + colonie
+	let prevScanOn = false;    // détection du front (impulsion d'activation)
 	let scanFireAge = 1e6;     // âge de l'impulsion d'activation (1e6 = jamais)
-	const camDir = new THREE.Vector3();
 
 	function update( dt ) {
 
-		const target = gfx.undergroundView ? 1 : 0;
-		const k = 1 - Math.exp( - dt * 5 );
-		reveal += ( target - reveal ) * k;
-		if ( Math.abs( reveal - target ) < 0.002 ) reveal = target;
-
-		const eased = reveal * reveal * ( 3 - 2 * reveal );
-		uOpen.value = eased;
-		box.visible = eased > 0.01;
 		uDepthMax.value = layout.depthMax || 18;
 		uHeadLight.value = gfx.nestLight;
 		uAO.value = gfx.nestAO;
@@ -653,30 +624,34 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 		uScanPulse.value = gfx.nestScanPulse;
 		uScanColor.value.set( gfx.nestScanColor );
 
-		// PLONGÉE : le scanner s'active TOUT SEUL dès que la caméra passe sous
-		// la surface (s'il est armé dans l'UI et qu'une colonie existe). Fondu
-		// sur ~1,8 unités de descente, lissé — la transition est progressive,
-		// jamais un basculement sec.
-		const scanTarget = ( gfx.scannerView && params.colony )
-			? Math.min( Math.max( ( 0.5 - camera.position.y ) / 1.8, 0 ), 1 ) : 0;
-		const ks = 1 - Math.exp( - dt * 5 );
-		scanMode += ( scanTarget - scanMode ) * ks;
-		if ( Math.abs( scanMode - scanTarget ) < 0.002 ) scanMode = scanTarget;
-		scanEased = scanMode * scanMode * ( 3 - 2 * scanMode );
-		uScanMode.value = scanEased;
+		// PLONGÉE BINAIRE : la caméra franchit la paroi du BLOC de terre (le
+		// pavé d'environment.js : |x|,|z| ≤ WORLD/2, −épaisseur ≤ y < 0) →
+		// bascule d'un coup, comme une caméra au bout d'une forreuse. AUCUN
+		// fondu, aucune transition : le fond de terre et le raymarch du nid
+		// remplacent la surface d'un frame à l'autre (main.js masque le décor
+		// de surface au même instant). Être sous le niveau du sol MAIS HORS
+		// du bloc (à côté de la carte, ou sous son fond) ne déclenche rien.
+		const p = camera.position;
+		dive = p.y < 0 && p.y >= - gfx.groundThickness
+			&& Math.abs( p.x ) <= WORLD * 0.5 && Math.abs( p.z ) <= WORLD * 0.5;
+		soilBox.visible = dive;
+		box.visible = dive;
 
-		// impulsion d'activation : tirée à mi-plongée, âgée côté CPU —
+		// Le SCANNER n'ajoute QUE l'hologramme, et seulement dans le bloc de
+		// terre (armé par l'UI, colonie existante). Rien d'autre ne change.
+		scanOn = dive && gfx.scannerView && !! params.colony;
+		uScanMode.value = scanOn ? 1 : 0;
+
+		// impulsion d'activation : tirée sur le front montant, âgée côté CPU —
 		// le shader n'a qu'à lire uScanFire
-		if ( scanEased > 0.5 && prevScanEased <= 0.5 ) scanFireAge = 0;
-		prevScanEased = scanEased;
+		if ( scanOn && ! prevScanOn ) scanFireAge = 0;
+		prevScanOn = scanOn;
 		if ( scanFireAge < 20 ) scanFireAge += dt;
 		uScanFire.value = scanFireAge;
 
-		// hologramme + fond de terre : visibles dès que le fondu a commencé ;
-		// la boîte de l'hologramme épouse le VOLUME du nid (pas la tranche)
-		scanBox.visible = scanEased > 0.01;
-		soilBox.visible = scanEased > 0.01;
-		if ( scanEased > 0.01 ) {
+		// la boîte de l'hologramme épouse le VOLUME du nid
+		scanBox.visible = scanOn;
+		if ( scanOn ) {
 
 			scanBox.scale.copy( vSize.value );
 			scanBox.position.set(
@@ -687,43 +662,19 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 
 		}
 
-		// la tranche court jusqu'au bord du terrain, et descend sous le nid :
-		// le bloc n'a plus de silhouette propre, c'est le sol qui est ouvert
+		// la boîte du raymarch court jusqu'au bord du terrain, et descend sous
+		// le nid : hors du volume baké, sampleSDF renvoie de la terre pleine
 		const half = Math.max( WORLD * 0.5, vSize.value.x * 0.5 + 8 );
 		const floorY = vMin.value.y - 6;
 		bMin.value.set( centerX - half, floorY, centerZ - half );
 		bSize.value.set( half * 2, - floorY + 0.05, half * 2 );
 		fitBox();
 
-		// LE PLAN DE COUPE SUIT LA CAMÉRA : sa normale est la direction
-		// horizontale nid→caméra, si bien qu'on regarde toujours une tranche
-		// fraîche quelle que soit l'orbite.
-		camDir.set( camera.position.x - centerX, 0, camera.position.z - centerZ );
-		if ( camDir.lengthSq() < 1e-6 ) camDir.set( 0, 0, 1 );
-		camDir.normalize();
-		uCutN.value.copy( camDir );
-		uCutP.value.set(
-			centerX + camDir.x * gfx.cutOffset, 0, centerZ + camDir.z * gfx.cutOffset );
-		uCutOn.value = eased;
-
-		// le sol de surface s'ouvre en même temps, sur un disque un peu plus
-		// large que le nid pour qu'on voie la tranche depuis le dessus
-		uPitR.value = eased * Math.max( gfx.pitRadius, ( layout.radiusWorld || 20 ) + 3 );
-
-		if ( grass && grass.u && grass.u.holeIn ) {
-
-			grass.u.holeIn.value = Math.max( 3.6, uPitR.value - 1.4 );
-			grass.u.holeOut.value = Math.max( 5.2, uPitR.value );
-
-		}
-
 		if ( env.anthill ) {
 
-			// la fourmilière de surface s'efface avec la coupe ET avec la
-			// plongée : dans les deux cas on quitte le monde de surface
-			const s = ( 1 - eased ) * ( 1 - scanEased );
-			env.anthill.visible = s > 0.02;
-			env.anthill.scale.setScalar( env.anthill.userData.baseScale * Math.max( 0.001, s ) );
+			// la fourmilière de surface disparaît dès que la caméra entre dans
+			// le bloc : on quitte le monde de surface
+			env.anthill.visible = ! dive;
 
 		}
 
@@ -731,8 +682,8 @@ export function createUnderground( { scene, layout, env, grass, camera, volume }
 
 	return {
 		group, update, box, uScanMode,
-		get reveal() { return reveal; },
-		get scanMode() { return scanEased; },
+		get dive() { return dive; },
+		get scanMode() { return scanOn ? 1 : 0; },
 	};
 
 }
