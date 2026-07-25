@@ -253,6 +253,8 @@ export const gfx = {
 	nestScanColor: '#3fe0c8',          // turquoise scanner
 	nestScanPulse: 1.0,                // vitesse de l'impulsion (0 = statique)
 	scanAntColor: '#ffa030',           // fourmis souterraines émissives (scanner)
+	scanBroodColor: '#7ec8ff',         // couvain émissif (scanner)
+	scanFoodColor: '#b6ff4a',          // stocks de nourriture émissifs (scanner)
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis

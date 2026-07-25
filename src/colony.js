@@ -355,6 +355,12 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	const uEggColor = uniform( new THREE.Color( gfx.eggColor ) );
 	const uLarvaColor = uniform( new THREE.Color( gfx.larvaColor ) );
 	const uPupaColor = uniform( new THREE.Color( gfx.pupaColor ) );
+	// SCANNER : chaque type d'élément souterrain luit de SA couleur (réglable
+	// à l'UI) quand la vue scanner est active — main.js lève aussi le test de
+	// profondeur des meshes → visibles à travers la terre
+	const uScanFx = uniform( 0 );
+	const uScanBroodColor = uniform( new THREE.Color( gfx.scanBroodColor ) );
+	const uScanFoodColor = uniform( new THREE.Color( gfx.scanFoodColor ) );
 
 	const broodGeo = new THREE.InstancedBufferGeometry();
 	const ico = new THREE.IcosahedronGeometry( 1, 1 );
@@ -436,6 +442,10 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	broodMesh.frustumCulled = false;
 	scene.add( broodMesh );
 
+	// scanner : le couvain luit de sa couleur dédiée (profondeur levée par
+	// main.js en même temps, comme la reine et les ouvrières)
+	broodMat.emissiveNode = Fn( () => vec3( uScanBroodColor ).mul( uScanFx ) )();
+
 	// ------------------------------------------------------------------
 	// Tas de nourriture des mangeoires (grenier, reine, couvain)
 	// ------------------------------------------------------------------
@@ -476,7 +486,8 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	} )();
 
 	pileMat.colorNode = uPileColor;
-	pileMat.emissiveNode = Fn( () => vec3( uPileColor ).mul( uPileGlow ).mul( 0.5 ) )();
+	pileMat.emissiveNode = Fn( () => vec3( uPileColor ).mul( uPileGlow ).mul( 0.5 )
+		.add( vec3( uScanFoodColor ).mul( uScanFx ) ) )();
 
 	const piles = new THREE.Mesh( pileGeo, pileMat );
 	piles.frustumCulled = false;
@@ -635,6 +646,8 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	return {
 		u, layout, demo,
 		uEggColor, uLarvaColor, uPupaColor,
+		uScanFx, uScanBroodColor, uScanFoodColor,
+		broodMesh, piles,
 		step, reset, onStats,
 		setVisible( v ) {
 

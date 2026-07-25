@@ -364,16 +364,24 @@ async function main() {
 		underground.update( rawDt );                 // plongée = caméra dans le bloc de terre
 		ants.uDive.value = underground.dive ? 1 : 0; // plongée → surface fantomatique
 		// SCANNER : passe émissive des souterraines (à travers la terre) + reine
-		// luminescente — la couleur est relue chaque frame (réglable live)
+		// luminescente + couvain et stocks de nourriture — chaque type d'élément
+		// a SA couleur, relue chaque frame (réglable live)
 		const scanOn = underground.scanMode > 0;
 		ants.uScanAnts.value = scanOn ? 1 : 0;
 		ants.uScanAntColor.value.set( gfx.scanAntColor );
+		colony.uScanFx.value = scanOn ? 1 : 0;
+		colony.uScanBroodColor.value.set( gfx.scanBroodColor );
+		colony.uScanFoodColor.value.set( gfx.scanFoodColor );
 		if ( scanOn !== wasScanOn ) {
 
 			wasScanOn = scanOn;
 			for ( const m of ants.scanBodies ) m.visible = scanOn;
 			ants.queen.material.depthTest = ! scanOn;
 			ants.queen.renderOrder = scanOn ? 11 : 0;
+			colony.broodMesh.material.depthTest = ! scanOn;
+			colony.broodMesh.renderOrder = scanOn ? 11 : 0;
+			colony.piles.material.depthTest = ! scanOn;
+			colony.piles.renderOrder = scanOn ? 11 : 0;
 
 		}
 		ants.tick( simDt, camera );

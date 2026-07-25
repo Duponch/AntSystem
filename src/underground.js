@@ -475,6 +475,11 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		// AAA, mais gratuit : le champ de distance est deja la. La branche est
 		// coherente (des regions entieres sont soit contact soit paroi), donc
 		// reellement sautee par le GPU.
+		//
+		// FONDU A LA DISTANCE : l'effet ne doit révéler que les cavités PROCHEs
+		// de la caméra. Sans lui, toute la silhouette du volume baké se
+		// dessinait en rectangle clair dans le lointain — le fond n'était pas
+		// uni. Au-delà de ~25 u la terre redevient une masse uniforme.
 		const ghost = float( 0 ).toVar();
 
 		If( wallness.lessThan( 0.55 ).and( uGhost.greaterThan( 0.01 ) ), () => {
@@ -489,7 +494,8 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 			}
 
 			ghost.assign( clamp( ghost.mul( 0.45 ), 0, 1 ).mul( uGhost )
-				.mul( float( 1 ).sub( wallness ) ) );
+				.mul( float( 1 ).sub( wallness ) )
+				.mul( smoothstep( 26.0, 9.0, dist ) ) );
 
 		} );
 
