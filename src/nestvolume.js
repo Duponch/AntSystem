@@ -156,6 +156,15 @@ export function createNestVolume( { renderer, layout } ) {
 		const n2 = mx_noise_float( p.mul( uNoiseFreq.mul( 2.7 ) ).add( 31.7 ) );
 		d.subAssign( n1.mul( uNoiseAmp ).add( n2.mul( uNoiseAmp.mul( 0.35 ) ) ) );
 
+		// PLAFOND. La deformation par bruit fait deboucher les chambres les plus
+		// hautes AU-DESSUS du sol : vue de biais, la coupe laissait alors voir
+		// le ciel a travers le nid. On intersecte donc le champ avec le
+		// demi-espace « sous la surface » — max() entre deux distances signees
+		// est l'intersection des deux solides. Le seuil est lui-meme ondule par
+		// le meme bruit, sans quoi tout l'etage superieur se retrouvait coiffe
+		// d'un plafond parfaitement plat.
+		d.assign( max( d, p.y.add( 0.55 ).add( n1.mul( 0.45 ) ) ) );
+
 		textureStore( volume, ivec3( vx.toInt(), vy.toInt(), vz.toInt() ), vec4( d, 0, 0, 0 ) ).toStack();
 
 	} )().compute( VOL_X * VOL_Y * VOL_Z );
@@ -181,8 +190,12 @@ export function createNestVolume( { renderer, layout } ) {
 		for ( let k = 0; k < K; k ++ ) {
 
 			const u = units[ k ];
+			// Le centre est remonte des TROIS QUARTS de la demi-hauteur : le sol de
+			// la lentille tombe ainsi juste sous la profondeur ou marchent les
+			// fourmis (celle lue dans la carte de profondeur), avec la marge qu'il
+			// faut pour que la deformation par bruit ne creve pas le plancher.
 			chamberA[ k ].set(
-				( u.x / GRID - 0.5 ) * WORLD, u.depth + u.rh * 0.6, ( u.y / GRID - 0.5 ) * WORLD, u.rwx );
+				( u.x / GRID - 0.5 ) * WORLD, u.depth + u.rh * 0.75, ( u.y / GRID - 0.5 ) * WORLD, u.rwx );
 			chamberB[ k ].set( u.rh, u.rwz, 0, 0 );
 
 		}

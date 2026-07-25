@@ -64,10 +64,10 @@ export const ROOM = {
 const LEVEL = [
 	// zf = fraction de la profondeur · rw = demi-largeur de chambre (unites monde)
 	// rh = demi-HAUTEUR · spread = rayon du disque ou se repartissent les loges
-	{ zf: 0.10, rw: 4.20, rh: 0.85, spread: 17.0, rooms: [ ROOM.GARDE, ROOM.SOLARIUM, ROOM.SOLARIUM, ROOM.GARDE ] },
-	{ zf: 0.40, rw: 3.80, rh: 0.80, spread: 16.0, rooms: [ ROOM.GRENIER, ROOM.ETABLE, ROOM.GRENIER ] },
-	{ zf: 0.71, rw: 3.30, rh: 0.72, spread: 14.5, rooms: [ ROOM.CRECHE, ROOM.NURSERIE, ROOM.COMPOST ] },
-	{ zf: 1.00, rw: 2.90, rh: 0.66, spread: 12.5, rooms: [ ROOM.ROYALE, ROOM.COUVEUSE, ROOM.DORTOIR ] },
+	{ zf: 0.10, rw: 4.20, rh: 1.24, spread: 17.0, rooms: [ ROOM.GARDE, ROOM.SOLARIUM, ROOM.SOLARIUM, ROOM.GARDE ] },
+	{ zf: 0.40, rw: 3.80, rh: 1.17, spread: 16.0, rooms: [ ROOM.GRENIER, ROOM.ETABLE, ROOM.GRENIER ] },
+	{ zf: 0.71, rw: 3.30, rh: 1.06, spread: 14.5, rooms: [ ROOM.CRECHE, ROOM.NURSERIE, ROOM.COMPOST ] },
+	{ zf: 1.00, rw: 2.90, rh: 0.98, spread: 12.5, rooms: [ ROOM.ROYALE, ROOM.COUVEUSE, ROOM.DORTOIR ] },
 ];
 
 // pente maximale d'un tunnel (dz / distance horizontale). 0,42 ~ 23 degres :
