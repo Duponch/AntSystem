@@ -21,6 +21,7 @@ import { createFoodBalls } from './graphics/foodballs.js';
 import { createDebugCones } from './graphics/debugcones.js';
 import { createBench } from './bench.js';
 import { createColonyTests } from './tests.js';
+import { createWarden } from './warden.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
 import { createRagdoll } from './ragdoll.js';
@@ -492,9 +493,12 @@ async function main() {
 
 	// tests de cohérence de la colonie : ?test=colony ou __antsys.tests.run()
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
+	// surveillant d'anomalies (téléportations, toupies, cycle de vie) :
+	// ?test=warden (&wdur=120) ou __antsys.warden.run()
+	const warden = createWarden( { sim, colony, ants, cones, renderer } );
 
 	// accès console pour le débogage
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, layout, tests, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );
@@ -508,6 +512,12 @@ async function main() {
 	if ( /test=colony/.test( location.search ) ) {
 
 		setTimeout( () => tests.run(), 800 );
+
+	}
+
+	if ( /test=warden/.test( location.search ) ) {
+
+		setTimeout( () => warden.run(), 800 );
 
 	}
 
