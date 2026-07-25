@@ -247,11 +247,12 @@ export const gfx = {
 	nestNoise: 0.42,                   // deformation des parois
 	nestGhost: 0.75,                   // galeries devinees a travers la tranche
 
-	// Scanner holographique (style Deep Rock Galactic) : vue autonome qui
-	// s'active en plongeant sous terre — fil-de-fer du nid complet, sans coupe
+	// Scanner holographique (style Deep Rock Galactic) : bonus affiché quand la
+	// caméra est dans le bloc de terre — fil-de-fer du nid complet, sans coupe
 	nestScan: 1.0,                     // maître : 0 = coupé (branche sautée, coût nul)
 	nestScanColor: '#3fe0c8',          // turquoise scanner
 	nestScanPulse: 1.0,                // vitesse de l'impulsion (0 = statique)
+	scanAntColor: '#ffa030',           // fourmis souterraines émissives (scanner)
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis

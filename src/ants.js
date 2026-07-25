@@ -156,6 +156,11 @@ export async function createAnts( sim ) {
 	// deviennent visibles, et les fourmis de SURFACE passent en fantomatique
 	// (opacityNode) — elles restent présentes mais ne font plus écran
 	const uDive = uniform( 0 );
+	// scanner (0/1 binaire) : les souterraines sont AUSSI dessinées en émissif
+	// plat à travers tout (passe jumelle scanBodies + lueur de la reine),
+	// dans une couleur réglable depuis l'UI
+	const uScanAnts = uniform( 0 );
+	const uScanAntColor = uniform( new THREE.Color( gfx.scanAntColor ) );
 	let phaseAcc = 0;
 
 
@@ -277,9 +282,22 @@ export async function createAnts( sim ) {
 	// animMode : 0 = interpolation lisse, 1 = frame la plus proche (toujours
 	// animée, sans mélange), 2 = pose figée (au-delà de la distance d'animation,
 	// une fourmi fait ~3 px : invisible, et moitié moins de lectures de texture)
-	function makeBodyMaterial( lodBase, animMode ) {
+	// scanPass : jumelle ÉMISSIVE pour la vue scanner — non éclairée, sans test
+	// de profondeur, seules les souterraines survivent (les autres s'effondrent
+	// en sommets dégénérés) → elles restent visibles à travers la terre.
+	function makeBodyMaterial( lodBase, animMode, scanPass = false ) {
 
-		const material = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
+		const material = scanPass
+			? new THREE.MeshBasicNodeMaterial()
+			: new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
+
+		if ( scanPass ) {
+
+			material.depthTest = false;
+			material.depthWrite = false;
+			material.toneMapped = false;         // couleur franche, pas de lavage ACES
+
+		}
 		const base = uniform( lodBase );
 
 		material.positionNode = Fn( () => {
@@ -345,7 +363,14 @@ export async function createAnts( sim ) {
 			} );
 
 			// dévorée : sommet dégénéré, invisible
-			const vis = select( P.gone, float( 0 ), float( 1 ) );
+			const vis = select( P.gone, float( 0 ), float( 1 ) ).toVar();
+
+			if ( scanPass ) {
+
+				// passe scanner : seules les SOUTERRAINES existent ici
+				vis.assign( select( P.under, vis, float( 0 ) ) );
+
+			}
 
 			// le corps tourne autour de son PIVOT anatomique (articulation « root »),
 			// pas autour de ses pieds : sans ça une fourmi qui bascule s'enfonce
@@ -354,6 +379,17 @@ export async function createAnts( sim ) {
 				.add( P.world );
 
 		} )();
+
+		if ( scanPass ) {
+
+			// émissif plat, couleur réglable — comme la fourmi suivie, mais pour
+			// TOUTES les souterraines (vu scanner : lisible à travers la terre)
+			material.colorNode = Fn( () => vec3( uScanAntColor ).mul( 1.15 ) )();
+			material.transparent = true;
+
+			return material;
+
+		}
 
 		material.colorNode = Fn( () => {
 
@@ -412,6 +448,32 @@ export async function createAnts( sim ) {
 	}
 
 	// ------------------------------------------------------------------
+	// PASSE SCANNER : jumelles émissives des corps — MÊME géométrie et MÊMES
+	// listes d'instances (aucun classement supplémentaire), mais non éclairées,
+	// sans test de profondeur, et seules les souterraines y survivent → elles
+	// restent visibles À TRAVERS la terre, comme la fourmi suivie, dans la
+	// couleur scanner réglée à l'UI. Coût nul quand visible = false.
+	// ------------------------------------------------------------------
+	const scanBodies = [];
+
+	for ( let k = 0; k < 3; k ++ ) {
+
+		const igeo = new THREE.InstancedBufferGeometry();
+		igeo.index = lodGeos[ k ].index;
+		igeo.attributes = lodGeos[ k ].attributes;
+		igeo.instanceCount = 1;                       // le vrai compte vit sur GPU
+		igeo.setIndirect( indirectAttr, k * 20 );     // offset en octets
+
+		const mesh = new THREE.Mesh( igeo, makeBodyMaterial( k * MAX_ANTS, k, true ) );
+		mesh.frustumCulled = false;
+		mesh.renderOrder = 11;                        // sous la fourmi suivie (12)
+		mesh.visible = false;
+		group.add( mesh );
+		scanBodies.push( mesh );
+
+	}
+
+	// ------------------------------------------------------------------
 	// LA REINE : mesh dédié hors pipeline LOD (1 « instance », échelle libre,
 	// anim ralentie — pas de patinage — et jamais de rétrogradation LOD).
 	// Gaster allongé (physogastrie) : échelle non uniforme sur l'axe du corps.
@@ -463,6 +525,10 @@ export async function createAnts( sim ) {
 		return mix( vec3( uQueenColor ), vec3( uAccentColor ), varyingProperty( 'float', 'vQAccent' ) );
 
 	} )();
+
+	// scanner : la reine luit de la couleur scanner (main.js lève en même temps
+	// son test de profondeur → visible à travers tout, comme la fourmi suivie)
+	queenMat.emissiveNode = Fn( () => vec3( uScanAntColor ).mul( uScanAnts ) )();
 
 	const queen = new THREE.Mesh( vat.geometry, queenMat );
 	queen.frustumCulled = false;
@@ -694,6 +760,9 @@ export async function createAnts( sim ) {
 		uGrainHalo,
 		uGrainHaloIntensity,
 		uDive,
+		uScanAnts,
+		uScanAntColor,
+		scanBodies,
 		uFollowIdx,
 		followMesh,
 		queen,

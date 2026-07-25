@@ -313,6 +313,7 @@ async function main() {
 	let fpsCount = 0;
 	let fps = 0;
 	let wasDived = false;      // mémoire de la bascule surface/sous-sol
+	let wasScanOn = false;     // mémoire de la bascule du scanner (passe émissive)
 	const perf = { compute: 0, render: 0, computeCalls: 0 };
 
 	// Chronos GPU. Le pool de requêtes de three est BORNÉ (256 paires) : avec
@@ -362,6 +363,19 @@ async function main() {
 
 		underground.update( rawDt );                 // plongée = caméra dans le bloc de terre
 		ants.uDive.value = underground.dive ? 1 : 0; // plongée → surface fantomatique
+		// SCANNER : passe émissive des souterraines (à travers la terre) + reine
+		// luminescente — la couleur est relue chaque frame (réglable live)
+		const scanOn = underground.scanMode > 0;
+		ants.uScanAnts.value = scanOn ? 1 : 0;
+		ants.uScanAntColor.value.set( gfx.scanAntColor );
+		if ( scanOn !== wasScanOn ) {
+
+			wasScanOn = scanOn;
+			for ( const m of ants.scanBodies ) m.visible = scanOn;
+			ants.queen.material.depthTest = ! scanOn;
+			ants.queen.renderOrder = scanOn ? 11 : 0;
+
+		}
 		ants.tick( simDt, camera );
 		antfollow.update( rawDt );   // APRÈS ants.tick : lit la pose fraîche de kPose
 		// surbrillance jaune émissive de la fourmi suivie (visible à travers tout)

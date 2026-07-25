@@ -76,8 +76,8 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	// constantes du scanner : l'onde part du puits d'entrée du nid
 	const SCAN_CENTER = vec3( centerX, 0, centerZ );
-	const GRID_FREQ = 0.6;        // fréquence de la cage 3D (~1,7 u par maille :
-	                              // lisible à l'échelle d'une loge, pas du gruyère)
+	const GRID_FREQ = 1.5;        // fréquence de la cage 3D (~0,67 u par maille :
+	                              // dense comme le scanner DRG, sans virer au gruyère)
 	const SCAN_PERIOD = 5.0;      // période de l'impulsion périodique (s)
 	const SCAN_RANGE = 45.0;      // portée de l'impulsion (unités monde)
 
@@ -332,20 +332,22 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 					// une paroi 2D qu'en un pixel isolé. La demi-largeur des
 					// lignes grandit avec la distance pour rester ~1 px à
 					// l'écran ; très loin on fond vers un voile (anti-moiré).
-					const lw = float( 0.045 ).mul( t.mul( 0.02 ).add( 1 ) );
+					// Profil RESSERRÉ (chute rapide du smoothstep) : des traits
+					// fins et nets au lieu de boudins flous pixelisés.
+					const lw = float( 0.022 ).mul( t.mul( 0.015 ).add( 1 ) );
 					const fw = fract( pC.mul( GRID_FREQ ).add( 0.5 ) ).sub( 0.5 ).abs();
-					const lx = smoothstep( lw, 0.0, fw.x );
-					const ly = smoothstep( lw, 0.0, fw.y );
-					const lz = smoothstep( lw, 0.0, fw.z );
+					const lx = smoothstep( lw, lw.mul( 0.35 ), fw.x );
+					const ly = smoothstep( lw, lw.mul( 0.35 ), fw.y );
+					const lz = smoothstep( lw, lw.mul( 0.35 ), fw.z );
 					const grid = max( lx, max( ly, lz ) );
-					const wire = mix( grid, float( 0.55 ), smoothstep( 60, 140, t ) );
+					const wire = mix( grid, float( 0.5 ), smoothstep( 60, 140, t ) );
 
 					// décroissance par rang de paroi : les faces avant dominent,
 					// les faces arrière restent lisibles sans saturer en aplat.
 					// Le fondu d'entrée (smoothstep sur t) écarte les parois
 					// COLÉES à la caméra — sinon leurs lignes géantes
 					// envahissent tout l'écran quand on est DANS le nid.
-					glow.addAssign( wire.mul( 0.55 )
+					glow.addAssign( wire.mul( 0.7 )
 						.mul( smoothstep( 0.2, 2.2, t ) )
 						.mul( exp( count.mul( - 0.55 ) ) )
 						.mul( exp( t.mul( - 0.012 ) ) ).mul( pulseAt( pC ) ) );
@@ -532,15 +534,14 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	// ------------------------------------------------------------------
 	// Le FOND DE TERRE de la plongée : sous terre, la skybox n'existe plus.
-	// Grande boîte OPAQUE vue de l'intérieur, dessinée en PREMIER
+	// Grande SPHÈRE OPAQUE vue de l'intérieur — pas une boîte : les arêtes et
+	// coins d'un cube restaient perceptibles en filigrane (dégradé des normales
+	// par face), une sphère n'a aucune silhouette propre. Dessinée en PREMIER
 	// (renderOrder −3), SANS écriture de profondeur → fourmis, œufs et
-	// hologramme passent toujours devant. Bascule binaire avec la plongée :
-	// pas de voile progressif, pas de transition. Hors brouillard : le fond
-	// doit rester de la terre, pas se laver vers la couleur du ciel.
+	// hologramme passent toujours devant. Hors brouillard : le fond doit
+	// rester de la terre, pas se laver vers la couleur du ciel.
 	// ------------------------------------------------------------------
-	const SOIL_TOP = 0.02;        // juste sous le niveau du sol
-	const SOIL_BOTTOM = - 60;     // bien sous le nid le plus profond
-	const SOIL_HALF = 200;        // assez large pour ne jamais voir les bords
+	const SOIL_R = 300;       // assez grand pour englober toute la carte
 
 	const soilMat = new THREE.MeshBasicNodeMaterial();
 	soilMat.side = THREE.BackSide;
@@ -555,18 +556,20 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		// dégradé vertical — un faux horizon avec bandes haut/bas, exactement
 		// l'effet « filtre sur la skybox » à proscrire. Le grain, lui, reste
 		// évalué à la position réelle : à y constant le bruit 3D dégénérerait
-		// en rayures verticales sur les murs de la boîte.
+		// en stries sur la sphère. Le facteur 0,72 épouse l'éclairage plat de
+		// la terre au contact (faceLight) : aucune ligne de jonction entre le
+		// raymarch et ce fond — le tout se lit comme UNE masse de terre.
 		return soilAt(
-			vec3( positionWorld.x, cameraPosition.y, positionWorld.z ), positionWorld ).mul( 0.6 );
+			vec3( positionWorld.x, cameraPosition.y, positionWorld.z ), positionWorld ).mul( 0.72 );
 
 	} )();
 
-	const soilBox = new THREE.Mesh( new THREE.BoxGeometry( 1, 1, 1 ), soilMat );
+	const soilBox = new THREE.Mesh( new THREE.SphereGeometry( 1, 32, 16 ), soilMat );
 	soilBox.frustumCulled = false;
 	soilBox.renderOrder = - 3;
 	soilBox.visible = false;
-	soilBox.scale.set( SOIL_HALF * 2, SOIL_TOP - SOIL_BOTTOM, SOIL_HALF * 2 );
-	soilBox.position.set( centerX, ( SOIL_TOP + SOIL_BOTTOM ) / 2, centerZ );
+	soilBox.scale.setScalar( SOIL_R );
+	soilBox.position.set( centerX, 0, centerZ );
 	group.add( soilBox );
 
 	// ------------------------------------------------------------------

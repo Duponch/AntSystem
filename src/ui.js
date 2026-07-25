@@ -163,6 +163,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const fScan = fLife.addFolder( '📡 Scanner' );
 	fScan.add( gfx, 'nestScan', 0, 2, 0.05 ).name( 'Intensité du scanner' );
 	fScan.addColor( gfx, 'nestScanColor' ).name( 'Couleur' );
+	fScan.addColor( gfx, 'scanAntColor' ).name( 'Couleur des fourmis' );
 	fScan.add( gfx, 'nestScanPulse', 0, 2, 0.05 ).name( 'Impulsion de balayage' );
 	fScan.close();
 
