@@ -227,6 +227,7 @@ export const gfx = {
 
 	// Fourmilière souterraine (vue en fosse)
 	undergroundView: false,            // découpe le sol autour du nid pour voir les chambres
+	scannerView: true,                 // hologramme fil-de-fer du nid, auto quand la caméra plonge sous terre
 	pitRadius: 24,                     // rayon de la fosse (unités monde)
 	queenScale: 2.3,                   // gabarit de la reine (× fourmi normale)
 
@@ -248,6 +249,12 @@ export const gfx = {
 	nestBlend: 0.85,                   // fusion des cavites (organicite)
 	nestNoise: 0.42,                   // deformation des parois
 	nestGhost: 0.75,                   // galeries devinees a travers la tranche
+
+	// Scanner holographique (style Deep Rock Galactic) : vue autonome qui
+	// s'active en plongeant sous terre — fil-de-fer du nid complet, sans coupe
+	nestScan: 1.0,                     // maître : 0 = coupé (branche sautée, coût nul)
+	nestScanColor: '#3fe0c8',          // turquoise scanner
+	nestScanPulse: 1.0,                // vitesse de l'impulsion (0 = statique)
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis

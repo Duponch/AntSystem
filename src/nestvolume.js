@@ -152,6 +152,11 @@ export function createNestVolume( { renderer, layout } ) {
 		// c'est ce bruit qui donne les parois bosselées et les contours
 		// irréguliers d'une vraie galerie creusée dans la terre. Deux octaves :
 		// l'un pour la silhouette, l'autre pour le grain.
+		//
+		// Canal G (pour la vue scanner) : le champ PROPRE, pris AVANT le bruit,
+		// avec un plafond plat — le scanner y détecte des parois nettes, sans
+		// les faux franchissements que le bruit sème dans la terre pleine.
+		const dClean = max( d, p.y.add( 0.55 ) );
 		const n1 = mx_noise_float( p.mul( uNoiseFreq ) );
 		const n2 = mx_noise_float( p.mul( uNoiseFreq.mul( 2.7 ) ).add( 31.7 ) );
 		d.subAssign( n1.mul( uNoiseAmp ).add( n2.mul( uNoiseAmp.mul( 0.35 ) ) ) );
@@ -165,7 +170,7 @@ export function createNestVolume( { renderer, layout } ) {
 		// d'un plafond parfaitement plat.
 		d.assign( max( d, p.y.add( 0.55 ).add( n1.mul( 0.45 ) ) ) );
 
-		textureStore( volume, ivec3( vx.toInt(), vy.toInt(), vz.toInt() ), vec4( d, 0, 0, 0 ) ).toStack();
+		textureStore( volume, ivec3( vx.toInt(), vy.toInt(), vz.toInt() ), vec4( d, dClean, 0, 0 ) ).toStack();
 
 	} )().compute( VOL_X * VOL_Y * VOL_Z );
 

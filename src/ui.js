@@ -67,7 +67,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		await sim.setColonyEnabled( v );
 		ants.queen.visible = v;
 		colony.setVisible( v );
-		if ( ! v ) gfx.undergroundView = false;
+		if ( ! v ) { gfx.undergroundView = false; gfx.scannerView = false; }
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
 	} );
@@ -151,6 +151,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	refreshNestInfo();
 
 	fLife.add( gfx, 'undergroundView' ).name( '⛏ Vue en coupe' );
+	fLife.add( gfx, 'scannerView' ).name( '📡 Vue scanner' );
 
 	const fCut = fLife.addFolder( '🔍 Coupe & matière' );
 	fCut.add( gfx, 'cutOffset', - 25, 25, 0.5 ).name( 'Décalage du plan de coupe' );
@@ -162,6 +163,14 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fCut.add( gfx, 'nestNoise', 0, 1.5, 0.05 ).name( 'Irrégularité des parois' )
 		.onFinishChange( ( v ) => { nestVolume.u.noiseAmp.value = v; nestVolume.rebuild(); } );
 	fCut.close();
+
+	// scanner holographique : tout est uniforme live, aucun rebuild du volume
+	const fScan = fLife.addFolder( '📡 Scanner' );
+	fScan.add( gfx, 'nestScan', 0, 2, 0.05 ).name( 'Intensité du scanner' );
+	fScan.addColor( gfx, 'nestScanColor' ).name( 'Couleur' );
+	fScan.add( gfx, 'nestScanPulse', 0, 2, 0.05 ).name( 'Impulsion de balayage' );
+	fScan.close();
+
 	fLife.add( gfx, 'pitRadius', 8, 60, 0.5 ).name( 'Rayon de la fosse (u)' );
 
 	const fCastes = fLife.addFolder( 'Castes' );

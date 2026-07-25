@@ -268,6 +268,7 @@ async function main() {
 	let fpsAccum = 0;
 	let fpsCount = 0;
 	let fps = 0;
+	let wasDived = false;      // mémoire de la bascule surface/sous-sol (scanner)
 	const perf = { compute: 0, render: 0, computeCalls: 0 };
 
 	// Chronos GPU. Le pool de requêtes de three est BORNÉ (256 paires) : avec
@@ -317,10 +318,32 @@ async function main() {
 
 		underground.update( rawDt );                 // anim d'ouverture de la fosse
 		ants.uReveal.value = underground.reveal;     // vue fermée → souterraines non rendues
+		ants.uScanMode.value = underground.scanMode; // plongée → scanner + surface fantomatique
 		ants.tick( simDt, camera );
 		// APRÈS ants.tick : le ragdoll lit la pose que kPose vient d'écrire
 		if ( running ) ragdoll.tick();
 		spiders.update( simDt );
+
+		// PLONGÉE SOUS TERRE (vue scanner) : le décor de surface disparaît.
+		// La bascule arrive à mi-fondu, quand le voile de terre (underground)
+		// est déjà assez opaque pour masquer la disparition — pas de « pop ».
+		// Les fourmis de surface, elles, RESTENT : rendues semi-transparentes.
+		const dived = underground.scanMode > 0.65;
+		if ( dived !== wasDived ) {
+
+			wasDived = dived;
+			props.group.visible = ! dived;
+			grass.mesh.visible = ! dived;
+			sky.dome.visible = ! dived;
+			sky.moon.visible = ! dived;
+			foodballs.balls.visible = ! dived;
+			foodballs.halos.visible = ! dived;
+
+		}
+		// spiders.update() gère lui-même mesh.visible chaque frame : on force
+		// APRÈS lui, sans toucher à sa logique interne
+		if ( dived ) spiders.mesh.visible = false;
+
 		sky.update( camera );
 		grass.update( camera, rawDt );
 		cinematic.update( rawDt );
@@ -329,8 +352,9 @@ async function main() {
 		// on le saute pendant les plans cinématiques
 		if ( ! params.cinematic ) controls.update();
 
-		// early-out réel : sans godrays, aucun post-processing n'est payé
-		if ( gfx.godrays ) godrays.render();
+		// early-out réel : sans godrays, aucun post-processing n'est payé ;
+		// sous terre (scanner) les rayons de lune n'ont plus de sens
+		if ( gfx.godrays && underground.scanMode < 0.65 ) godrays.render();
 		else renderer.render( scene, camera );
 
 		frame ++;
@@ -385,6 +409,7 @@ async function main() {
 
 		if ( q.get( 'ants' ) ) ui.setPopulation( + q.get( 'ants' ) );
 		if ( q.get( 'ug' ) === '1' ) gfx.undergroundView = true;
+		if ( q.get( 'scan' ) === '1' ) gfx.scannerView = true;
 
 		const c = v3( 'cam' ), l = v3( 'look' );
 		if ( c ) camera.position.set( c[ 0 ], c[ 1 ], c[ 2 ] );

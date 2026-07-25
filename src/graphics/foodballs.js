@@ -148,6 +148,8 @@ export function createFoodBalls( scene, sim ) {
 
 	return {
 		u,
+		balls,
+		halos,
 		// à appeler quand l'espacement ou la quantité changent (UI)
 		refresh() {
 

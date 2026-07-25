@@ -174,6 +174,8 @@ export function createSky( scene ) {
 	setTime( gfx.nightTime );
 
 	return {
+		dome,
+		moon,
 		moonLight,
 		ambient,
 		fog,

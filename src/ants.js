@@ -83,6 +83,9 @@ export async function createAnts( sim ) {
 	// vue souterraine ouverte (0..1) : fermée, les souterraines sont SAUTÉES
 	// par le classement (invisibles sous le sol opaque : ni VAT ni ombres)
 	const uReveal = uniform( 0 );
+	// plongée scanner (0..1) : les souterraines deviennent visibles même vue
+	// fermée, et les fourmis de SURFACE passent en fantomatique (opacityNode)
+	const uScanMode = uniform( 0 );
 	let phaseAcc = 0;
 
 	const framesF = float( vat.frames );
@@ -112,7 +115,7 @@ export async function createAnts( sim ) {
 			const inCut = uCutOn.greaterThan( 0.5 ).and(
 				P.world.xz.sub( uCutP.xz ).dot( uCutN.xz ).greaterThan( - 1 )
 					.or( length( P.world.xz ).lessThan( uPitR ) ) );
-			const hidden = P.under.and( uReveal.lessThan( 0.01 ) )
+			const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) )
 				.or( P.under.not().and( inCut ) );
 
 			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
@@ -228,6 +231,7 @@ export async function createAnts( sim ) {
 			varyingProperty( 'float', 'vCaste' ).assign( P.caste );
 			varyingProperty( 'float', 'vVenom' ).assign( P.venom );
 			varyingProperty( 'float', 'vDead' ).assign( select( P.dead, 1, 0 ) );
+			varyingProperty( 'float', 'vUnder' ).assign( select( P.under, 1, 0 ) );
 
 			let animated;
 
@@ -305,6 +309,19 @@ export async function createAnts( sim ) {
 			return col.mul( mix( float( 1 ), float( 0.5 ), varyingProperty( 'float', 'vDead' ) ) );
 
 		} )();
+
+		// PLONGÉE SCANNER : les fourmis de SURFACE deviennent semi-transparentes
+		// (on plonge sous elles, elles ne doivent plus faire écran) tandis que
+		// les souterraines restent pleines — elles sont le sujet de la vue.
+		// opacity constante par instance → pas de tri à faire, depthWrite resté
+		// actif : les corps s'occluent encore correctement entre eux.
+		material.opacityNode = Fn( () => {
+
+			return mix( float( 1 ), float( 0.25 ),
+				varyingProperty( 'float', 'vUnder' ).oneMinus().mul( uScanMode ) );
+
+		} )();
+		material.transparent = true;
 
 		return material;
 
@@ -417,7 +434,7 @@ export async function createAnts( sim ) {
 
 		const P = pose.read( instanceIndex );
 		// grain caché avec sa porteuse : souterraine + vue fermée
-		const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
+		const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
 		const offset = qrot( P.q, mouthOffset( P.scale ) );
 
@@ -449,7 +466,7 @@ export async function createAnts( sim ) {
 	haloMat.positionNode = Fn( () => {
 
 		const P = pose.read( instanceIndex );
-		const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
+		const hidden = P.under.and( uReveal.lessThan( 0.01 ).and( uScanMode.lessThan( 0.01 ) ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
 		const center = qrot( P.q, mouthOffset( P.scale ) ).add( P.world );
 
@@ -523,6 +540,7 @@ export async function createAnts( sim ) {
 		uGrainHalo,
 		uGrainHaloIntensity,
 		uReveal,
+		uScanMode,
 		queen,
 		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },
 		uAntHitR,
