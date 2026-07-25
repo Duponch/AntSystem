@@ -202,89 +202,131 @@ export function parentOf( k, U ) {
 
 }
 
-// ---------------------------------------------------------------------------
-// TRACE D'UN TUNNEL — arc de colimacon a pente douce
-// ---------------------------------------------------------------------------
-// Un segment DROIT entre deux chambres a des profondeurs differentes donne une
-// rampe raide et rectiligne : c'est ce qui se lisait comme une "pente
-// geometrique" et non comme un couloir. On trace donc un ARC DE CERCLE dans le
-// plan horizontal, dont la longueur est calculee pour que la pente reste sous
-// MAX_SLOPE : plus la descente est raide, plus l'arc s'enroule. C'est
-// exactement la strategie d'un vrai nid, ou les puits profonds descendent en
-// colimacon plutot qu'a la verticale.
+// TRACE D'UN TUNNEL.
 //
-// La profondeur suit un profil en S (smoothstep) : le tunnel QUITTE et REJOINT
-// ses chambres a l'horizontale, jamais en piquant du nez.
+// La courbe est une BEZIER QUADRATIQUE, et ce choix n'est pas esthetique : les
+// fourmis parcourent les aretes du nid par une Bezier a UN point de controle
+// (nodeTexture, rangee 1). Creuser le volume le long d'une autre courbe — un
+// arc de cercle, par exemple — desynchronise les deux : mesure faite, 1,21
+// unite d'ecart pour un tunnel de 0,80 de rayon, soit des fourmis qui
+// traversent visiblement la terre entre deux chambres. En creusant la Bezier
+// elle-meme, l'accord est exact par construction.
+//
+// Le bombement est cherche par DICHOTOMIE SUR LA PENTE REELLE, jamais sur la
+// longueur totale : une Bezier est au plus lent en son milieu, precisement la
+// ou le profil de descente en S est au plus raide. Dimensionner sur la
+// longueur laissait passer des portions a 40 degres au coeur du tunnel. La
+// pente maximale decroit strictement avec le bombement, donc la dichotomie
+// converge ; vingt-deux tours, une fois par tunnel et par reconstruction.
 export function tunnelPath( a, b, seed, steps = 10 ) {
 
 	const dx = b.x - a.x, dy = b.y - a.y;
-	const chord = Math.hypot( dx, dy );
-	const dz = Math.abs( b.depth - a.depth );
+	const chord = Math.hypot( dx, dy ) || 1e-3;
+	const dz = b.depth - a.depth;
+	const nx = - dy / chord, ny = dx / chord;
+	const mx = ( a.x + b.x ) / 2, my = ( a.y + b.y ) / 2;
 
-	// longueur horizontale necessaire pour tenir la pente maximale
-	const need = dz / ( MAX_SLOPE * TEXEL );        // en texels
-	const ratio = Math.max( 1, need / Math.max( chord, 1e-3 ) );
+	// PROFIL DE DESCENTE, PARAMETRE PAR LA LONGUEUR D'ARC.
+	// Le parametrer par t etait une impasse : la vitesse horizontale d'une
+	// Bezier quadratique en son milieu vaut EXACTEMENT la corde, quel que soit
+	// le bombement (B'(1/2) = B - A). Bomber n'y ralentit donc jamais la
+	// descente — et c'est precisement la que le profil en S plongeait le plus.
+	// La dichotomie ne pouvait pas converger : elle saturait son plafond en
+	// laissant la moitie des tunnels a 40 degres. Repartie sur la longueur
+	// reelle, la pente devient quasi constante et le bombement la reduit
+	// effectivement.
+	// L'assouplissement final ne pese plus que 1,125 au milieu (contre 1,25),
+	// assez pour deboucher a plat dans les chambres sans creuser d'a-pic.
+	const ease = ( u ) => 0.75 * u + 0.25 * u * u * ( 3 - 2 * u );
 
-	// angle balaye par l'arc : 0 si la ligne droite suffit, jusqu'a ~2,6 rad
-	// (presque un demi-tour) pour les descentes les plus raides
-	const sweep = Math.min( 2.6, 2 * Math.acos( 1 / Math.min( ratio, 4 ) ) )
-		* ( vdc( seed + 1, 2 ) < 0.5 ? 1 : - 1 );
+	const at = ( bulge, t ) => {
 
-	const pts = [];
-	const wig = 0.10 + 0.10 * vdc( seed + 1, 7 );   // sinuosite residuelle
+		const u = 1 - t;
+		const px = mx + nx * bulge, py = my + ny * bulge;
+		return {
+			x: u * u * a.x + 2 * u * t * px + t * t * b.x,
+			y: u * u * a.y + 2 * u * t * py + t * t * b.y,
+		};
 
-	if ( Math.abs( sweep ) < 0.05 || chord < 1e-3 ) {
+	};
 
-		// assez plat : segment presque droit, juste ondule
-		const px = - dy / ( chord || 1 ), py = dx / ( chord || 1 );
-		for ( let i = 0; i <= steps; i ++ ) {
+	const NS = 48;
 
-			const t = i / steps;
-			const w = Math.sin( t * Math.PI * 2 + seed ) * chord * wig * 0.35;
-			pts.push( {
-				x: a.x + dx * t + px * w,
-				y: a.y + dy * t + py * w,
-				depth: a.depth + ( b.depth - a.depth ) * ( 0.5 * t + 0.5 * t * t * ( 3 - 2 * t ) ),
-			} );
+	const arcTable = ( bulge ) => {
+
+		const q = [], cum = [ 0 ];
+		for ( let i = 0; i <= NS; i ++ ) q.push( at( bulge, i / NS ) );
+		for ( let i = 1; i <= NS; i ++ )
+			cum.push( cum[ i - 1 ] + Math.hypot( q[ i ].x - q[ i - 1 ].x, q[ i ].y - q[ i - 1 ].y ) );
+		return { cum, L: Math.max( cum[ NS ], 1e-6 ) };
+
+	};
+
+	const worstSlope = ( bulge ) => {
+
+		const { cum, L } = arcTable( bulge );
+		let w = 0;
+		for ( let i = 1; i <= NS; i ++ ) {
+
+			const h = ( cum[ i ] - cum[ i - 1 ] ) * TEXEL;
+			const dd = Math.abs( dz ) * ( ease( cum[ i ] / L ) - ease( cum[ i - 1 ] / L ) );
+			w = Math.max( w, dd / Math.max( h, 1e-6 ) );
 
 		}
-		return pts;
+		return w;
+
+	};
+
+	let bulge = 0;
+
+	if ( worstSlope( 0 ) > MAX_SLOPE ) {
+
+		// Le bombement reste PLAFONNE. Sans plafond la dichotomie trouve toujours
+		// une solution, au prix de tunnels qui s'echappent a deux fois le rayon du
+		// nid (mesure : 42 unites pour un nid de 20).
+		let lo = 0, hi = chord * 1.25;
+		if ( worstSlope( hi ) <= MAX_SLOPE ) {
+
+			for ( let i = 0; i < 22; i ++ ) {
+
+				const m = ( lo + hi ) / 2;
+				if ( worstSlope( m ) > MAX_SLOPE ) lo = m; else hi = m;
+
+			}
+
+		}
+		bulge = hi;
 
 	}
 
-	// --- arc de cercle passant par a et b, balayant `sweep` ---
-	const half = sweep / 2;
-	const R = chord / ( 2 * Math.sin( Math.abs( half ) ) );
-	const mx = ( a.x + b.x ) / 2, my = ( a.y + b.y ) / 2;
-	const nx = - dy / chord, ny = dx / chord;
-	const h = R * Math.cos( half );                 // distance centre <-> corde
-	const sgn = Math.sign( sweep );
-	const cx = mx - nx * h * sgn, cy = my - ny * h * sgn;
+	// le cote du bombement alterne : deux tunnels partant du meme puits ne se
+	// superposent pas, et le nid prend son allure de colimacon
+	bulge *= vdc( seed + 1, 2 ) < 0.5 ? 1 : - 1;
 
-	const a0 = Math.atan2( a.y - cy, a.x - cx );
-
-	// La sinuosite est un decalage ABSOLU (en texels), jamais un facteur sur le
-	// rayon : un arc presque droit a un rayon enorme, et un facteur y devenait un
-	// ecart de plusieurs dizaines de texels. Elle s'annule aux deux extremites
-	// pour que le tunnel arrive bien dans ses chambres.
-	const amp = chord * wig * 0.12;
+	// sinuosite residuelle. Le facteur sin(pi t) l'ANNULE aux deux bouts : sans
+	// lui le chemin arrivait jusqu'a huit texels a cote de sa chambre.
+	const wig = 0.10 + 0.10 * vdc( seed + 1, 7 );
+	const { cum, L } = arcTable( bulge );
+	const pts = [];
 
 	for ( let i = 0; i <= steps; i ++ ) {
 
 		const t = i / steps;
-		const ang = a0 + sweep * t;
-		const w = Math.sin( t * Math.PI * 3 + seed ) * amp * Math.sin( t * Math.PI );
-		pts.push( {
-			x: cx + Math.cos( ang ) * ( R + w ),
-			y: cy + Math.sin( ang ) * ( R + w ),
-			depth: a.depth + ( b.depth - a.depth ) * ( 0.5 * t + 0.5 * t * t * ( 3 - 2 * t ) ),
-		} );
+		const q = at( bulge, t );
+
+		// abscisse curviligne au parametre t, lue dans la table cumulative
+		const f = t * NS, j = Math.min( NS - 1, Math.floor( f ) );
+		const sigma = ( cum[ j ] + ( cum[ j + 1 ] - cum[ j ] ) * ( f - j ) ) / L;
+
+		const w = Math.sin( t * Math.PI * 3 + seed ) * chord * wig * 0.12 * Math.sin( t * Math.PI );
+		pts.push( { x: q.x + nx * w, y: q.y + ny * w, depth: a.depth + dz * ease( sigma ) } );
 
 	}
 
 	return pts;
 
 }
+
 
 // ---------------------------------------------------------------------------
 // CREUSAGE
