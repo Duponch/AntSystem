@@ -42,7 +42,8 @@
 import {
 	Fn, If, instanceIndex, uniform, instancedArray, textureLoad,
 	uint, int, float, vec2, vec4, ivec2,
-	abs, min, clamp, length, select, PI2, atomicAdd, atomicStore,
+	abs, min, clamp, length, select, PI2, atomicAdd, atomicStore, atomicLoad,
+	hash, fract,
 } from 'three/tsl';
 
 import { params, gfx, TEXEL, MAX_ANTS } from './config.js';
@@ -79,18 +80,13 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 	const counters = instancedArray( 16, 'uint' ).toAtomic();
 	const evCursor = instancedArray( 1, 'uint' ).toAtomic();
 	const events = instancedArray( N_EVENTS, 'vec4' );
+	// contexte de l'événement : (x, y texels, goal+node·8, nappe) — pour
+	// LOCALISER les toupies/blocages dans le nid (diagnostic, pas juste compter)
+	const evExtra = instancedArray( N_EVENTS, 'vec4' );
 
 	const uDt = uniform( 1 / 60 );
 	const uSimTime = uniform( 0 );
 	const uDepthMax = uniform( 18 );
-
-	function emitEvent( type, magnitude ) {
-
-		const c = atomicAdd( evCursor.element( 0 ), uint( 1 ) ).mod( uint( N_EVENTS ) );
-		events.element( c ).assign(
-			vec4( instanceIndex.toFloat(), float( type ), magnitude, uSimTime ) );
-
-	}
 
 	const kWatch = Fn( () => {
 
@@ -100,9 +96,14 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			const state = st.bitAnd( uint( 7 ) );
 			const alive = state.lessThan( uint( 2 ) );
 			const under = st.bitAnd( uint( 8 ) ).notEqual( uint( 0 ) );
+			const caste = sim.casteOf( instanceIndex );
 			const a = sim.antData.element( instanceIndex );
 			const pos = a.xy;
 			const yaw = a.z;
+			// contexte pour la localisation des événements
+			const goalE = st.shiftRight( uint( 4 ) ).bitAnd( uint( 7 ) ).toFloat();
+			const nodeE = st.shiftRight( uint( 7 ) ).bitAnd( uint( 127 ) ).toFloat();
+			const layerE = st.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) ).toFloat();
 			const prev = prevData.element( instanceIndex ).toVar();
 			const acc = spinAcc.element( instanceIndex ).toVar();
 			const fl = acc.w.toUint().toVar();          // drapeaux en entier
@@ -111,6 +112,16 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			// souterraine — un passage surface→nid ne peut pas être pris pour
 			// une téléportation (pas de plancher de référence)
 			const floorNow = float( - 999 ).toVar();
+
+			function emitEvent( type, magnitude ) {
+
+				const c = atomicAdd( evCursor.element( 0 ), uint( 1 ) ).mod( uint( N_EVENTS ) );
+				events.element( c ).assign(
+					vec4( instanceIndex.toFloat(), float( type ), magnitude, uSimTime ) );
+				evExtra.element( c ).assign(
+					vec4( pos.x, pos.y, goalE.add( nodeE.mul( 8 ) ), layerE ) );
+
+			}
 
 			If( alive.and( under ), () => {
 
@@ -185,7 +196,24 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			} );
 
 			// --- 4/5 · TOUPIE & BLOCAGE : fenêtre glissante, toutes vivantes ---
-			If( alive, () => {
+			// MAIS PAS PENDANT LE REPOS : la sim a un cycle paresseux par DESIGN
+			// (simulation.js — jusqu'à ~80 % du temps immobile) ; une fourmi qui
+			// dort n'est pas une fourmi bloquée. Le cycle est recomputé ici à
+			// l'identique (mêmes hashs stables, sans aucun état) et la fenêtre
+			// de mesure est gelée pendant la sieste.
+			const period = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
+			const phaseR = fract( sim.u.simTime.add(
+				hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( period ) );
+			const lazy = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( sim.u.lazyFrac );
+			const duty = select( lazy, float( 0.82 ),
+				hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( sim.u.lazyFrac ).mul( 0.5 ) );
+			const qFed = atomicLoad( sim.stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
+			const hungryR = sim.antVital.element( instanceIndex ).z.lessThan( sim.u.hungryHome );
+			const mayRest = state.equal( uint( 1 ) ).not()
+				.and( hungryR.not() ).and( caste.isNurse.not().or( qFed ) );
+			const resting = phaseR.lessThan( duty ).and( mayRest );
+
+			If( alive.and( resting.not() ), () => {
 
 				If( prevOk, () => {
 
@@ -311,14 +339,18 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		const c = new Uint32Array( await renderer.getArrayBufferAsync( counters.value ) );
 		const cur = new Uint32Array( await renderer.getArrayBufferAsync( evCursor.value ) )[ 0 ];
 		const ev = new Float32Array( await renderer.getArrayBufferAsync( events.value ) );
+		const ex = new Float32Array( await renderer.getArrayBufferAsync( evExtra.value ) );
 		const n = Math.min( cur, N_EVENTS );
 		const list = [];
 
 		for ( let i = 0; i < n; i ++ ) {
 
+			const gn = Math.round( ex[ i * 4 + 2 ] );
 			list.push( { ant: Math.round( ev[ i * 4 ] ), type: Math.round( ev[ i * 4 + 1 ] ),
 				typeNom: EV_NOMS[ Math.round( ev[ i * 4 + 1 ] ) ] || '?',
-				value: + ev[ i * 4 + 2 ].toFixed( 2 ), t: + ev[ i * 4 + 3 ].toFixed( 1 ) } );
+				value: + ev[ i * 4 + 2 ].toFixed( 2 ), t: + ev[ i * 4 + 3 ].toFixed( 1 ),
+				x: + ex[ i * 4 ].toFixed( 1 ), y: + ex[ i * 4 + 1 ].toFixed( 1 ),
+				goal: gn % 8, node: Math.floor( gn / 8 ), layer: Math.round( ex[ i * 4 + 3 ] ) } );
 
 		}
 
@@ -416,8 +448,10 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 					// (la reine, sédentaire, en est exempte ; 20 s de grâce)
 					if ( ! isQueen && lived > 20 && t.path < 5 ) issues.push( `immobile (${ t.path.toFixed( 1 ) } u)` );
 					// « elle fait quelque chose » — hors reine, une fourmi active
-					// change d'état au moins une fois en 4 min (sinon robot figé)
-					if ( ! isQueen && lived > 200 && t.states.size < 2 ) issues.push( 'jamais changé d\'état' );
+					// change d'état au moins une fois en 4 min. Une éclaireuse qui
+					// explore 300 s sans trouver est saine : le critère ne mord que
+					// si le chemin est dérisoire (robot figé, sinon simple patience)
+					if ( ! isQueen && lived > 200 && t.states.size < 2 && t.path < 50 ) issues.push( 'jamais changé d\'état' );
 					// « sa mort s'explique » — faim ou venin, jamais « gratuitement »
 					if ( t.dead >= 0 && t.deathEnergy > 0.05 ) issues.push( `morte énergie=${ t.deathEnergy.toFixed( 2 ) }` );
 

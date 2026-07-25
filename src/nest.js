@@ -337,6 +337,46 @@ export function tunnelPath( a, b, seed, steps = 10 ) {
 // La lèvre du biseau est RELATIVE à la profondeur, jamais absolue : une lèvre
 // fixe à −0,4 sur une chambre à −60 transformerait chaque chambre profonde en
 // puits de mine de 60 unités de dénivelé sur 6 texels.
+// ---------------------------------------------------------------------------
+// ÉCRITURE DE CELLULE AVEC CANAUX-SLOTS. Les 4 canaux d'une colonne ne sont
+// pas « les 4 niveaux » mais 4 PLACES pour des planchers superposés : quand
+// deux structures à des profondeurs très différentes se croisent sur le même
+// canal, garder systématiquement la plus profonde (l'ancien « min wins »)
+// SECTIONNAIT la plus haute — falaise infranchissable, fourmis enfermées
+// dans leur loge (mesuré : rampes coupées par des marches de 1,4 à 5 u).
+//
+// Règle d'écriture à la colonne (base = index du premier canal) :
+//   • canal vide, ou valeurs à moins de MERGE_GAP (jonction, planchers qui se
+//     rejoignent en douceur) → on écrit/merge sur le canal demandé ;
+//   • sinon, conflit de hauteur → la cavité part sur un AUTRE canal libre de
+//     la colonne (la continuité fait adopter le canal aux fourmis d'elle-même,
+//     voir simulation.js — les canaux sont interchangeables) ;
+//   • aucun canal libre → on garde le plus profond (rare, falaise assumée).
+// MERGE_GAP est volontairement JUSTE SOUS la hauteur de marche des fourmis
+// (0,75 u, simulation.js) : une jonction mergée reste franchissable.
+const MERGE_GAP = 0.7;
+
+function carveCell( field, base, y, layer ) {
+
+	const cur = field[ base + layer ];
+
+	if ( cur === 0 ) { field[ base + layer ] = y; return; }
+	if ( Math.abs( cur - y ) <= MERGE_GAP ) { field[ base + layer ] = Math.min( cur, y ); return; }
+
+	for ( let l = 0; l < 4; l ++ ) {
+
+		if ( l === layer ) continue;
+		const c2 = field[ base + l ];
+		if ( c2 === 0 ) { field[ base + l ] = y; return; }
+		if ( Math.abs( c2 - y ) <= MERGE_GAP ) { field[ base + l ] = Math.min( c2, y ); return; }
+
+	}
+
+	// aucun canal libre : plus profond gagne (comportement historique)
+	if ( y < cur ) field[ base + layer ] = y;
+
+}
+
 function carveDisc( field, ox, oy, X, Y, R, depth, layer ) {
 
 	const bevel = 3 + 0.06 * Math.abs( depth ) / TEXEL * TEXEL;
@@ -360,8 +400,8 @@ function carveDisc( field, ox, oy, X, Y, R, depth, layer ) {
 			const d = Math.sqrt( d2 );
 			const t = Math.max( 0, ( d - ( R - 1.5 ) ) / ( bevel + 1.5 ) );
 			const y = depth + ( lip - depth ) * Math.min( 1, t ) ** 0.8;
-			const i = ( row + gx ) * 4 + layer;
-			if ( field[ i ] === 0 || y < field[ i ] ) field[ i ] = y;
+			const i = ( row + gx ) * 4;
+			carveCell( field, i, y, layer );
 
 		}
 
@@ -401,8 +441,8 @@ function carveTube( field, ox, oy, a, b, w, layer ) {
 			const lip = depth + Math.min( 1.0, 0.06 * Math.abs( depth ) );
 			const t = Math.max( 0, ( d - ( w - 1 ) ) / ( bevel + 1 ) );
 			const y = depth + ( lip - depth ) * Math.min( 1, t ) ** 0.8;
-			const i = ( row + gx ) * 4 + layer;
-			if ( field[ i ] === 0 || y < field[ i ] ) field[ i ] = y;
+			const i = ( row + gx ) * 4;
+			carveCell( field, i, y, layer );
 
 		}
 
@@ -612,5 +652,150 @@ export function nestParams() {
 		depthMax: params.nestDepth,
 		tunnelW: params.nestTunnelW,
 	};
+
+}
+
+// ---------------------------------------------------------------------------
+// CHAMP DE NAVIGATION (bake à chaque changement de nid). Pour chaque objectif
+// (grenier, reine, couvain, sortie), la distance en texels de chaque colonne
+// à l'objectif, calculée par BFS sur le graphe des colonnes PRATICABLES :
+// une arête entre deux colonnes voisines n'existe que si leurs cavités sont
+// à hauteur de marche (≤ ANT_STEP_H, la règle EXACTE du mouvement des
+// fourmis, simulation.js). La fourmi ne « devine » plus sa route en ligne
+// droite : elle descend le gradient du champ — poches-pièges et waypoints
+// mal orientés disparaissent structurellement.
+//
+// La distance est PAR (cellule, canal) : une fourmi au-dessus d'une chambre
+// sur une autre nappe ne lit PAS la distance de la chambre (sinon elle y
+// tournerait en rond, incapable d'y descendre) mais celle de SA nappe — le
+// BFS ayant déjà encodé les changements de nappe continus, suivre le gradient
+// la fait transiter par les jonctions d'elle-même.
+// Retour : 4 tableaux (un par objectif : grenier, reine, couvain, sortie),
+// chacun DEPTH_SIZE² × 4 (un float par canal de colonne).
+export const ANT_STEP_H = 0.75;    // hauteur de marche (u) — partagée avec la sim
+export const NAV_UNREACH = 6e4;
+
+export function bakeNavField( nest ) {
+
+	const N = DEPTH_SIZE;
+	const { field, nodes, GOAL_NODE } = nest;
+	const out = [];
+	const dist = new Int32Array( N * N * 4 );          // distance par (cellule, canal)
+	const queue = new Int32Array( N * N * 4 );
+
+	// objectifs : index de nœud ; la sortie vise le nœud d'entrée (0)
+	const goalNodes = [ GOAL_NODE[ 1 ], GOAL_NODE[ 2 ], GOAL_NODE[ 3 ], 0 ];
+
+	// voisinage 8-connexe ; un biais diagonal exige qu'au moins un
+	// intermédiaire orthogonal soit franchissable (règle du coin, comme le
+	// mouvement par sous-pas des fourmis)
+	const DIRS = [ [ 1, 0 ], [ - 1, 0 ], [ 0, 1 ], [ 0, - 1 ],
+		[ 1, 1 ], [ 1, - 1 ], [ - 1, 1 ], [ - 1, - 1 ] ];
+
+	for ( let g = 0; g < 4; g ++ ) {
+
+		dist.fill( - 1 );
+		let head = 0, tail = 0;
+		const gn = nodes[ goalNodes[ g ] ];
+		const sx = Math.round( gn.x - nest.origin.x ), sy = Math.round( gn.y - nest.origin.y );
+
+		for ( let c = 0; c < 4; c ++ ) {
+
+			const i = ( sy * N + sx ) * 4 + c;
+			if ( sx >= 0 && sy >= 0 && sx < N && sy < N && field[ i ] < - 1e-4 ) {
+
+				dist[ i ] = 0;
+				queue[ tail ++ ] = i;
+
+			}
+
+		}
+
+		while ( head < tail ) {
+
+			const cur = queue[ head ++ ];
+			const cx = ( ( cur >> 2 ) % N ), cy = Math.floor( ( cur >> 2 ) / N );
+			const cc = cur & 3;
+			const cd = field[ cur ];
+			const nd = dist[ cur ] + 1;
+
+			// CHANGEMENT DE CANAL DANS LA MÊME CELLULE : la fourmi adopte la
+			// cavité la plus proche en hauteur (simulation.js) — le BFS doit
+			// modéliser ces bascules, sinon des réseaux entiers reliés par une
+			// jonction dans une même colonne (puits → tube d'un autre canal)
+			// sont marqués inaccessibles
+			for ( let c = 0; c < 4; c ++ ) {
+
+				if ( c === cc ) continue;
+				const ni = cur - cc + c;
+				if ( field[ ni ] >= - 1e-4 || dist[ ni ] >= 0 ) continue;
+				if ( Math.abs( field[ ni ] - cd ) > ANT_STEP_H ) continue;
+				dist[ ni ] = nd;
+				queue[ tail ++ ] = ni;
+
+			}
+
+			for ( const [ dx, dy ] of DIRS ) {
+
+				const nx = cx + dx, ny = cy + dy;
+				if ( nx < 0 || ny < 0 || nx >= N || ny >= N ) continue;
+
+				// règle du coin pour les diagonales : un intermédiaire
+				// orthogonal praticable à hauteur de marche est exigé
+				if ( dx !== 0 && dy !== 0 ) {
+
+					let okSide = false;
+
+					for ( const [ ox, oy ] of [ [ dx, 0 ], [ 0, dy ] ] ) {
+
+						const s0 = ( ( cy * N + cx + ox ) * 4 );
+						const s1 = ( ( ( cy + oy ) * N + cx + ox ) * 4 );
+
+						for ( let c0 = 0; c0 < 4 && ! okSide; c0 ++ ) {
+
+							if ( field[ s0 + c0 ] < - 1e-4 && Math.abs( field[ s0 + c0 ] - cd ) <= ANT_STEP_H ) {
+
+								for ( let c1 = 0; c1 < 4; c1 ++ ) {
+
+									if ( field[ s1 + c1 ] < - 1e-4 && Math.abs( field[ s1 + c1 ] - field[ s0 + c0 ] ) <= ANT_STEP_H ) { okSide = true; break; }
+
+								}
+
+							}
+
+						}
+
+					}
+					if ( ! okSide ) continue;
+
+				}
+
+				for ( let c = 0; c < 4; c ++ ) {
+
+					const ni = ( ny * N + nx ) * 4 + c;
+					if ( field[ ni ] >= - 1e-4 || dist[ ni ] >= 0 ) continue;
+					if ( Math.abs( field[ ni ] - cd ) > ANT_STEP_H ) continue;
+					dist[ ni ] = nd;
+					queue[ tail ++ ] = ni;
+
+				}
+
+			}
+
+		}
+
+		// export tel quel : une distance par (cellule, canal)
+		const outG = new Float32Array( N * N * 4 ).fill( NAV_UNREACH );
+
+		for ( let i = 0; i < N * N * 4; i ++ ) {
+
+			if ( dist[ i ] >= 0 ) outG[ i ] = dist[ i ];
+
+		}
+		out.push( outG );
+
+	}
+
+	return out;
 
 }

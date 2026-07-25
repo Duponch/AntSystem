@@ -27,7 +27,7 @@ import {
 import { GRID, WORLD, NEST, MAX_BROOD, params, gfx } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 import {
-	buildNest, growNest, nestParams, nestBudget, quantK,
+	buildNest, growNest, nestParams, nestBudget, quantK, bakeNavField,
 	LAYERS, K_MAX, DEPTH_SIZE as NEST_DEPTH_SIZE, NODE_CHAMBER0, ROOM,
 } from './nest.js';
 
@@ -84,8 +84,21 @@ export function buildNestLayout() {
 	nodeTexture.minFilter = nodeTexture.magFilter = THREE.NearestFilter;
 	nodeTexture.generateMipmaps = false;
 
+	// champ de navigation : distance BFS à chaque objectif, PAR (cellule,
+	// canal) — 4 textures (grenier, reine, couvain, sortie), rebakées à chaque
+	// changement du nid (publish)
+	const navFieldData = [ 0, 1, 2, 3 ].map( () => new Float32Array( DEPTH_SIZE * DEPTH_SIZE * 4 ) );
+	const navFieldTex = navFieldData.map( ( data ) => {
+
+		const t = new THREE.DataTexture( data, DEPTH_SIZE, DEPTH_SIZE, THREE.RGBAFormat, THREE.FloatType );
+		t.minFilter = t.magFilter = THREE.NearestFilter;
+		t.generateMipmaps = false;
+		return t;
+
+	} );
+
 	const layout = {
-		depthTexture, navTexture, nodeTexture,
+		depthTexture, navTexture, nodeTexture, navFieldTex,
 		origin: nest.origin,
 		LAYERS, MAX_NODES,
 	};
@@ -119,6 +132,16 @@ export function buildNestLayout() {
 		}
 		navTexture.needsUpdate = true;
 		depthTexture.needsUpdate = true;
+
+		// champ de navigation : rebaké à chaque changement de forme du nid
+		const baked = bakeNavField( nest );
+
+		for ( let g = 0; g < 4; g ++ ) {
+
+			navFieldData[ g ].set( baked[ g ] );
+			navFieldTex[ g ].needsUpdate = true;
+
+		}
 
 		// interface consommee par le reste du projet
 		layout.nodes = nest.nodes;
