@@ -245,8 +245,9 @@ export const gfx = {
 	nestLight: 1.0,                    // lampe frontale : lisibilite des galeries
 	nestAO: 1.0,                       // occlusion ambiante derivee du champ
 	cutOffset: 0,                      // decalage du plan de coupe (unites monde)
-	nestBlend: 1.6,                    // fusion des cavites (organicite)
-	nestNoise: 0.45,                   // deformation des parois
+	nestBlend: 0.85,                   // fusion des cavites (organicite)
+	nestNoise: 0.42,                   // deformation des parois
+	nestGhost: 0.75,                   // galeries devinees a travers la tranche
 
 	// Débogage
 	debugCones: false,                 // cônes de vision des fourmis

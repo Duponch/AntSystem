@@ -35,7 +35,7 @@ import {
 	abs, min, max, clamp, length, dot, select, textureStore, mx_noise_float,
 } from 'three/tsl';
 
-import { TEXEL, NEST, GRID, WORLD } from './config.js';
+import { TEXEL, NEST, GRID, WORLD, gfx } from './config.js';
 import { K_MAX, tunnelPath } from './nest.js';
 
 // Résolution du volume. Le nid fait ~45 unités de large pour ~20 de profondeur ;
@@ -68,8 +68,8 @@ export function createNestVolume( { renderer, layout } ) {
 	const uSegCount = uniform( 0 );
 	// rayon de fusion : c'est LUI qui fait que deux chambres voisines se fondent
 	// en une poche unique aux contours mous au lieu de deux boules tangentes
-	const uBlend = uniform( 1.6 );
-	const uNoiseAmp = uniform( 0.45 );
+	const uBlend = uniform( gfx.nestBlend );
+	const uNoiseAmp = uniform( gfx.nestNoise );
 	const uNoiseFreq = uniform( 0.35 );
 
 	// primitives : allouées à la taille MAXIMALE (la longueur d'un uniformArray

@@ -362,6 +362,37 @@ async function main() {
 
 	} );
 
+	// ------------------------------------------------------------------
+	// PILOTAGE PAR URL — cadrage reproductible pour l'inspection visuelle.
+	//   ?ug=1              ouvre la vue en coupe
+	//   ?cam=x,y,z         place la caméra
+	//   ?look=x,y,z        vise ce point
+	//   ?ants=N            fixe la population
+	// Sert à obtenir exactement la même image d'une session à l'autre quand on
+	// compare un réglage graphique.
+	// ------------------------------------------------------------------
+	{
+
+		const q = new URLSearchParams( location.search );
+		const v3 = ( k ) => {
+
+			const s = q.get( k );
+			if ( ! s ) return null;
+			const a = s.split( ',' ).map( Number );
+			return a.length === 3 && a.every( Number.isFinite ) ? a : null;
+
+		};
+
+		if ( q.get( 'ants' ) ) ui.setPopulation( + q.get( 'ants' ) );
+		if ( q.get( 'ug' ) === '1' ) gfx.undergroundView = true;
+
+		const c = v3( 'cam' ), l = v3( 'look' );
+		if ( c ) camera.position.set( c[ 0 ], c[ 1 ], c[ 2 ] );
+		if ( l ) controls.target.set( l[ 0 ], l[ 1 ], l[ 2 ] );
+		if ( c || l ) controls.update();
+
+	}
+
 	// tests de cohérence de la colonie : ?test=colony ou __antsys.tests.run()
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
 

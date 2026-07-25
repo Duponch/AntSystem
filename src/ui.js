@@ -156,6 +156,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fCut.add( gfx, 'cutOffset', - 25, 25, 0.5 ).name( 'Décalage du plan de coupe' );
 	fCut.add( gfx, 'nestLight', 0, 3, 0.05 ).name( 'Lampe frontale' );
 	fCut.add( gfx, 'nestAO', 0, 1, 0.05 ).name( 'Occlusion (relief)' );
+	fCut.add( gfx, 'nestGhost', 0, 1.5, 0.05 ).name( 'Galeries en transparence' );
 	fCut.add( gfx, 'nestBlend', 0.3, 4, 0.1 ).name( 'Fusion des cavités' )
 		.onFinishChange( ( v ) => { nestVolume.u.blend.value = v; nestVolume.rebuild(); } );
 	fCut.add( gfx, 'nestNoise', 0, 1.5, 0.05 ).name( 'Irrégularité des parois' )

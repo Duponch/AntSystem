@@ -26,13 +26,14 @@ import {
 	Fn, If, instanceIndex, uniform, varyingProperty, storage, instancedArray,
 	attribute, positionLocal, cameraPosition,
 	vec2, vec3, vec4, float, int, ivec2, uint,
-	fract, floor, mix, hash, select, min, abs, normalize, cross, smoothstep, uv,
+	fract, floor, mix, hash, select, min, abs, length, normalize, cross, smoothstep, uv,
 	textureLoad, atomicAdd, atomicStore, atomicLoad, clamp,
 } from 'three/tsl';
 
 import { loadAntVAT, buildLodGeometry } from './vat.js';
 import { createPose, qrot } from './pose.js';
 import { GRID, WORLD, MAX_ANTS, params, gfx } from './config.js';
+import { uPitR, uCutOn, uCutN, uCutP } from './environment.js';
 
 const LOD_DIST = [ 16, 42 ];          // limites LOD0→1 et LOD1→2 (unités monde)
 const CULL_MARGIN = 1.6;              // rayon de sécurité autour d'une fourmi
@@ -104,7 +105,15 @@ export async function createAnts( sim ) {
 			// la reine (index 0, colonie active) a son mesh dédié ; une fourmi
 			// RAGDOLLÉE est dessinée par son propre pipeline (sinon elle
 			// apparaîtrait deux fois)
-			const hidden = P.under.and( uReveal.lessThan( 0.01 ) );
+			// Vue fermée → les souterraines sont invisibles sous le sol opaque.
+			// Vue en coupe → ce sont les fourmis de SURFACE qui doivent
+			// disparaître du côté découpé : sinon elles marchent dans le vide
+			// au-dessus de la tranche, ce qui ruine la lecture de la coupe.
+			const inCut = uCutOn.greaterThan( 0.5 ).and(
+				P.world.xz.sub( uCutP.xz ).dot( uCutN.xz ).greaterThan( - 1 )
+					.or( length( P.world.xz ).lessThan( uPitR ) ) );
+			const hidden = P.under.and( uReveal.lessThan( 0.01 ) )
+				.or( P.under.not().and( inCut ) );
 
 			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
 

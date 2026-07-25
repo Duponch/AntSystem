@@ -23,6 +23,7 @@ import { loadVATMulti } from './vat.js';
 import { qrot } from './pose.js';
 import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
+import { cutHidden } from './environment.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
 const CONTACT_ANIM = 2.6;              // corps→proie estimé sous lequel joue l'anim d'attaque (« au contact »)
@@ -149,7 +150,12 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 		// de lui que l'araignée tangue, roule et bascule en mourant
 		const pivot = vec3( 0, PIVOT_H, 0 );
 
-		return qrot( quat, local.sub( pivot ).mul( pose.w ) ).add( pose.xyz );
+		const world = qrot( quat, local.sub( pivot ).mul( pose.w ) ).add( pose.xyz );
+
+		// en vue en coupe, une araignee de surface situee devant le plan doit
+		// disparaitre avec le terrain qui la portait : on effondre sa geometrie
+		// loin sous le monde plutot que de la discarder (zero cout fragment)
+		return select( cutHidden( pose.xz, pose.y ), vec3( 0, - 1e5, 0 ), world );
 
 	} )();
 

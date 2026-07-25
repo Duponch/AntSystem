@@ -24,6 +24,27 @@ export const uShowWalls = uniform( 0 );
 // et le socle discardent leurs fragments dans ce disque autour du nid —
 // animé par underground.js
 export const uPitR = uniform( 0 );
+// PLAN DE COUPE. Le disque de la fosse ne suffit pas : pour voir une TRANCHE
+// verticale, il faut aussi retirer le terrain situe ENTRE la camera et le nid,
+// sinon il masque toute la moitie basse de la coupe. C'est un demi-espace, pas
+// un disque. Pilote par underground.js, qui l'oriente vers la camera.
+export const uCutOn = uniform( 0 );
+export const uCutN = uniform( new THREE.Vector3( 0, 0, 1 ) );
+export const uCutP = uniform( new THREE.Vector3() );
+
+// vrai devant le plan (cote camera) : ce fragment doit disparaitre
+export const cutFront = ( wxz ) => uCutOn.greaterThan( 0.5 ).and(
+	wxz.sub( uCutP.xz ).dot( uCutN.xz ).greaterThan( 0 ) );
+
+// CREATURE DE SURFACE A MASQUER EN VUE EN COUPE. Le sol devant le plan est
+// retire ; une araignee ou un cadavre qui s'y trouve resterait plante en l'air
+// devant la tranche. Meme critere que pour les fourmis, plus une garde sur la
+// hauteur pour ne jamais escamoter ce qui se trouve DANS le nid.
+export const cutHidden = ( wxz, wy ) => uCutOn.greaterThan( 0.5 )
+	.and( wy.greaterThan( - 0.6 ) )
+	.and( wxz.sub( uCutP.xz ).dot( uCutN.xz ).greaterThan( - 1 )
+		.or( length( wxz ).lessThan( uPitR ) ) );
+
 export const uGroundA = uniform( new THREE.Color( gfx.groundColorA ) );
 export const uGroundB = uniform( new THREE.Color( gfx.groundColorB ) );
 export const uFoodColor = uniform( new THREE.Color( gfx.foodColor ) );
@@ -109,7 +130,7 @@ export async function createEnvironment( scene, sim ) {
 
 		// vue souterraine : le disque de la fosse est découpé (le nid est au
 		// centre du monde — même origine que la grille)
-		Discard( length( positionWorld.xz ).lessThan( uPitR ) );
+		Discard( length( positionWorld.xz ).lessThan( uPitR ).or( cutFront( positionWorld.xz ) ) );
 
 		return groundAlbedo( positionWorld.xz, fieldNode );
 
@@ -127,7 +148,7 @@ export async function createEnvironment( scene, sim ) {
 	soilMat.colorNode = Fn( () => {
 
 		// même découpe que le sol : la fosse traverse l'épaisseur de terre
-		Discard( length( positionWorld.xz ).lessThan( uPitR ) );
+		Discard( length( positionWorld.xz ).lessThan( uPitR ).or( cutFront( positionWorld.xz ) ) );
 
 		// strates de terre subtiles
 		const strata = mx_noise_float( positionWorld.xz.mul( 0.25 ).add( positionWorld.y ) )
