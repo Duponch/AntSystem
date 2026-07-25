@@ -30,7 +30,7 @@ import {
 	textureLoad, atomicAdd, atomicStore, atomicLoad, clamp,
 } from 'three/tsl';
 
-import { loadAntVAT, buildLodGeometry } from './vat.js';
+import { loadAntCasteVAT, buildLodGeometry } from './vat.js';
 import { createPose, qrot } from './pose.js';
 import { GRID, WORLD, MAX_ANTS, params, gfx } from './config.js';
 
@@ -39,13 +39,86 @@ const CULL_MARGIN = 1.6;              // rayon de sécurité autour d'une fourmi
 
 export async function createAnts( sim ) {
 
-	const vat = await loadAntVAT( '/AntRigged.glb', { frames: 20, targetLength: 0.95 } );
+	const vat = await loadAntCasteVAT(
+		'/AntWorkerRigged.glb', '/AntSoldierRigged.glb',
+		{ fps: 30, targetLength: 0.95 },
+	);
+	sim.u.soldierAttackDuration.value = vat.clips.soldierAttack.duration;
 
 	// passe de pose : la source unique de vérité du rendu
 	const pose = createPose( sim, vat );
 	const antPose = pose.antPose;
 	const uPivot = pose.u.pivotY;
+	const uSoldierPivot = pose.u.soldierPivotY;
 	const uPhysOn = sim.u.physOn;
+
+	// Constantes de l'atlas unique. Les selections ci-dessous sont des noeuds
+	// TSL : elles ne creent ni texture ni draw supplementaire.
+	const workerModel = vat.models.worker;
+	const soldierModel = vat.models.soldier;
+	const workerWalk = vat.clips.workerWalk;
+	const soldierWalk = vat.clips.soldierWalk;
+	const soldierAttack = vat.clips.soldierAttack;
+	const workerWalkOffset = int( workerWalk.offset );
+	const soldierWalkOffset = int( soldierWalk.offset );
+	const soldierAttackOffset = int( soldierAttack.offset );
+	const workerWalkFrames = int( workerWalk.frames );
+	const soldierWalkFrames = int( soldierWalk.frames );
+	const soldierAttackFrames = int( soldierAttack.frames );
+	const workerWalkFramesF = float( workerWalk.frames );
+	const soldierWalkFramesF = float( soldierWalk.frames );
+	const soldierAttackFramesF = float( soldierAttack.frames );
+	const workerDeathRow = int( workerModel.deathRow );
+	const soldierDeathRow = int( soldierModel.deathRow );
+	const workerHeight = float( workerModel.bounds.height );
+	const soldierHeight = float( soldierModel.bounds.height );
+	const workerHeadZ = float( workerModel.bounds.headZ );
+	const soldierHeadZ = float( soldierModel.bounds.headZ );
+
+	const modelFor = ( P ) => {
+
+		// caste est un float transporte par antPose ; la marge evite de dependre
+		// d'une egalite flottante. La reine reste explicitement une ouvriere.
+		const soldier = abs( P.caste.sub( 1 ) ).lessThan( 0.5 ).and( P.isQueen.not() );
+		return {
+			soldier,
+			pivot: select( soldier, uSoldierPivot, uPivot ),
+			height: select( soldier, soldierHeight, workerHeight ),
+			headZ: select( soldier, soldierHeadZ, workerHeadZ ),
+			walkOffset: select( soldier, soldierWalkOffset, workerWalkOffset ),
+			walkFrames: select( soldier, soldierWalkFrames, workerWalkFrames ),
+			walkFramesF: select( soldier, soldierWalkFramesF, workerWalkFramesF ),
+			deathRow: select( soldier, soldierDeathRow, workerDeathRow ),
+		};
+
+	};
+
+	const clipFor = ( P ) => {
+
+		const model = modelFor( P );
+		const attack = model.soldier.and( P.attacking );
+		return {
+			...model,
+			attack,
+			offset: select( attack, soldierAttackOffset, model.walkOffset ),
+			frames: select( attack, soldierAttackFrames, model.walkFrames ),
+			framesF: select( attack, soldierAttackFramesF, model.walkFramesF ),
+		};
+
+	};
+
+	// Retourne les deux lignes contigues d'un clip, avec wrap LOCAL a ce clip.
+	const clipFrameRows = ( clip, cycle ) => {
+
+		const ff = fract( cycle ).mul( clip.framesF );
+		const local0 = floor( ff ).toInt();
+		return {
+			ff,
+			row0: clip.offset.add( local0 ),
+			row1: clip.offset.add( local0.add( 1 ).mod( clip.frames ) ),
+		};
+
+	};
 
 	// trois niveaux de détail partageant la MÊME texture d'animation
 	const lod1 = buildLodGeometry( vat, 0.045 );
@@ -85,7 +158,6 @@ export async function createAnts( sim ) {
 	const uDive = uniform( 0 );
 	let phaseAcc = 0;
 
-	const framesF = float( vat.frames );
 
 	// ------------------------------------------------------------------
 	// Kernels : remise à zéro des compteurs puis classement/compaction
@@ -107,6 +179,7 @@ export async function createAnts( sim ) {
 			// RAGDOLLÉE est dessinée par son propre pipeline (sinon elle
 			// apparaîtrait deux fois)
 			const hidden = P.under.and( uDive.lessThan( 0.01 ) );
+			const model = modelFor( P );
 
 			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
 
@@ -115,7 +188,7 @@ export async function createAnts( sim ) {
 				// bascules de LOD se décalent d'une caste à l'autre)
 				const world = vec3(
 					P.world.x,
-					P.world.y.sub( uPivot.mul( P.scale ) ).add( 0.3 ),
+					P.world.y.sub( model.pivot.mul( P.scale ) ).add( 0.3 ),
 					P.world.z,
 				);
 
@@ -223,40 +296,40 @@ export async function createAnts( sim ) {
 			varyingProperty( 'float', 'vDead' ).assign( select( P.dead, 1, 0 ) );
 			varyingProperty( 'float', 'vUnder' ).assign( select( P.under, 1, 0 ) );
 
+			const clip = clipFor( P );
 			let animated;
 
 			if ( animMode === 2 ) {
 
-				animated = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+				animated = textureLoad( vat.texture, ivec2( vatIdx, clip.walkOffset ) ).xyz;
 
 			} else {
 
 				// PHASE DE DÉMARCHE : en mode physique elle est propre à chaque
 				// fourmi et pilotée par la DISTANCE qu'elle a réellement parcourue
 				// (fin du patinage) ; en mode historique c'est l'horloge globale.
-				const cycle = select( uPhysOn.greaterThan( 0.5 ),
+				const walkCycle = select( uPhysOn.greaterThan( 0.5 ),
 					P.gait, uPhase.add( hash( antId.add( uint( 1013 ) ) ) ) );
-				const ff = fract( cycle ).mul( framesF );
-				const f0 = floor( ff ).toInt();
+				const cycle = select( clip.attack, P.gait, walkCycle );
+				const frame = clipFrameRows( clip, cycle );
 
 				if ( animMode === 1 ) {
 
-					animated = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
+					animated = textureLoad( vat.texture, ivec2( vatIdx, frame.row0 ) ).xyz;
 
 				} else {
 
-					const f1 = f0.add( 1 ).mod( int( vat.frames ) );
-					const w = fract( ff );
-					const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
-					const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
-					animated = mix( p0, p1, w );
+					const p0 = textureLoad( vat.texture, ivec2( vatIdx, frame.row0 ) ).xyz;
+					const p1 = textureLoad( vat.texture, ivec2( vatIdx, frame.row1 ) ).xyz;
+					animated = mix( p0, p1, fract( frame.ff ) );
 
 				}
 
 			}
 
 			// envenimation : la marche se fige progressivement (paralysie)
-			animated = mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, P.venom );
+			animated = mix( animated,
+				textureLoad( vat.texture, ivec2( vatIdx, clip.walkOffset ) ).xyz, P.venom );
 
 			const local = animated.toVar();
 
@@ -265,8 +338,8 @@ export async function createAnts( sim ) {
 				// CADAVRE : pose de mort bakée — pattes recroquevillées sous le
 				// corps, tête et gastre retombés. En mode historique on garde la
 				// vieille pose de repos plaquée (le témoin de comparaison).
-				const rowDead = textureLoad( vat.texture, ivec2( vatIdx, int( vat.deathRow ) ) ).xyz;
-				const rowRest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+				const rowDead = textureLoad( vat.texture, ivec2( vatIdx, clip.deathRow ) ).xyz;
+				const rowRest = textureLoad( vat.texture, ivec2( vatIdx, clip.walkOffset ) ).xyz;
 				local.assign( select( uPhysOn.greaterThan( 0.5 ), rowDead, rowRest ) );
 
 			} );
@@ -276,7 +349,8 @@ export async function createAnts( sim ) {
 
 			// le corps tourne autour de son PIVOT anatomique (articulation « root »),
 			// pas autour de ses pieds : sans ça une fourmi qui bascule s'enfonce
-			return qrot( P.q, local.sub( vec3( 0, uPivot, 0 ) ).mul( P.scale ).mul( vis ) )
+			return qrot( P.q,
+				local.sub( vec3( 0, clip.pivot, 0 ) ).mul( P.scale ).mul( vis ) )
 				.add( P.world );
 
 		} )();
@@ -359,12 +433,12 @@ export async function createAnts( sim ) {
 		// vitesse et de son gabarit (le facteur magique 0,55 disparaît)
 		const cycle = select( uPhysOn.greaterThan( 0.5 ),
 			P.gait, uPhase.div( uQueenScale ).mul( 0.55 ) );
-		const ff = fract( cycle ).mul( framesF );
-		const f0 = floor( ff ).toInt();
-		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
-		const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
-		const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
-		const animated = mix( p0, p1, fract( ff ) );
+		const frame = clipFrameRows( {
+			offset: workerWalkOffset, frames: workerWalkFrames, framesF: workerWalkFramesF,
+		}, cycle );
+		const p0 = textureLoad( vat.texture, ivec2( vatIdx, frame.row0 ) ).xyz;
+		const p1 = textureLoad( vat.texture, ivec2( vatIdx, frame.row1 ) ).xyz;
+		const animated = mix( p0, p1, fract( frame.ff ) );
 
 		// gabarit royal : corps élargi, gaster étiré vers l'arrière (−z)
 		const stretch = clamp( positionLocal.z.negate().mul( 2 ), 0, 1 );
@@ -420,31 +494,32 @@ export async function createAnts( sim ) {
 
 		const antId = max( uFollowIdx, 0 ).toUint();
 		const P = pose.read( antId );
+		const clip = clipFor( P );
 
 		const vatIdx = attribute( 'vatIndex', 'float' ).toInt();
 		// la reine a sa propre cadence (voir queenMat) ; les autres le cycle commun
-		const cycleW = select( uPhysOn.greaterThan( 0.5 ),
+		const walkCycle = select( uPhysOn.greaterThan( 0.5 ),
 			P.gait, uPhase.add( hash( antId.add( uint( 1013 ) ) ) ) );
+		const cycleW = select( clip.attack, P.gait, walkCycle );
 		const cycleQ = select( uPhysOn.greaterThan( 0.5 ),
 			P.gait, uPhase.div( uQueenScale ).mul( 0.55 ) );
 		const cycle = select( P.isQueen, cycleQ, cycleW );
-		const ff = fract( cycle ).mul( framesF );
-		const f0 = floor( ff ).toInt();
-		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
-		const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
-		const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
-		const animated = mix( p0, p1, fract( ff ) )
+		const frame = clipFrameRows( clip, cycle );
+		const p0 = textureLoad( vat.texture, ivec2( vatIdx, frame.row0 ) ).xyz;
+		const p1 = textureLoad( vat.texture, ivec2( vatIdx, frame.row1 ) ).xyz;
+		const animated = mix( p0, p1, fract( frame.ff ) )
 			.toVar();
 
 		// mêmes déformations que les corps : paralysie de venin, pose de mort
-		animated.assign( mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, P.venom ) );
+		animated.assign( mix( animated,
+			textureLoad( vat.texture, ivec2( vatIdx, clip.walkOffset ) ).xyz, P.venom ) );
 
 		const local = animated.toVar();
 
 		If( P.dead, () => {
 
-			const rowDead = textureLoad( vat.texture, ivec2( vatIdx, int( vat.deathRow ) ) ).xyz;
-			const rowRest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+			const rowDead = textureLoad( vat.texture, ivec2( vatIdx, clip.deathRow ) ).xyz;
+			const rowRest = textureLoad( vat.texture, ivec2( vatIdx, clip.walkOffset ) ).xyz;
 			local.assign( select( uPhysOn.greaterThan( 0.5 ), rowDead, rowRest ) );
 
 		} );
@@ -458,11 +533,12 @@ export async function createAnts( sim ) {
 		const stretch = clamp( positionLocal.z.negate().mul( 2 ), 0, 1 );
 		const localQ = local.sub( vec3( 0, uPivot, 0 ) ).mul( uQueenScale )
 			.mul( vec3( 1.05, 1.05, float( 1 ).add( stretch.mul( 0.5 ) ) ) );
-		const localW = local.sub( vec3( 0, uPivot, 0 ) ).mul( P.scale );
+		const localW = local.sub( vec3( 0, clip.pivot, 0 ) ).mul( P.scale );
 		const world = vec3(
 			P.world.x,
-			P.world.y.sub( uPivot.mul( P.scale ) )
-				.add( uPivot.mul( select( P.isQueen, uQueenScale, P.scale ) ) ),
+			P.world.y.sub( clip.pivot.mul( P.scale ) ).add(
+				select( P.isQueen, uPivot.mul( uQueenScale ), clip.pivot.mul( P.scale ) ),
+			),
 			P.world.z,
 		);
 
@@ -498,11 +574,14 @@ export async function createAnts( sim ) {
 
 	// offset de la mandibule, exprimé RELATIVEMENT AU PIVOT (le grain est porté
 	// à la bouche : il suit donc le tangage et le roulis du corps)
-	const mouthOffset = ( scale ) => vec3(
-		float( 0 ),
-		float( vat.bounds.height * 0.62 ).sub( uPivot ),
-		float( vat.bounds.headZ * 0.9 ),
-	).mul( scale );
+	const mouthOffset = ( P ) => {
+
+		const model = modelFor( P );
+		return vec3(
+			float( 0 ), model.height.mul( 0.62 ).sub( model.pivot ), model.headZ.mul( 0.9 ),
+		).mul( P.scale );
+
+	};
 
 	grainMat.positionNode = Fn( () => {
 
@@ -510,7 +589,7 @@ export async function createAnts( sim ) {
 		// grain caché avec sa porteuse : souterraine + caméra hors du bloc
 		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
-		const offset = qrot( P.q, mouthOffset( P.scale ) );
+		const offset = qrot( P.q, mouthOffset( P ) );
 
 		return positionLocal.mul( show ).add( offset ).add( P.world );
 
@@ -542,7 +621,7 @@ export async function createAnts( sim ) {
 		const P = pose.read( instanceIndex );
 		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
 		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
-		const center = qrot( P.q, mouthOffset( P.scale ) ).add( P.world );
+		const center = qrot( P.q, mouthOffset( P ) ).add( P.world );
 
 		const view = normalize( cameraPosition.sub( center ) );
 		const right = normalize( cross( vec3( 0, 1, 0 ), view ) );
@@ -581,8 +660,9 @@ export async function createAnts( sim ) {
 
 		const P = pose.read( instanceIndex );
 		const hide = select( P.gone, float( 0 ), float( 1 ) );
+		const model = modelFor( P );
 		const center = qrot( P.q,
-			vec3( 0, float( vat.bounds.height * 0.45 ).sub( uPivot ), 0 ).mul( P.scale ) ).add( P.world );
+			vec3( 0, model.height.mul( 0.45 ).sub( model.pivot ), 0 ).mul( P.scale ) ).add( P.world );
 		return positionLocal.mul( uAntHitR.mul( P.scale ).mul( hide ) ).add( center );
 
 	} )();

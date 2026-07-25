@@ -647,3 +647,541 @@ export function buildLodGeometry( vat, cellSize ) {
 	return { geometry, triangles: outIndex.length / 3, vertices: reps.length };
 
 }
+// ---------------------------------------------------------------------------
+// VAT FOURMIS PAR CASTE : les deux rigs sont bakes dans UNE texture et partagent
+// UNE geometrie au rendu. Le changement de caste/clip ne change que la ligne VAT.
+// L'ordre est worker walk, soldier walk, soldier attack, puis leurs poses de mort.
+// ---------------------------------------------------------------------------
+export async function loadAntCasteVAT( workerUrl, soldierUrl, { fps = 30, targetLength = 0.95 } = {} ) {
+
+	if ( ! Number.isFinite( fps ) || fps <= 0 ) throw new Error( `loadAntCasteVAT : fps invalide (${fps})` );
+	if ( ! Number.isFinite( targetLength ) || targetLength <= 0 ) {
+
+		throw new Error( `loadAntCasteVAT : targetLength invalide (${targetLength})` );
+
+	}
+
+	const [ workerGltf, soldierGltf ] = await Promise.all( [
+		new GLTFLoader().loadAsync( workerUrl ),
+		new GLTFLoader().loadAsync( soldierUrl ),
+	] );
+
+	const makeContext = ( gltf, url ) => {
+
+		const root = gltf.scene;
+		root.updateMatrixWorld( true );
+		const skinned = [];
+		root.traverse( ( object ) => { if ( object.isSkinnedMesh ) skinned.push( object ); } );
+		if ( skinned.length === 0 ) throw new Error( `${url} : aucun SkinnedMesh` );
+
+		for ( let i = 0; i < skinned.length; i ++ ) {
+
+			const geometry = skinned[ i ].geometry;
+			if ( ! geometry.attributes.position ) throw new Error( `${url} : SkinnedMesh ${i} sans position` );
+			if ( ! geometry.index ) throw new Error( `${url} : SkinnedMesh ${i} non indexe` );
+			if ( ! geometry.attributes.skinIndex || ! geometry.attributes.skinWeight ) {
+
+				throw new Error( `${url} : SkinnedMesh ${i} sans skinIndex/skinWeight` );
+
+			}
+
+		}
+
+		const exactClip = ( name ) => {
+
+			const matches = gltf.animations.filter( ( clip ) => clip.name === name );
+			if ( matches.length !== 1 ) {
+
+				throw new Error(
+					`${url} : clip exact "${name}" obligatoire (trouve ${matches.length}; `
+					+ `disponibles : ${gltf.animations.map( ( clip ) => `"${clip.name}"` ).join( ', ' ) || 'aucun'})`,
+				);
+
+			}
+			if ( ! Number.isFinite( matches[ 0 ].duration ) || matches[ 0 ].duration <= 0 ) {
+
+				throw new Error( `${url} : duree invalide pour "${name}" (${matches[ 0 ].duration})` );
+
+			}
+			return matches[ 0 ];
+
+		};
+
+		const counts = skinned.map( ( mesh ) => mesh.geometry.attributes.position.count );
+		return {
+			url, root, skinned, counts, exactClip,
+			totalVerts: counts.reduce( ( sum, count ) => sum + count, 0 ),
+			mixer: new THREE.AnimationMixer( root ),
+		};
+
+	};
+
+	const worker = makeContext( workerGltf, workerUrl );
+	const soldier = makeContext( soldierGltf, soldierUrl );
+
+	// Le draw commun reutilise l'index buffer worker. Chaque colonne soldier doit
+	// donc designer strictement le meme sommet GPU, mesh par mesh.
+	if ( worker.skinned.length !== soldier.skinned.length || worker.totalVerts !== soldier.totalVerts ) {
+
+		throw new Error(
+			`Topologie worker/soldier incompatible : ${worker.skinned.length} meshes/${worker.totalVerts} sommets `
+			+ `contre ${soldier.skinned.length} meshes/${soldier.totalVerts} sommets`,
+		);
+
+	}
+
+	for ( let meshIndex = 0; meshIndex < worker.skinned.length; meshIndex ++ ) {
+
+		const workerGeometry = worker.skinned[ meshIndex ].geometry;
+		const soldierGeometry = soldier.skinned[ meshIndex ].geometry;
+		const workerCount = workerGeometry.attributes.position.count;
+		const soldierCount = soldierGeometry.attributes.position.count;
+		if ( workerCount !== soldierCount || workerGeometry.index.count !== soldierGeometry.index.count ) {
+
+			throw new Error(
+				`Topologie worker/soldier incompatible au SkinnedMesh ${meshIndex} : `
+				+ `${workerCount}/${workerGeometry.index.count} contre ${soldierCount}/${soldierGeometry.index.count}`,
+			);
+
+		}
+
+		for ( let i = 0; i < workerGeometry.index.count; i ++ ) {
+
+			const workerIndex = workerGeometry.index.getX( i );
+			const soldierIndex = soldierGeometry.index.getX( i );
+			if ( workerIndex !== soldierIndex ) {
+
+				throw new Error(
+					`Topologie worker/soldier incompatible au mesh ${meshIndex}, index ${i} : `
+					+ `${workerIndex} contre ${soldierIndex}`,
+				);
+
+			}
+
+		}
+
+	}
+
+	const workerWalkClip = worker.exactClip( 'Walk' );
+	const soldierWalkClip = soldier.exactClip( 'Walk_Soldier' );
+	const soldierAttackClip = soldier.exactClip( 'Attack_Soldier' );
+	const clips = {};
+	let rows = 0;
+
+	const addClip = ( key, clip ) => {
+
+		const frames = Math.max( 2, Math.round( clip.duration * fps ) );
+		const info = { name: clip.name, offset: rows, frames, duration: clip.duration };
+		clips[ key ] = info;
+		rows += frames;
+		return info;
+
+	};
+
+	const workerWalk = addClip( 'workerWalk', workerWalkClip );
+	const soldierWalk = addClip( 'soldierWalk', soldierWalkClip );
+	const soldierAttack = addClip( 'soldierAttack', soldierAttackClip );
+	const workerDeathRow = rows ++;
+	const soldierDeathRow = rows ++;
+	const totalVerts = worker.totalVerts;
+	const data = new Float32Array( totalVerts * rows * 4 );
+	const samplePosition = new THREE.Vector3();
+
+	const activateClip = ( context, clip, time ) => {
+
+		context.mixer.stopAllAction();
+		context.mixer.clipAction( clip ).reset().play();
+		context.mixer.setTime( time );
+		context.root.updateMatrixWorld( true );
+
+	};
+
+	const writePose = ( context, row, min = null, max = null ) => {
+
+		let column = 0;
+		for ( const mesh of context.skinned ) {
+
+			const count = mesh.geometry.attributes.position.count;
+			for ( let vertex = 0; vertex < count; vertex ++ ) {
+
+				// Meme espace que loadAntVAT : ne pas reappliquer matrixWorld ici.
+				mesh.getVertexPosition( vertex, samplePosition );
+				const offset = ( row * totalVerts + column ++ ) * 4;
+				data[ offset ] = samplePosition.x;
+				data[ offset + 1 ] = samplePosition.y;
+				data[ offset + 2 ] = samplePosition.z;
+				data[ offset + 3 ] = 1;
+				if ( min ) min.min( samplePosition );
+				if ( max ) max.max( samplePosition );
+
+			}
+
+		}
+		if ( column !== totalVerts ) throw new Error( `${context.url} : pose incomplete (${column}/${totalVerts})` );
+
+	};
+
+	const bakeClip = ( context, clip, info, collectBounds ) => {
+
+		const min = collectBounds ? new THREE.Vector3( Infinity, Infinity, Infinity ) : null;
+		const max = collectBounds ? new THREE.Vector3( - Infinity, - Infinity, - Infinity ) : null;
+		for ( let frame = 0; frame < info.frames; frame ++ ) {
+
+			// Pas d'endpoint duplique : duration appartient a la frame 0 du cycle suivant.
+			activateClip( context, clip, clip.duration * frame / info.frames );
+			writePose( context, info.offset + frame, min, max );
+
+		}
+		return collectBounds ? { min, max } : null;
+
+	};
+
+	const workerRawBounds = bakeClip( worker, workerWalkClip, workerWalk, true );
+	const soldierRawBounds = bakeClip( soldier, soldierWalkClip, soldierWalk, true );
+	bakeClip( soldier, soldierAttackClip, soldierAttack, false );
+
+	const makeBoneMap = ( context ) => {
+
+		const bones = {};
+		context.root.traverse( ( object ) => { if ( object.isBone ) bones[ object.name ] = object; } );
+		return bones;
+
+	};
+
+	const bakeDeath = ( context, walkClip, row ) => {
+
+		activateClip( context, walkClip, 0 );
+		const bones = makeBoneMap( context );
+		const allBones = [];
+		context.root.traverse( ( object ) => { if ( object.isBone ) allBones.push( object ); } );
+		// Le curl touche aussi des os sans courbe. Sauvegarder toute la pose locale
+		// garantit que ces rotations ne contaminent pas le rig extrait ensuite.
+		const localPose = allBones.map( ( bone ) => ( {
+			position: bone.position.clone(),
+			quaternion: bone.quaternion.clone(),
+			scale: bone.scale.clone(),
+		} ) );
+
+		const rootBone = bones.root || context.skinned[ 0 ].skeleton.bones[ 0 ];
+		if ( ! rootBone ) throw new Error( `${context.url} : os racine introuvable` );
+		const rootPosition = new THREE.Vector3().setFromMatrixPosition( rootBone.matrixWorld );
+		const up = new THREE.Vector3( 0, 1, 0 );
+		const radial = new THREE.Vector3();
+		const tangent = new THREE.Vector3();
+
+		for ( const side of [ 'L', 'R' ] ) {
+
+			for ( const pair of [ 'F', 'M', 'R' ] ) {
+
+				const femur = bones[ `leg${pair}${side}F` ];
+				const tibia = bones[ `leg${pair}${side}T` ];
+				if ( ! femur ) continue;
+				radial.setFromMatrixPosition( femur.matrixWorld ).sub( rootPosition );
+				radial.y = 0;
+				if ( radial.lengthSq() < 1e-9 ) radial.set( 1, 0, 0 );
+				radial.normalize();
+				tangent.crossVectors( up, radial ).normalize();
+				rotateBoneWorld( femur, tangent, DEATH_CURL.femur );
+				rotateBoneWorld( femur, up, - DEATH_CURL.inward * Math.sign( radial.x || 1 ) );
+				context.root.updateMatrixWorld( true );
+				rotateBoneWorld( tibia, tangent, DEATH_CURL.tibia );
+
+			}
+
+		}
+
+		context.root.updateMatrixWorld( true );
+		const sideAxis = new THREE.Vector3( 1, 0, 0 );
+		rotateBoneWorld( bones.head, sideAxis, DEATH_CURL.head );
+		rotateBoneWorld( bones.abdomen, sideAxis, - DEATH_CURL.abdomen );
+		context.root.updateMatrixWorld( true );
+		rotateBoneWorld( bones.antL, sideAxis, DEATH_CURL.antenna );
+		rotateBoneWorld( bones.antR, sideAxis, DEATH_CURL.antenna );
+		context.root.updateMatrixWorld( true );
+		writePose( context, row );
+
+		allBones.forEach( ( bone, i ) => {
+
+			bone.position.copy( localPose[ i ].position );
+			bone.quaternion.copy( localPose[ i ].quaternion );
+			bone.scale.copy( localPose[ i ].scale );
+
+		} );
+		context.root.updateMatrixWorld( true );
+		return rootPosition;
+
+	};
+
+	const workerRootPosition = bakeDeath( worker, workerWalkClip, workerDeathRow );
+	const soldierRootPosition = bakeDeath( soldier, soldierWalkClip, soldierDeathRow );
+
+	const makeNormalization = ( rawBounds, label ) => {
+
+		const size = new THREE.Vector3().subVectors( rawBounds.max, rawBounds.min );
+		if ( ! Number.isFinite( size.z ) || size.z <= 1e-9 ) {
+
+			throw new Error( `${label} : longueur Z nulle ou invalide` );
+
+		}
+		const scale = targetLength / size.z;
+		return {
+			min: rawBounds.min,
+			max: rawBounds.max,
+			size,
+			scale,
+			cx: ( rawBounds.min.x + rawBounds.max.x ) / 2,
+			cz: ( rawBounds.min.z + rawBounds.max.z ) / 2,
+		};
+
+	};
+
+	const workerNorm = makeNormalization( workerRawBounds, workerUrl );
+	const soldierNorm = makeNormalization( soldierRawBounds, soldierUrl );
+
+	const normalizeRows = ( normal, ranges ) => {
+
+		for ( const [ firstRow, rowCount ] of ranges ) {
+
+			for ( let row = firstRow; row < firstRow + rowCount; row ++ ) {
+
+				for ( let vertex = 0; vertex < totalVerts; vertex ++ ) {
+
+					const offset = ( row * totalVerts + vertex ) * 4;
+					data[ offset ] = ( data[ offset ] - normal.cx ) * normal.scale;
+					data[ offset + 1 ] = ( data[ offset + 1 ] - normal.min.y ) * normal.scale;
+					data[ offset + 2 ] = ( data[ offset + 2 ] - normal.cz ) * normal.scale;
+
+				}
+
+			}
+
+		}
+
+	};
+
+	// L'attaque ne contribue jamais aux bounds : elle reutilise strictement la
+	// normalisation du walk de sa caste.
+	normalizeRows( workerNorm, [ [ workerWalk.offset, workerWalk.frames ], [ workerDeathRow, 1 ] ] );
+	normalizeRows( soldierNorm, [
+		[ soldierWalk.offset, soldierWalk.frames ],
+		[ soldierAttack.offset, soldierAttack.frames ],
+		[ soldierDeathRow, 1 ],
+	] );
+
+	const copyRowXYZ = ( row ) => {
+
+		const positions = new Float32Array( totalVerts * 3 );
+		for ( let vertex = 0; vertex < totalVerts; vertex ++ ) {
+
+			const source = ( row * totalVerts + vertex ) * 4;
+			const target = vertex * 3;
+			positions[ target ] = data[ source ];
+			positions[ target + 1 ] = data[ source + 1 ];
+			positions[ target + 2 ] = data[ source + 2 ];
+
+		}
+		return positions;
+
+	};
+
+	const workerRestPosition = copyRowXYZ( workerWalk.offset );
+	const soldierRestPosition = copyRowXYZ( soldierWalk.offset );
+	const makeBounds = ( normal ) => ( {
+		length: normal.size.z * normal.scale,
+		height: normal.size.y * normal.scale,
+		width: normal.size.x * normal.scale,
+		headZ: ( normal.max.z - normal.cz ) * normal.scale,
+	} );
+
+	const buildRig = ( context, walkClip, normal, restPosition ) => {
+
+		activateClip( context, walkClip, 0 );
+		const skeleton = context.skinned[ 0 ].skeleton;
+		if ( skeleton.bones.length > 255 ) {
+
+			throw new Error( `${context.url} : ${skeleton.bones.length} os (maximum 255)` );
+
+		}
+
+		const boneNames = skeleton.bones.map( ( bone ) => bone.name );
+		const boneOf = new Uint8Array( totalVerts );
+		let column = 0;
+
+		for ( const mesh of context.skinned ) {
+
+			const skinIndex = mesh.geometry.attributes.skinIndex;
+			const skinWeight = mesh.geometry.attributes.skinWeight;
+			const count = mesh.geometry.attributes.position.count;
+			for ( let vertex = 0; vertex < count; vertex ++ ) {
+
+				let bestIndex = 0;
+				let bestWeight = - Infinity;
+				for ( let influence = 0; influence < 4; influence ++ ) {
+
+					const weight = skinWeight.getComponent( vertex, influence );
+					if ( weight > bestWeight ) {
+
+						bestWeight = weight;
+						bestIndex = skinIndex.getComponent( vertex, influence );
+
+					}
+
+				}
+				if ( bestIndex < 0 || bestIndex >= skeleton.bones.length ) {
+
+					throw new Error( `${context.url} : indice d'os ${bestIndex} invalide au sommet ${column}` );
+
+				}
+				boneOf[ column ++ ] = bestIndex;
+
+			}
+
+		}
+
+		const boneRest = new Float32Array( skeleton.bones.length * 3 );
+		const boneAxis = new Float32Array( skeleton.bones.length * 3 );
+		const boneLen = new Float32Array( skeleton.bones.length );
+		const position = new THREE.Vector3();
+		const axis = new THREE.Vector3();
+
+		skeleton.bones.forEach( ( bone, index ) => {
+
+			position.setFromMatrixPosition( bone.matrixWorld );
+			boneRest[ index * 3 ] = ( position.x - normal.cx ) * normal.scale;
+			boneRest[ index * 3 + 1 ] = ( position.y - normal.min.y ) * normal.scale;
+			boneRest[ index * 3 + 2 ] = ( position.z - normal.cz ) * normal.scale;
+			axis.set(
+				bone.matrixWorld.elements[ 4 ],
+				bone.matrixWorld.elements[ 5 ],
+				bone.matrixWorld.elements[ 6 ],
+			).normalize();
+			boneAxis[ index * 3 ] = axis.x;
+			boneAxis[ index * 3 + 1 ] = axis.y;
+			boneAxis[ index * 3 + 2 ] = axis.z;
+
+		} );
+
+		for ( let vertex = 0; vertex < totalVerts; vertex ++ ) {
+
+			const bone = boneOf[ vertex ];
+			const dx = restPosition[ vertex * 3 ] - boneRest[ bone * 3 ];
+			const dy = restPosition[ vertex * 3 + 1 ] - boneRest[ bone * 3 + 1 ];
+			const dz = restPosition[ vertex * 3 + 2 ] - boneRest[ bone * 3 + 2 ];
+			const projection = dx * boneAxis[ bone * 3 ]
+				+ dy * boneAxis[ bone * 3 + 1 ] + dz * boneAxis[ bone * 3 + 2 ];
+			if ( projection > boneLen[ bone ] ) boneLen[ bone ] = projection;
+
+		}
+
+		return {
+			boneNames, boneOf, boneRest, boneAxis, boneLen,
+			parentOf: skeleton.bones.map( ( bone ) => skeleton.bones.indexOf( bone.parent ) ),
+		};
+
+	};
+
+	const deathRestY = ( row, pivotY ) => {
+
+		const restY = [ 0, 0, 0, 0 ];
+		for ( let quadrant = 0; quadrant < 4; quadrant ++ ) {
+
+			const angle = quadrant * Math.PI / 2;
+			const cosine = Math.cos( angle );
+			const sine = Math.sin( angle );
+			let lowest = Infinity;
+			for ( let vertex = 0; vertex < totalVerts; vertex ++ ) {
+
+				const offset = ( row * totalVerts + vertex ) * 4;
+				const rolledY = data[ offset ] * sine + ( data[ offset + 1 ] - pivotY ) * cosine;
+				if ( rolledY < lowest ) lowest = rolledY;
+
+			}
+			restY[ quadrant ] = - lowest;
+
+		}
+		return restY;
+
+	};
+
+	const workerPivotY = ( workerRootPosition.y - workerNorm.min.y ) * workerNorm.scale;
+	const soldierPivotY = ( soldierRootPosition.y - soldierNorm.min.y ) * soldierNorm.scale;
+	const workerBounds = makeBounds( workerNorm );
+	const soldierBounds = makeBounds( soldierNorm );
+	const workerRestY = deathRestY( workerDeathRow, workerPivotY );
+	const soldierRestY = deathRestY( soldierDeathRow, soldierPivotY );
+	const workerRig = buildRig( worker, workerWalkClip, workerNorm, workerRestPosition );
+	const soldierRig = buildRig( soldier, soldierWalkClip, soldierNorm, soldierRestPosition );
+
+	const texture = new THREE.DataTexture(
+		toHalfRGBA( data ), totalVerts, rows, THREE.RGBAFormat, THREE.HalfFloatType,
+	);
+	texture.minFilter = THREE.NearestFilter;
+	texture.magFilter = THREE.NearestFilter;
+	texture.generateMipmaps = false;
+	texture.needsUpdate = true;
+
+	const indexCount = worker.skinned.reduce( ( sum, mesh ) => sum + mesh.geometry.index.count, 0 );
+	const index = new ( totalVerts > 65535 ? Uint32Array : Uint16Array )( indexCount );
+	let indexOffset = 0;
+	let vertexOffset = 0;
+	for ( const mesh of worker.skinned ) {
+
+		const source = mesh.geometry.index;
+		for ( let i = 0; i < source.count; i ++ ) index[ indexOffset + i ] = source.getX( i ) + vertexOffset;
+		indexOffset += source.count;
+		vertexOffset += mesh.geometry.attributes.position.count;
+
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute( 'position', new THREE.BufferAttribute( workerRestPosition, 3 ) );
+	const vatIndex = new Float32Array( totalVerts );
+	for ( let i = 0; i < totalVerts; i ++ ) vatIndex[ i ] = i;
+	geometry.setAttribute( 'vatIndex', new THREE.BufferAttribute( vatIndex, 1 ) );
+	geometry.setIndex( new THREE.BufferAttribute( index, 1 ) );
+
+	const models = {
+		worker: {
+			bounds: workerBounds,
+			pivotY: workerPivotY,
+			restY: workerRestY,
+			rig: workerRig,
+			deathRow: workerDeathRow,
+			restPosition: workerRestPosition,
+		},
+		soldier: {
+			bounds: soldierBounds,
+			pivotY: soldierPivotY,
+			restY: soldierRestY,
+			rig: soldierRig,
+			deathRow: soldierDeathRow,
+			restPosition: soldierRestPosition,
+		},
+	};
+
+	console.info(
+		`AntSystem castes VAT : ${totalVerts} sommets, ${rows} lignes `
+		+ `(worker ${workerWalk.frames}f/${workerWalk.duration.toFixed( 3 )}s, `
+		+ `soldier ${soldierWalk.frames}f/${soldierWalk.duration.toFixed( 3 )}s, `
+		+ `attack ${soldierAttack.frames}f/${soldierAttack.duration.toFixed( 3 )}s)`,
+	);
+
+	// Alias historiques : le premier niveau reste le modele ouvrier.
+	return {
+		texture,
+		geometry,
+		totalVerts,
+		counts: worker.counts,
+		bounds: workerBounds,
+		frames: workerWalk.frames,
+		cycleDuration: workerWalk.duration,
+		deathRow: workerDeathRow,
+		pivotY: workerPivotY,
+		restY: workerRestY,
+		rig: workerRig,
+		clips,
+		models,
+		rows,
+	};
+
+}

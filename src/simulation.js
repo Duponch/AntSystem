@@ -80,6 +80,9 @@ export class AntSimulation {
 			spiderCount: uniform( 0 ),                    // prédateurs actifs
 			fleeRadius: uniform( params.fleeRadius ),     // rayon de panique (texels)
 			soldierRatio: uniform( params.soldierRatio ), // part de soldates dans la colonie
+			// Durée du clip Attack_Soldier exporté (47 images à 60 fps).
+			// ants.js la remplacera par la durée lue dans l'asset.
+			soldierAttackDuration: uniform( 47 / 60 ),
 			alarmDecay: uniform( 0.35 ),                  // évanouissement de l'alarme (/s)
 			// prédation : envenimation graduée
 			bitesToKill: uniform( params.bitesToKill ),        // morsures cumulées → mort
@@ -212,9 +215,12 @@ export class AntSimulation {
 		//              araignées filtrent sur la valeur brute — voir spiders.js)
 		//   bits 4-6 = objectif souterrain (0 aucun, 1 grenier, 2 reine,
 		//              3 couvain, 4 sortie)
-		//   bits 7-10 = nœud courant du graphe (la navigation suit les arêtes :
+		//   bits 7-13 = nœud courant du graphe (la navigation suit les arêtes :
 		//              « nœud le plus proche » est AMBIGU entre deux tunnels
 		//              voisins et coinçait les fourmis contre la terre)
+		//   bits 14-15 = nappe/étage souterrain
+		//   bits 16-23 = mot de mort (culbute figée)
+		//   bit  24    = soldate en train d'attaquer (hystérésis de contact)
 		this.antState = instancedArray( MAX_ANTS, 'uint' );
 		// signes vitaux (mono-écrivain : chaque fourmi possède son élément) :
 		//   x = venin (0 = saine ; ≥ bitesToKill = morte)
@@ -346,7 +352,7 @@ export class AntSimulation {
 		// partagé avec le rendu (ants.js) : mêmes hashs, mêmes uniforms
 		this.casteOf = casteOf;
 
-		// MOT DE MORT (8 bits, rangés dans antState bits 11-18) : tiré UNE FOIS,
+		// MOT DE MORT (8 bits, rangés dans antState bits 16-23) : tiré UNE FOIS,
 		// à l'instant de la mort, il fige la culbute d'un cadavre.
 		//   bits 0-1  quadrant de repos  0 sur pattes · 1 flanc · 2 dos · 3 flanc
 		//   bits 2-3  demi-tours supplémentaires pendant la chute
@@ -572,6 +578,8 @@ export class AntSimulation {
 				// relu ici et ré-inclus au re-pack, sinon tous les cadavres
 				// repartiraient à zéro dès la frame suivante.
 				const deathWord = stPacked.shiftRight( uint( 16 ) ).bitAnd( uint( 255 ) ).toVar();
+				const wasAttacking = stPacked.shiftRight( uint( 24 ) ).bitAnd( uint( 1 ) )
+					.notEqual( uint( 0 ) );
 
 				const pos = a.xy.toVar();
 				const pos0 = a.xy.toVar();          // origine du pas : distance réelle → démarche
@@ -617,6 +625,7 @@ export class AntSimulation {
 
 				const panic = float( 0 ).toVar();
 				const rage = float( 0 ).toVar();
+				const attacking = float( 0 ).toVar();
 				const fleeDir = vec2( 0 ).toVar();
 				// saisie par les pattes : une araignée qui agrippe (mode morsure) fige
 				// fortement la proie SOUS elle (zone large, pattes), pour que sa bouche
@@ -684,6 +693,15 @@ export class AntSimulation {
 									// soldates : CHARGENT, morsures au contact du corps
 									rage.assign( max( rage, w ) );
 									fleeDir.subAssign( away.div( dSp ).mul( w ) );
+
+									// Le clip démarre au contact réel (< 13), puis reste actif
+									// jusqu'à 16 texels pour ne pas papilloter lors des rebonds.
+									If( dSp.lessThan( float( 13 ) )
+										.or( wasAttacking.and( dSp.lessThan( float( 16 ) ) ) ), () => {
+
+										attacking.assign( 1 );
+
+									} );
 
 									If( dSp.lessThan( float( 13 ) ), () => {
 
@@ -1539,29 +1557,44 @@ export class AntSimulation {
 
 				} ); // fin Else (non-reine)
 
-				// --- DÉMARCHE : la phase du cycle de marche avance avec la DISTANCE
-				// réellement parcourue, jamais avec le temps. Fin du patinage : une
-				// fourmi bloquée contre un mur cesse de pédaler, une envenimée traîne
-				// vraiment la patte, une soldate a une foulée plus ample.
-				// Allométrie de la fourmi : longueur de foulée ∝ v^0,42 (donc cadence
-				// ∝ v^0,58, somme = 1). À vitesse nominale la formule redonne
-				// EXACTEMENT l'ancienne cadence moveSpeed·walkAnim·0,14.
-				If( phys, () => {
+				// L'attaque est pilotée par le temps et possède son propre cycle.
+				// Entrée et sortie repartent de la première pose de leur clip.
+				If( attacking.greaterThan( 0.5 ), () => {
 
-					const distW = length( pos.sub( pos0 ) ).mul( TEXEL );
-					const vRef = max( u.moveSpeed.mul( TEXEL ), 1e-4 );
-					const ratio = distW.div( max( u.dt, 1e-4 ) ).div( vRef );
-					const sFac = clamp( pow( max( ratio, 1e-4 ), 0.4232 ), 0.35, 1.8 );
-					const strMul = select( isQueen, u.queenScale,
-						select( isSoldier, float( 1.45 ),
-							select( isNurse, float( 0.85 ),
-								select( isScout, float( 0.92 ), float( 1 ) ) ) ) );
-					const stride = float( TEXEL )
-						.div( max( u.walkAnim, 0.05 ).mul( 0.14 ) ).mul( sFac ).mul( strMul );
-					gait.assign( fract( gait.add( distW.div( max( stride, 1e-4 ) ) ) ) );
+					gait.assign( select( wasAttacking,
+						fract( gait.add( u.dt.div( max( u.soldierAttackDuration, 1e-4 ) ) ) ),
+						float( 0 ) ) );
+
+				} ).ElseIf( wasAttacking, () => {
+
+					gait.assign( 0 );
+
+				} ).Else( () => {
+
+					// --- DÉMARCHE : la phase du cycle de marche avance avec la DISTANCE
+					// réellement parcourue, jamais avec le temps. Fin du patinage : une
+					// fourmi bloquée contre un mur cesse de pédaler, une envenimée traîne
+					// vraiment la patte, une soldate a une foulée plus ample.
+					// Allométrie de la fourmi : longueur de foulée ∝ v^0,42 (donc cadence
+					// ∝ v^0,58, somme = 1). À vitesse nominale la formule redonne
+					// EXACTEMENT l'ancienne cadence moveSpeed·walkAnim·0,14.
+					If( phys, () => {
+
+						const distW = length( pos.sub( pos0 ) ).mul( TEXEL );
+						const vRef = max( u.moveSpeed.mul( TEXEL ), 1e-4 );
+						const ratio = distW.div( max( u.dt, 1e-4 ) ).div( vRef );
+						const sFac = clamp( pow( max( ratio, 1e-4 ), 0.4232 ), 0.35, 1.8 );
+						const strMul = select( isQueen, u.queenScale,
+							select( isSoldier, float( 1.45 ),
+								select( isNurse, float( 0.85 ),
+									select( isScout, float( 0.92 ), float( 1 ) ) ) ) );
+						const stride = float( TEXEL )
+							.div( max( u.walkAnim, 0.05 ).mul( 0.14 ) ).mul( sFac ).mul( strMul );
+						gait.assign( fract( gait.add( distW.div( max( stride, 1e-4 ) ) ) ) );
+
+					} );
 
 				} );
-
 				// normalisation de l'angle dans [0, 2π)
 				ang.assign( ang.sub( floor( ang.div( PI2 ) ).mul( PI2 ) ) );
 
@@ -1628,7 +1661,10 @@ export class AntSimulation {
 						.bitOr( goal.shiftLeft( uint( 4 ) ) )
 						.bitOr( node.shiftLeft( uint( 7 ) ) )
 						.bitOr( layer.shiftLeft( uint( 14 ) ) )
-						.bitOr( deathWord.shiftLeft( uint( 16 ) ) ),
+						.bitOr( deathWord.shiftLeft( uint( 16 ) ) )
+						.bitOr( select( isSoldier.and( state.lessThan( uint( 2 ) ) )
+							.and( attacking.greaterThan( 0.5 ) ),
+							uint( 1 ).shiftLeft( uint( 24 ) ), uint( 0 ) ) ),
 				);
 				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, gait ) );
 				antDyn.element( instanceIndex ).assign( vec4( vel, height, vHeight ) );

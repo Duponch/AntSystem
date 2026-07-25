@@ -49,14 +49,24 @@ const qYaw = ( a ) => { const h = a.mul( 0.5 ); return vec4( 0, sin( h ), 0, cos
 const qPitch = ( a ) => { const h = a.mul( 0.5 ); return vec4( sin( h ), 0, 0, cos( h ) ); };
 const qRoll = ( a ) => { const h = a.mul( 0.5 ); return vec4( 0, 0, sin( h ), cos( h ) ); };
 
-// drapeaux publiés dans antPose[3i+2].w : kind + 4·souterraine + 8·reine + 16·porteuse
+// drapeaux publiés dans antPose[3i+2].w :
+// kind + 4·souterraine + 8·reine + 16·porteuse + 32·attaque
 export const POSE_ALIVE = 0, POSE_CORPSE = 1, POSE_GONE = 2, POSE_RAGDOLL = 3;
 
 export function createPose( sim, vat ) {
 
 	const layout = sim.layout;
 	const depthSize = layout.depthTexture.image.width;
-	const PIVOT_Y = vat.pivotY;
+	const workerModel = vat.models?.worker ?? vat;
+	const soldierModel = vat.models?.soldier ?? workerModel;
+	const workerRestY = workerModel.restY ?? vat.restY;
+	const soldierRestY = soldierModel.restY ?? workerRestY;
+	const workerBounds = workerModel.bounds ?? vat.bounds;
+	const soldierBounds = soldierModel.bounds ?? workerBounds;
+	// Alias historique : les consommateurs qui ne distinguent pas les castes
+	// continuent d'utiliser les mesures de l'ouvrière.
+	const PIVOT_Y = workerModel.pivotY ?? vat.pivotY;
+	const SOLDIER_PIVOT_Y = soldierModel.pivotY ?? PIVOT_Y;
 
 	// [3i+0] = ( x, y, z monde du PIVOT corporel , gabarit de caste )
 	// [3i+1] = quaternion d'attitude ( lacet ∘ tangage ∘ roulis )
@@ -72,12 +82,20 @@ export function createPose( sim, vat ) {
 		bobAmp: uniform( gfx.bobAmp ),
 		swayAmp: uniform( gfx.swayAmp ),
 		pitchAmp: uniform( gfx.pitchAmp ),
-		// hauteurs de repos du cadavre par quadrant de roulis (bakées : voir vat.js)
-		restY0: uniform( vat.restY[ 0 ] ),
-		restY1: uniform( vat.restY[ 1 ] ),
-		restY2: uniform( vat.restY[ 2 ] ),
-		restY3: uniform( vat.restY[ 3 ] ),
+		// Mesures bakées par caste. Les alias sans préfixe restent ceux de
+		// l'ouvrière pour la reine et la compatibilité avec le rendu existant.
+		restY0: uniform( workerRestY[ 0 ] ),
+		restY1: uniform( workerRestY[ 1 ] ),
+		restY2: uniform( workerRestY[ 2 ] ),
+		restY3: uniform( workerRestY[ 3 ] ),
+		soldierRestY0: uniform( soldierRestY[ 0 ] ),
+		soldierRestY1: uniform( soldierRestY[ 1 ] ),
+		soldierRestY2: uniform( soldierRestY[ 2 ] ),
+		soldierRestY3: uniform( soldierRestY[ 3 ] ),
 		pivotY: uniform( PIVOT_Y ),
+		soldierPivotY: uniform( SOLDIER_PIVOT_Y ),
+		workerHeight: uniform( workerBounds.height ),
+		soldierHeight: uniform( soldierBounds.height ),
 	};
 
 	// Plancher souterrain au point (texels grille), SUR LA NAPPE DE LA FOURMI.
@@ -117,6 +135,8 @@ export function createPose( sim, vat ) {
 
 			const state = st.bitAnd( uint( 7 ) );
 			const under = st.bitAnd( uint( 8 ) ).notEqual( uint( 0 ) );
+			const attacking = st.shiftRight( uint( 24 ) ).bitAnd( uint( 1 ) )
+				.notEqual( uint( 0 ) );
 			const dead = state.equal( uint( 2 ) );
 			const gone = state.equal( uint( 3 ) );
 			const dw = st.shiftRight( uint( 16 ) ).bitAnd( uint( 255 ) );
@@ -127,6 +147,8 @@ export function createPose( sim, vat ) {
 			const scale = select( isSoldier, float( 1.45 ),
 				select( isNurse, float( 0.85 ),
 					select( isScout, float( 0.92 ), float( 1 ) ) ) ).toVar();
+			const pivotY = select( isSoldier, u.soldierPivotY, u.pivotY );
+			const modelHeight = select( isSoldier, u.soldierHeight, u.workerHeight );
 
 			const solY = select( under, floorDepth( a.xy, layer ).add( 0.04 ), float( 0 ) ).toVar();
 
@@ -162,10 +184,14 @@ export function createPose( sim, vat ) {
 					// la hauteur de repos dépend de la face sur laquelle elle finit :
 					// à plat sur le dos une fourmi ne repose pas à la même hauteur que
 					// debout. Valeurs BAKÉES depuis la pose de mort réelle.
-					const restY = select( restQ.lessThan( 0.5 ), u.restY0,
+					const workerRest = select( restQ.lessThan( 0.5 ), u.restY0,
 						select( restQ.lessThan( 1.5 ), u.restY1,
 							select( restQ.lessThan( 2.5 ), u.restY2, u.restY3 ) ) );
-					lift.addAssign( restY.sub( u.pivotY ).mul( scale ).mul( k ) );
+					const soldierRest = select( restQ.lessThan( 0.5 ), u.soldierRestY0,
+						select( restQ.lessThan( 1.5 ), u.soldierRestY1,
+							select( restQ.lessThan( 2.5 ), u.soldierRestY2, u.soldierRestY3 ) ) );
+					const restY = select( isSoldier, soldierRest, workerRest );
+					lift.addAssign( restY.sub( pivotY ).mul( scale ).mul( k ) );
 
 				} ).Else( () => {
 
@@ -175,9 +201,10 @@ export function createPose( sim, vat ) {
 					// tangue en quadrature. C'est ce qui distingue un corps qui
 					// MARCHE d'un corps qui glisse en bloc au-dessus du sol.
 					const ph = vt.w.mul( PI2 );
-					lift.addAssign( u.bobAmp.mul( abs( sin( ph ) ) ).mul( scale ) );
-					roll.assign( u.swayAmp.mul( sin( ph ) ) );
-					pitch.assign( u.pitchAmp.mul( sin( ph.add( 1.5707963 ) ) ) );
+					const walkMotion = select( attacking, float( 0.25 ), float( 1 ) );
+					lift.addAssign( u.bobAmp.mul( abs( sin( ph ) ) ).mul( scale ).mul( walkMotion ) );
+					roll.assign( u.swayAmp.mul( sin( ph ) ).mul( walkMotion ) );
+					pitch.assign( u.pitchAmp.mul( sin( ph.add( 1.5707963 ) ) ).mul( walkMotion ) );
 
 					// envenimée : elle titube (le venin est un neurotoxique)
 					const venomT = vt.x.clamp( 0, 1 );
@@ -207,7 +234,7 @@ export function createPose( sim, vat ) {
 				// du modèle) et non autour du pivot corporel : il faut donc défalquer
 				// DEUX fois le pivot pour retrouver la hauteur historique exacte
 				lift.assign( select( dead,
-					float( vat.bounds.height ).sub( u.pivotY.mul( 2 ) ).mul( scale ), float( 0 ) ) );
+					modelHeight.sub( pivotY.mul( 2 ) ).mul( scale ), float( 0 ) ) );
 
 			} );
 
@@ -215,7 +242,7 @@ export function createPose( sim, vat ) {
 
 			const world = vec3(
 				a.x.mul( TEXEL ).sub( WORLD / 2 ),
-				solY.add( u.pivotY.mul( scale ) ).add( lift ),
+				solY.add( pivotY.mul( scale ) ).add( lift ),
 				a.y.mul( TEXEL ).sub( WORLD / 2 ),
 			);
 
@@ -226,7 +253,8 @@ export function createPose( sim, vat ) {
 			const flags = kind
 				.add( select( under, float( 4 ), float( 0 ) ) )
 				.add( select( isQueen, float( 8 ), float( 0 ) ) )
-				.add( select( state.equal( uint( 1 ) ), float( 16 ), float( 0 ) ) );
+				.add( select( state.equal( uint( 1 ) ), float( 16 ), float( 0 ) ) )
+				.add( select( attacking, float( 32 ), float( 0 ) ) );
 
 			const casteId = select( isSoldier, float( 1 ),
 				select( isNurse, float( 2 ), select( isScout, float( 3 ), float( 0 ) ) ) );
@@ -258,11 +286,12 @@ export function createPose( sim, vat ) {
 			const m = antPose.element( b.add( uint( 2 ) ) );
 			// drapeaux dépliés en arithmétique flottante pure : pas une seule
 			// conversion entière au vertex
-			//   w = kind + 4·souterraine + 8·reine + 16·porteuse
+			//   w = kind + 4·souterraine + 8·reine + 16·porteuse + 32·attaque
 			const f1 = floor( m.w.div( 4 ) ).toVar();
 			const kind = m.w.sub( f1.mul( 4 ) ).toVar();
 			const f2 = floor( f1.div( 2 ) ).toVar();
 			const f3 = floor( f2.div( 2 ) ).toVar();
+			const f4 = floor( f3.div( 2 ) ).toVar();
 
 			return {
 				world: p.xyz,
@@ -275,7 +304,8 @@ export function createPose( sim, vat ) {
 				ragdolled: kind.greaterThan( 2.5 ),
 				under: f1.sub( f2.mul( 2 ) ).greaterThan( 0.5 ),
 				isQueen: f2.sub( f3.mul( 2 ) ).greaterThan( 0.5 ),
-				carrying: f3.greaterThan( 0.5 ),
+				carrying: f3.sub( f4.mul( 2 ) ).greaterThan( 0.5 ),
+				attacking: f4.greaterThan( 0.5 ),
 				dead: kind.greaterThan( 0.5 ).and( kind.lessThan( 1.5 ) ),
 				gone: kind.greaterThan( 1.5 ).and( kind.lessThan( 2.5 ) ),
 			};

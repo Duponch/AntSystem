@@ -53,6 +53,10 @@ const FIXED_H = 1 / 60;
 export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 	const rig = vat.rig;
+	const workerModel = vat.models?.worker ?? vat;
+	const soldierModel = vat.models?.soldier ?? workerModel;
+	const workerPivotY = workerModel.pivotY ?? vat.pivotY;
+	const soldierPivotY = soldierModel.pivotY ?? workerPivotY;
 	const MAX_RD = Math.max( 1, Math.min( 512, gfx.rdBudget | 0 ) || 192 );
 	const nameIdx = ( n ) => rig.boneNames.indexOf( n );
 
@@ -62,7 +66,7 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 		rig.boneAxis[ bi * 3 ], rig.boneAxis[ bi * 3 + 1 ], rig.boneAxis[ bi * 3 + 2 ] );
 
 	// --- particules, en espace VAT normalisé RELATIF AU PIVOT ---------------
-	const pivot = new THREE.Vector3( 0, vat.pivotY, 0 );
+	const pivot = new THREE.Vector3( 0, workerPivotY, 0 );
 	const bind = [];                       // THREE.Vector3 × 15
 	const invMass = new Float32Array( N_PART );
 
@@ -198,7 +202,8 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 		camPos: uniform( new THREE.Vector3() ),
 		budget: uniform( MAX_RD ),
 		spawnWin: uniform( 0.12 ),          // s : fenêtre de détection « vient de mourir »
-		pivotY: uniform( vat.pivotY ),
+		pivotY: uniform( workerPivotY ),
+		soldierPivotY: uniform( soldierPivotY ),
 	};
 
 	const WG = 32;
@@ -322,6 +327,8 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 		If( st.bitAnd( uint( OCCUPIED ) ).notEqual( uint( 0 ) ), () => {
 
 			const owner = st.bitAnd( uint( 0xFFFF ) );
+			const ownerIsSoldier = sim.casteOf( owner ).isSoldier;
+			const ownerPivotY = select( ownerIsSoldier, u.soldierPivotY, u.pivotY );
 			// RÈGLE DE PROPRIÉTÉ : un slot n'est valide que si sa fourmi le
 			// revendique encore. Sans ça, le recyclage de l'anneau ferait afficher
 			// à une fourmi le squelette d'une autre.
@@ -342,7 +349,7 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 				const hLocal = sim.antDyn.element( owner ).z.div( max( P.w, 0.01 ) );
 				rdAnchor.element( instanceIndex.mul( uint( 2 ) ) ).assign( vec4( P.xyz, P.w ) );
 				rdAnchor.element( instanceIndex.mul( uint( 2 ) ).add( uint( 1 ) ) )
-					.assign( vec4( u.pivotY.add( hLocal ).negate(), 0, 0, 0 ) );
+					.assign( vec4( ownerPivotY.add( hLocal ).negate(), 0, 0, 0 ) );
 				const visible = length( P.xyz.sub( u.camPos ) ).lessThan( u.dist.mul( 1.6 ) );
 
 				If( visible, () => {
@@ -539,15 +546,22 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 	const boneAttr = new Float32Array( vat.totalVerts );
 	for ( let i = 0; i < vat.totalVerts; i ++ ) boneAttr[ i ] = rig.boneOf[ i ];
 
+	const workerPosition = rdGeoSrc.attributes.position;
+	const soldierPositionData = soldierModel.restPosition?.length === workerPosition.array.length
+		? soldierModel.restPosition : workerPosition.array;
+
 	const igeo = new THREE.InstancedBufferGeometry();
 	igeo.index = rdGeoSrc.index;
-	igeo.setAttribute( 'position', rdGeoSrc.attributes.position );
+	igeo.setAttribute( 'position', workerPosition );
+	// Attribut statique seulement : aucun draw ni binding storage supplémentaire.
+	igeo.setAttribute( 'soldierPosition', new THREE.BufferAttribute( soldierPositionData, 3 ) );
 	igeo.setAttribute( 'vatIndex', rdGeoSrc.attributes.vatIndex );
 	igeo.setAttribute( 'boneIndex', new THREE.BufferAttribute( boneAttr, 1 ) );
 	igeo.instanceCount = 0;
 
 	const uBodyColor = uniform( new THREE.Color( gfx.antColor ) );
 	const uAccent = uniform( new THREE.Color( gfx.antAccentColor ) );
+	const uSoldierColor = uniform( new THREE.Color( gfx.soldierColor ) );
 
 	const material = new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0 } );
 
@@ -555,8 +569,12 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 		const slot = rdDraw.element( instanceIndex ).toVar();
 		const anchor = rdAnchor.element( slot.mul( uint( 2 ) ) );
+		const owner = rdState.element( slot ).bitAnd( uint( 0xFFFF ) );
+		const isSoldier = sim.casteOf( owner ).isSoldier;
 		const bi = attribute( 'boneIndex', 'float' ).toInt();
 
+		varyingProperty( 'float', 'vRdSoldier' ).assign(
+			select( isSoldier, float( 1 ), float( 0 ) ) );
 		varyingProperty( 'float', 'vRdAccent' ).assign(
 			select( attribute( 'vatIndex', 'float' ).toInt().lessThan( int( vat.counts[ 0 ] ) ), 0, 1 ) );
 
@@ -564,9 +582,14 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 		const qb = rdBone.element( bb );
 		const ob = rdBone.element( bb.add( uint( 1 ) ) ).xyz;
 
-		// skinning rigide : UNE transformation par sommet, pas quatre
+		// Le rig physique et boneIndex restent ceux de l'ouvrière. Seules la
+		// silhouette au repos et son pivot changent pour une propriétaire soldate ;
+		// les mandibules héritent donc naturellement de l'os head correspondant.
 		const rest = uBoneRest.element( bi ).xyz;
-		const localVAT = positionLocal.sub( vec3( 0, u.pivotY, 0 ) );
+		const modelPosition = select( isSoldier,
+			attribute( 'soldierPosition', 'vec3' ), positionLocal );
+		const modelPivotY = select( isSoldier, u.soldierPivotY, u.pivotY );
+		const localVAT = modelPosition.sub( vec3( 0, modelPivotY, 0 ) );
 		const local = qrot( qb, localVAT.sub( rest ) ).add( ob );
 
 		const world = local.mul( anchor.w ).add( anchor.xyz );
@@ -577,8 +600,10 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 	material.colorNode = Fn( () => {
 
-		// un cadavre est assombri, comme dans le pipeline normal
-		return mix( vec3( uBodyColor ), vec3( uAccent ), varyingProperty( 'float', 'vRdAccent' ) ).mul( 0.5 );
+		// Même teinte de caste que le pipeline vivant, puis assombrissement du cadavre.
+		const body = mix( vec3( uBodyColor ), vec3( uSoldierColor ),
+			varyingProperty( 'float', 'vRdSoldier' ).mul( 0.85 ) );
+		return mix( body, vec3( uAccent ), varyingProperty( 'float', 'vRdAccent' ) ).mul( 0.5 );
 
 	} )();
 
@@ -616,6 +641,7 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 		_dbg: { rdPos, rdPrev, rdState, rdBone, rdAlloc, rdDraw, rdAnchor, N_PART, N_BONE, CONSTR },
 		uBodyColor,
 		uAccent,
+		uSoldierColor,
 		setEnabled( v ) { enabled = !! v; },
 		tick() {
 
