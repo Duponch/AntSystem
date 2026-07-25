@@ -26,7 +26,7 @@ import {
 	Fn, If, instanceIndex, uniform, varyingProperty, storage, instancedArray,
 	attribute, positionLocal, cameraPosition,
 	vec2, vec3, vec4, float, int, ivec2, uint,
-	fract, floor, mix, hash, select, min, abs, length, normalize, cross, smoothstep, uv,
+	fract, floor, mix, hash, select, min, max, abs, length, normalize, cross, smoothstep, uv,
 	textureLoad, atomicAdd, atomicStore, atomicLoad, clamp,
 } from 'three/tsl';
 
@@ -407,6 +407,90 @@ export async function createAnts( sim ) {
 	group.add( queen );
 
 	// ------------------------------------------------------------------
+	// SURBRILLANCE DE LA FOURMI SUIVIE (antfollow.js) : une copie UNE SEULE
+	// instance de la VAT, réanimée avec exactement la même logique que les
+	// corps (cycle, venin, pose de mort), mais en jaune émissive plat, sans
+	// test de profondeur et dessinée en tout dernier → la fourmi sélectionnée
+	// reste visible À TRAVERS TOUT (terre, hologramme, autres fourmis).
+	// Une mesh de ~2000 tris : coût négligeable, nul quand visible=false.
+	// ------------------------------------------------------------------
+	const uFollowIdx = uniform( - 1 );      // index de la fourmi suivie (−1 = aucune)
+
+	const followMat = new THREE.MeshBasicNodeMaterial();
+	// TRANSPARENT : obligatoire — les corps des fourmis sont eux-mêmes dans la
+	// passe transparente (semi-transparence de surface du mode scanner), et
+	// l'opaque rend toujours AVANT : sans ce drapeau la surbrillance serait
+	// recouverte par les corps qu'elle doit coiffer.
+	followMat.transparent = true;
+	followMat.depthTest = false;
+	followMat.depthWrite = false;
+	followMat.toneMapped = false;           // jaune franc, pas de lavage ACES
+
+	followMat.positionNode = Fn( () => {
+
+		const antId = max( uFollowIdx, 0 ).toUint();
+		const P = pose.read( antId );
+
+		const vatIdx = attribute( 'vatIndex', 'float' ).toInt();
+		// la reine a sa propre cadence (voir queenMat) ; les autres le cycle commun
+		const cycleW = select( uPhysOn.greaterThan( 0.5 ),
+			P.gait, uPhase.add( hash( antId.add( uint( 1013 ) ) ) ) );
+		const cycleQ = select( uPhysOn.greaterThan( 0.5 ),
+			P.gait, uPhase.div( uQueenScale ).mul( 0.55 ) );
+		const cycle = select( P.isQueen, cycleQ, cycleW );
+		const ff = fract( cycle ).mul( framesF );
+		const f0 = floor( ff ).toInt();
+		const f1 = f0.add( 1 ).mod( int( vat.frames ) );
+		const p0 = textureLoad( vat.texture, ivec2( vatIdx, f0 ) ).xyz;
+		const p1 = textureLoad( vat.texture, ivec2( vatIdx, f1 ) ).xyz;
+		const animated = mix( p0, p1, fract( ff ) )
+			.toVar();
+
+		// mêmes déformations que les corps : paralysie de venin, pose de mort
+		animated.assign( mix( animated, textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz, P.venom ) );
+
+		const local = animated.toVar();
+
+		If( P.dead, () => {
+
+			const rowDead = textureLoad( vat.texture, ivec2( vatIdx, int( vat.deathRow ) ) ).xyz;
+			const rowRest = textureLoad( vat.texture, ivec2( vatIdx, int( 0 ) ) ).xyz;
+			local.assign( select( uPhysOn.greaterThan( 0.5 ), rowDead, rowRest ) );
+
+		} );
+
+		// dégénérée si dévorée (le temps qu'antfollow lâche la sélection)
+		const vis = select( P.gone, float( 0 ), float( 1 ) );
+
+		// LA REINE est un cas à part : échelle royale, gaster étiré, pivot à
+		// SON gabarit (sinon la surbrillance la dessine en ouvrière naine au
+		// milieu de son vrai corps). Mêmes formules que queenMat.
+		const stretch = clamp( positionLocal.z.negate().mul( 2 ), 0, 1 );
+		const localQ = local.sub( vec3( 0, uPivot, 0 ) ).mul( uQueenScale )
+			.mul( vec3( 1.05, 1.05, float( 1 ).add( stretch.mul( 0.5 ) ) ) );
+		const localW = local.sub( vec3( 0, uPivot, 0 ) ).mul( P.scale );
+		const world = vec3(
+			P.world.x,
+			P.world.y.sub( uPivot.mul( P.scale ) )
+				.add( uPivot.mul( select( P.isQueen, uQueenScale, P.scale ) ) ),
+			P.world.z,
+		);
+
+		return qrot( P.q, select( P.isQueen, localQ, localW ).mul( vis ) ).add( world );
+
+	} )();
+
+	// jaune émissive PLAT : c'est la silhouette qui compte, pas le volume ;
+	// un éclairage détaillé la rendrait moins lisible dans l'hologramme
+	followMat.colorNode = vec3( 1.0, 0.82, 0.29 );
+
+	const followMesh = new THREE.Mesh( vat.geometry, followMat );
+	followMesh.frustumCulled = false;
+	followMesh.renderOrder = 12;            // après l'hologramme (10)
+	followMesh.visible = false;
+	group.add( followMesh );
+
+	// ------------------------------------------------------------------
 	// Grain porté + halo luciole (géométrie triviale : pilotés par antCount)
 	// ------------------------------------------------------------------
 	const grainGeo = new THREE.InstancedBufferGeometry();
@@ -541,6 +625,8 @@ export async function createAnts( sim ) {
 		uGrainHaloIntensity,
 		uReveal,
 		uScanMode,
+		uFollowIdx,
+		followMesh,
 		queen,
 		lodInfo: { full: vat.geometry.index.count / 3, lod1: lod1.triangles, lod2: lod2.triangles },
 		uAntHitR,

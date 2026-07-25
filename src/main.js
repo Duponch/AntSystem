@@ -24,6 +24,7 @@ import { createColonyTests } from './tests.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
 import { createRagdoll } from './ragdoll.js';
+import { createAntFollow } from './antfollow.js';
 import { createUI } from './ui.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
@@ -174,6 +175,9 @@ async function main() {
 	nestVolume.rebuild();
 	const underground = createUnderground( { scene, layout, env, grass, camera, volume: nestVolume } );
 
+	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
+	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
+
 	// Le socle de terre doit ENGLOBER le nid : sans ca la chambre royale flotte
 	// sous le terrain (le bug existait deja avec une chambre a -3,9 pour un
 	// socle de 3 unites — il devient spectaculaire a 60).
@@ -262,6 +266,46 @@ async function main() {
 		},
 	};
 
+	// --- SÉLECTION D'UNE FOURMI AU CLIC (suivi caméra — antfollow.js) ---
+	// Un « clic » = bouton gauche, <6 px de déplacement, <500 ms : on ne vole
+	// jamais un drag d'orbite. Le pinceau, l'éditeur et le mode cinématique
+	// gardent leurs clics ; Échap lâche la fourmi suivie.
+	{
+
+		const dom = renderer.domElement;
+		let downX = 0, downY = 0, downT = 0;
+
+		dom.addEventListener( 'pointerdown', ( e ) => {
+
+			if ( e.button !== 0 ) return;
+			downX = e.clientX; downY = e.clientY; downT = performance.now();
+
+		} );
+
+		dom.addEventListener( 'pointerup', ( e ) => {
+
+			if ( e.button !== 0 ) return;
+			if ( params.brushMode || editor.enabled || params.cinematic ) return;
+			const moved = Math.hypot( e.clientX - downX, e.clientY - downY );
+			if ( moved > 6 || performance.now() - downT > 500 ) return;
+
+			const rect = dom.getBoundingClientRect();
+			const nx = ( ( e.clientX - rect.left ) / rect.width ) * 2 - 1;
+			const ny = - ( ( e.clientY - rect.top ) / rect.height ) * 2 + 1;
+			const ro = camera.position.clone();
+			const rd = new THREE.Vector3( nx, ny, 0.5 ).unproject( camera ).sub( ro ).normalize();
+			antfollow.requestPick( ro, rd );
+
+		} );
+
+		window.addEventListener( 'keydown', ( e ) => {
+
+			if ( e.key === 'Escape' ) antfollow.clear();
+
+		} );
+
+	}
+
 	// --- boucle ---
 	const timer = new THREE.Timer();
 	let frame = 0;
@@ -320,6 +364,10 @@ async function main() {
 		ants.uReveal.value = underground.reveal;     // vue fermée → souterraines non rendues
 		ants.uScanMode.value = underground.scanMode; // plongée → scanner + surface fantomatique
 		ants.tick( simDt, camera );
+		antfollow.update( rawDt );   // APRÈS ants.tick : lit la pose fraîche de kPose
+		// surbrillance jaune émissive de la fourmi suivie (visible à travers tout)
+		ants.uFollowIdx.value = antfollow.selected;
+		ants.followMesh.visible = antfollow.selected >= 0;
 		// APRÈS ants.tick : le ragdoll lit la pose que kPose vient d'écrire
 		if ( running ) ragdoll.tick();
 		spiders.update( simDt );
@@ -410,6 +458,7 @@ async function main() {
 		if ( q.get( 'ants' ) ) ui.setPopulation( + q.get( 'ants' ) );
 		if ( q.get( 'ug' ) === '1' ) gfx.undergroundView = true;
 		if ( q.get( 'scan' ) === '1' ) gfx.scannerView = true;
+		if ( q.get( 'follow' ) ) antfollow.select( + q.get( 'follow' ) );
 
 		const c = v3( 'cam' ), l = v3( 'look' );
 		if ( c ) camera.position.set( c[ 0 ], c[ 1 ], c[ 2 ] );
@@ -422,7 +471,7 @@ async function main() {
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
 
 	// accès console pour le débogage
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, layout, tests, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, layout, tests, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );
