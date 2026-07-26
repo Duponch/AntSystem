@@ -27,7 +27,7 @@ import {
 	Fn, If, instanceIndex, uniform, instancedArray, textureLoad,
 	uint, int, float, vec2, vec4, ivec2,
 	abs, min, max, clamp, floor, mix, sqrt, length, select, PI2, atomicAdd, atomicStore, atomicLoad,
-	hash, fract,
+	hash,
 } from 'three/tsl';
 
 import { params, gfx, TEXEL, MAX_ANTS } from './config.js';
@@ -340,20 +340,16 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			// --- 4/5 · TOUPIE & BLOCAGE : fenêtre glissante, toutes vivantes ---
 			// MAIS PAS PENDANT LE REPOS : la sim a un cycle paresseux par DESIGN
 			// (simulation.js — jusqu'à ~80 % du temps immobile) ; une fourmi qui
-			// dort n'est pas une fourmi bloquée. Le cycle est recomputé ici à
-			// l'identique (mêmes hashs stables, sans aucun état) et la fenêtre
-			// de mesure est gelée pendant la sieste.
-			const period = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
-			const phaseR = fract( sim.u.simTime.add(
-				hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( period ) );
-			const lazy = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( sim.u.lazyFrac );
-			const duty = select( lazy, float( 0.82 ),
-				hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( sim.u.lazyFrac ).mul( 0.5 ) );
-			const qFed = atomicLoad( sim.stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
+			// dort n'est pas une fourmi bloquée. Le cycle vient de la politique
+			// partagée avec la simulation et l'inspecteur ; la fenêtre de mesure
+			// est gelée pendant la sieste.
 			const hungryR = sim.antVital.element( instanceIndex ).z.lessThan( sim.u.hungryHome );
-			const mayRest = state.equal( uint( 1 ) ).not()
-				.and( hungryR.not() ).and( caste.isNurse.not().or( qFed ) );
-			const resting = under.and( phaseR.lessThan( duty ).and( mayRest ) );
+			const resting = under.and( caste.isQueen.not() ).and( sim.restStateOf(
+				instanceIndex,
+				state.equal( uint( 1 ) ),
+				hungryR,
+				caste.isNurse,
+			).resting );
 			const routeGoalNode = select( goalE.lessThan( 0.5 ), nodeE,
 				select( goalE.lessThan( 1.5 ), sim.u.granaryNode,
 					select( goalE.lessThan( 2.5 ), sim.u.queenNode,

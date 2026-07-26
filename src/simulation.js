@@ -436,6 +436,29 @@ export class AntSimulation {
 		// partagé avec le rendu (ants.js) : mêmes hashs, mêmes uniforms
 		this.casteOf = casteOf;
 
+		// Politique de repos UNIQUE, partagée par la simulation, le Warden et le
+		// panneau de suivi. Le diagnostic ne doit jamais tenter de deviner après
+		// coup pourquoi une fourmi est immobile : il évalue exactement les mêmes
+		// hashs, phase, garde-fous de faim/transport et état de la reine.
+		const restStateOf = ( antId, carrying, hungry, isNurse ) => {
+
+			const period = hash( antId.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
+			const phase = fract( u.simTime.add(
+				hash( antId.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( period ) );
+			const lazy = hash( antId.add( uint( 0x1A21 ) ) ).lessThan( u.lazyFrac );
+			const duty = select( lazy, float( 0.82 ),
+				hash( antId.add( uint( 0xC10E ) ) ).mul( u.lazyFrac ).mul( 0.5 ) );
+			const queenFed = atomicLoad( stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
+			const allowed = carrying.not().and( hungry.not() ).and( isNurse.not().or( queenFed ) );
+			const resting = phase.lessThan( duty ).and( allowed );
+			const remaining = select( resting, duty.sub( phase ).mul( period ), float( 0 ) );
+
+			return { period, phase, duty, allowed, resting, remaining };
+
+		};
+
+		this.restStateOf = restStateOf;
+
 		// MOT DE MORT (8 bits, rangés dans antState bits 16-23) : tiré UNE FOIS,
 		// à l'instant de la mort, il fige la culbute d'un cadavre.
 		//   bits 0-1  quadrant de repos  0 sur pattes · 1 flanc · 2 dos · 3 flanc
@@ -1161,15 +1184,7 @@ export class AntSimulation {
 						// Le repos reste un état biologique volontaire. Il ne peut ni modifier
 						// la route ni l'orientation et est explicitement exclu des tests de
 						// blocage.
-						const periodV2 = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
-						const phaseV2 = fract( u.simTime.add(
-							hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( periodV2 ) );
-						const lazyV2 = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( u.lazyFrac );
-						const dutyV2 = select( lazyV2, float( 0.82 ),
-							hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( u.lazyFrac ).mul( 0.5 ) );
-						const queenFedV2 = atomicLoad( stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
-						const mayRestV2 = carrying.not().and( hungry.not() ).and( isNurse.not().or( queenFedV2 ) );
-						const restingV2 = phaseV2.lessThan( dutyV2 ).and( mayRestV2 );
+						const restingV2 = restStateOf( instanceIndex, carrying, hungry, isNurse ).resting;
 						const speedTraitV2 = hash( instanceIndex.add( uint( 0x5E01 ) ) )
 							.mul( u.speedSpread ).add( float( 1 ).sub( u.speedSpread.mul( 0.5 ) ) );
 						moveMult.assign( float( 0.8 ).mul( speedTraitV2 )

@@ -13,7 +13,7 @@
 //     un readback de 4 octets : rien par frame.
 //   • SUIVI — la position monde existe DÉJÀ : le buffer antPose de pose.js
 //     (3 vec4 par fourmi, frais chaque frame). Un noyau à 1 invocation copie
-//     les 32 octets de la fourmi suivie dans un mini-buffer, relu en async
+//     la télémétrie de la fourmi suivie dans un mini-buffer, relu en async
 //     sous le verrou global de readback.js (« je passe mon tour » : la
 //     cadence s'auto-régule, jamais de stall).
 //   • SURBRILLANCE — assurée par ants.js (mesh `followMesh` : copie VAT de
@@ -26,16 +26,19 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, If, instanceIndex, uniform, instancedArray,
-	uint, dot, min, atomicMin, atomicStore, vec4,
+	uint, dot, min, atomicMin, atomicStore, atomicLoad, vec4,
 } from 'three/tsl';
 
 import { params, MAX_ANTS, TEXEL } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
+import {
+	ANT_CASTE,
+	classifyAntObservation,
+	createAntMotionTracker,
+} from './ant-observer.js';
 
 const PICK_PX = 26;          // rayon de tolérance du clic (pixels CSS)
 const JUMP_U = 1.2;          // saut suspect (unités monde entre deux readbacks)
-const CASTES = [ 'ouvrière', 'soldate', 'nourrice', 'éclaireuse' ];
-const ETATS = [ 'exploratrice', 'porteuse', 'cadavre', 'dévorée' ];
 
 export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 
@@ -48,8 +51,11 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 	//   surface    = (vx, vz, hauteur, vitesse verticale)
 	//   souterrain = (corridor, progression 0..1, profondeur du sol, distance cumulee)
 	// Le bit souterrain des drapeaux choisit le decodeur CPU approprie.
-	// [3] énergie, état, nappe, attaque (dépackés côté GPU, zéro décodage CPU)
-	const followBuf = instancedArray( 4, 'vec4' );
+	// [3] énergie, état, nappe, attaque
+	// [4] objectif, nœud, repos exact, temps restant de repos
+	// [5] stocks grenier/reine/couvain, faim
+	// [6] chrono de ponte (capacité restante réservée aux diagnostics)
+	const followBuf = instancedArray( 7, 'vec4' );
 
 	const uRO = uniform( new THREE.Vector3() );       // rayon du clic : origine
 	const uRD = uniform( new THREE.Vector3( 0, 0, - 1 ) ); // ... et direction
@@ -110,11 +116,32 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		followBuf.element( 2 ).assign( sim.antDyn.element( i ) );
 		const st = sim.antState.element( i );
 		const vt = sim.antVital.element( i );
+		const state = st.bitAnd( uint( 7 ) );
+		const goal = st.shiftRight( uint( 4 ) ).bitAnd( uint( 7 ) );
+		const node = st.shiftRight( uint( 7 ) ).bitAnd( uint( 127 ) );
+		const hungry = sim.u.colonyOn.greaterThan( 0.5 ).and( vt.z.lessThan( sim.u.hungryHome ) );
+		const caste = sim.casteOf( i );
+		const rest = sim.restStateOf( i, state.equal( uint( 1 ) ), hungry, caste.isNurse );
+		const observedResting = rest.resting.and( caste.isQueen.not() );
+		const observedRestRemaining = rest.remaining.mul( caste.isQueen.not().toFloat() );
 		followBuf.element( 3 ).assign( vec4(
 			vt.z,                                        // énergie 0..1
-			st.bitAnd( uint( 7 ) ).toFloat(),            // état 0..3
+			state.toFloat(),                             // état 0..3
 			st.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) ).toFloat(),  // nappe
 			st.shiftRight( uint( 24 ) ).bitAnd( uint( 1 ) ).toFloat(),  // attaque
+		) );
+
+		followBuf.element( 4 ).assign( vec4(
+			goal.toFloat(), node.toFloat(), observedResting.toFloat(), observedRestRemaining,
+		) );
+		followBuf.element( 5 ).assign( vec4(
+			atomicLoad( sim.food.element( sim.u.troughGranary.toInt() ) ).toFloat(),
+			atomicLoad( sim.food.element( sim.u.troughQueen.toInt() ) ).toFloat(),
+			atomicLoad( sim.food.element( sim.u.troughBrood.toInt() ) ).toFloat(),
+			hungry.toFloat(),
+		) );
+		followBuf.element( 6 ).assign( vec4(
+			sim.antData.element( i ).w, 0, 0, 0,
 		) );
 
 	} )().compute( 1 );
@@ -126,92 +153,153 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 	// MULTI-LIGNES : tout ce qui sert à traquer le bug de téléportation —
 	// état, énergie, vitesse simulée ET mesurée, compteur de sauts.
 	// ------------------------------------------------------------------
-	const hud = document.createElement( 'div' );
-	hud.style.cssText = 'position:absolute;left:12px;bottom:34px;'
-		+ 'padding:6px 10px;border-radius:6px;background:rgba(10,14,10,.78);'
-		+ 'color:#ffd24a;font:11px/1.45 monospace;pointer-events:none;display:none;'
-		+ 'white-space:pre;z-index:5';
+	const hudStyle = document.createElement( 'style' );
+	hudStyle.textContent = `
+		#ant-inspector {
+			position: fixed; left: 14px; top: 14px; z-index: 20;
+			width: min(390px, calc(100vw - 28px)); box-sizing: border-box;
+			padding: 12px 14px; border: 1px solid rgba(159, 199, 120, .35);
+			border-radius: 10px; background: rgba(10, 15, 11, .9);
+			box-shadow: 0 12px 35px rgba(0, 0, 0, .34);
+			backdrop-filter: blur(8px); color: #e8eee3;
+			font: 12px/1.45 system-ui, sans-serif; pointer-events: none;
+			display: none; user-select: none;
+		}
+		#ant-inspector[data-tone="expected"] { border-color: rgba(244, 196, 92, .7); }
+		#ant-inspector[data-tone="danger"] { border-color: #ff665c; box-shadow: 0 0 0 1px rgba(255, 102, 92, .25), 0 12px 35px rgba(0,0,0,.4); }
+		#ant-inspector[data-tone="neutral"] { border-color: rgba(180, 180, 180, .45); }
+		.ant-follow-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+		.ant-follow-title { color:#f3d66d; font-weight:750; letter-spacing:.02em; text-transform:uppercase; }
+		.ant-follow-place { padding:2px 7px; border-radius:999px; background:rgba(135,173,105,.16); color:#bcd6a7; font-size:10px; letter-spacing:.07em; }
+		.ant-follow-intent { color:#fff; font-size:16px; font-weight:700; margin-bottom:2px; }
+		.ant-follow-motion { color:#acd98d; font-weight:650; margin-bottom:7px; }
+		#ant-inspector[data-tone="expected"] .ant-follow-motion { color:#f4c45c; }
+		#ant-inspector[data-tone="danger"] .ant-follow-motion { color:#ff665c; }
+		.ant-follow-reason { color:#b9c3b4; margin-bottom:10px; }
+		.ant-follow-grid { display:grid; grid-template-columns:max-content 1fr; gap:3px 10px; padding-top:8px; border-top:1px solid rgba(255,255,255,.08); }
+		.ant-follow-label { color:#74816f; }
+		.ant-follow-value { color:#dce5d7; overflow-wrap:anywhere; }
+		.ant-follow-alert { color:#ff756c; font-weight:700; margin-top:8px; }
+		.ant-follow-help { color:#697366; font-size:10px; margin-top:9px; }
+		@media (max-width: 620px) { #ant-inspector { top:8px; left:8px; width:calc(100vw - 16px); } }
+	`;
+	document.head.appendChild( hudStyle );
+
+	const hud = document.createElement( 'section' );
+	hud.id = 'ant-inspector';
+	hud.setAttribute( 'aria-live', 'polite' );
 	document.getElementById( 'app' ).appendChild( hud );
 
 	// ------------------------------------------------------------------
-	// État
+	// État CPU de l'inspecteur. Le tracker ne coûte rien à la population :
+	// il ne conserve que les échantillons de l'unique fourmi sélectionnée.
 	// ------------------------------------------------------------------
-	const position = new THREE.Vector3();    // dernière position connue (CPU)
-	const smoothPos = new THREE.Vector3();   // cible caméra stabilisée
-	const prevPos = new THREE.Vector3();     // position au readback précédent
+	const position = new THREE.Vector3();
+	const smoothPos = new THREE.Vector3();
+	const prevPos = new THREE.Vector3();
+	const motionTracker = createAntMotionTracker( { movingSpeed: 0.08 } );
 	let selected = - 1;
-	let hasPos = false;                      // vrai après le 1er readback de suivi
+	let hasPos = false;
 	let hasSmooth = false;
 	let hasPrev = false;
-	let pickPending = false;                 // un clic attend son dispatch
-	let pickReading = false;                 // un readback de picking est en vol
-	let followReading = false;               // un readback de suivi est en vol
+	let pickPending = false;
+	let pickReading = false;
+	let followReading = false;
 	let lastHudText = '';
+	let lastDiagnostic = null;
 	let savedMinDistance = 0;
-	// infos dépackées du readback (pour le HUD) et détection de saut
 	let info = {
 		energy: 0, venom: 0, state: 0, layer: 0, attacking: 0,
-		speed: 0, measSpeed: 0,
+		speed: 0, measSpeed: 0, stationarySeconds: 0,
 		corridor: - 1, progress: 0, floorDepth: 0, distance: 0,
+		goal: 0, node: 0, resting: false, restRemaining: 0, hungry: false,
+		granaryStock: 0, queenStock: 0, broodStock: 0, layTimer: 0,
 	};
 	let jumpCount = 0;
 	let lastJumpMag = 0;
 	let lastJumpAt = - 1e9;
-	let lastReadAt = 0;
 
-	function buildHud( flags, caste ) {
+	function buildHud( flags, rawCaste ) {
 
 		const under = ( Math.floor( flags / 4 ) % 2 ) === 1;
-
-		if ( under ) {
-
-			const undergroundQueen = ( Math.floor( flags / 8 ) % 2 ) === 1;
-			const undergroundCarrying = ( Math.floor( flags / 16 ) % 2 ) === 1;
-			const undergroundName = undergroundQueen ? 'reine' : CASTES[ caste ] || 'ouvri\u00e8re';
-			const undergroundAct = ETATS[ info.state ] || '?';
-			const header = `#${ selected } ${ undergroundName } \u00b7 souterraine \u00b7 ${ undergroundAct }`
-				+ ( undergroundCarrying ? ' \u00b7 transporte' : '' )
-				+ ( info.attacking ? ' \u00b7 ATTAQUE' : '' );
-			const vital = `\u00e9nergie ${ ( info.energy * 100 ).toFixed( 0 ) } % \u00b7 venin ${ ( info.venom * 100 ).toFixed( 0 ) } %`;
-			const route = `corridor #${ info.corridor } \u00b7 progression ${ ( info.progress * 100 ).toFixed( 1 ) } %`
-				+ ` \u00b7 distance ${ info.distance.toFixed( 2 ) } u`;
-			const floorLine = `sol ${ info.floorDepth.toFixed( 2 ) } u \u00b7 v mesur\u00e9e ${ info.measSpeed.toFixed( 2 ) } u/s`;
-			const posLine = `pos ${ position.x.toFixed( 2 ) }, ${ position.y.toFixed( 2 ) }, ${ position.z.toFixed( 2 ) }`;
-			const jump = jumpCount > 0
-				? `\u26a0 ${ jumpCount } saut${ jumpCount > 1 ? 's' : '' } \u2014 dernier +${ lastJumpMag.toFixed( 1 ) } u il y a ${ ( ( performance.now() - lastJumpAt ) / 1000 ).toFixed( 1 ) } s`
-				: null;
-			return [ header, vital, route, floorLine, posLine, jump,
-				'molette : zoom \u00b7 clic vide / \u00c9chap : l\u00e2cher' ]
-				.filter( Boolean ).join( '\n' );
-
-		}
-		const queen = ( Math.floor( flags / 8 ) % 2 ) === 1;
+		const isQueen = ( Math.floor( flags / 8 ) % 2 ) === 1;
 		const carrying = ( Math.floor( flags / 16 ) % 2 ) === 1;
-		const name = queen ? 'reine' : CASTES[ caste ] || 'ouvrière';
-		const lieu = under ? `souterraine (nappe ${ info.layer })` : 'surface';
-		const act = ETATS[ info.state ] || '?';
-		const l1 = `#${ selected } ${ name } · ${ lieu } · ${ act }`
-			+ ( carrying ? ' · transporte' : '' )
-			+ ( info.attacking ? ' · ATTAQUE' : '' );
-		const l2 = `énergie ${ ( info.energy * 100 ).toFixed( 0 ) } % · venin ${ ( info.venom * 100 ).toFixed( 0 ) } %`
-			+ ` · v ${ info.speed.toFixed( 2) } u/s (mesurée ${ info.measSpeed.toFixed( 2 ) })`;
-		const l3 = `pos ${ position.x.toFixed( 2 ) }, ${ position.y.toFixed( 2 ) }, ${ position.z.toFixed( 2 ) }`;
-		const l4 = jumpCount > 0
-			? `⚠ ${ jumpCount } saut${ jumpCount > 1 ? 's' : '' } — dernier +${ lastJumpMag.toFixed( 1 ) } u il y a ${ ( ( performance.now() - lastJumpAt ) / 1000 ).toFixed( 1 ) } s`
-			: null;
-		return [ l1, l2, l3, l4, 'molette : zoom · clic vide / Échap : lâcher' ]
-			.filter( Boolean ).join( '\n' );
+		const caste = isQueen ? ANT_CASTE.QUEEN : rawCaste;
+		const goalNode = sim.layout.GOAL_NODE?.[ info.goal ];
+		const atGoal = under && info.corridor < 0.5
+			&& Number.isFinite( goalNode ) && info.node === goalNode;
+		const diagnostic = classifyAntObservation( {
+			id: selected, state: info.state, caste, isQueen, under, carrying,
+			attacking: Boolean( info.attacking ), goal: info.goal, node: info.node,
+			atGoal, resting: info.resting, restRemaining: info.restRemaining,
+			hungry: info.hungry, energy: info.energy, venom: info.venom,
+			granaryStock: info.granaryStock, queenStock: info.queenStock,
+			broodStock: info.broodStock, layTimer: info.layTimer,
+			layInterval: params.queenLayInterval, layEnergyMin: params.queenLayMin,
+			stationarySeconds: info.stationarySeconds, measuredSpeed: info.measSpeed,
+			corridor: info.corridor, progress: info.progress,
+		} );
+
+		lastDiagnostic = {
+			...diagnostic, id: selected, under, carrying, atGoal,
+			position: { x: position.x, y: position.y, z: position.z },
+			telemetry: { ...info }, jumpCount,
+		};
+
+		const place = under ? `SOUTERRAIN · NAPPE ${ info.layer }` : 'SURFACE';
+		const route = isQueen
+			? `Chambre royale · ponte ${ info.layTimer.toFixed( 1 ) } / ${ params.queenLayInterval.toFixed( 1 ) } s`
+			: under
+				? ( info.corridor > 0
+					? `Corridor ${ info.corridor } · ${ ( info.progress * 100 ).toFixed( 1 ) } % · nœud ${ info.node }`
+					: `Zone sûre du nœud ${ info.node }` )
+				: 'Navigation par pistes de phéromones';
+		const stocks = `grenier ${ info.granaryStock } · reine ${ info.queenStock } · couvain ${ info.broodStock }`;
+		const recentJump = performance.now() - lastJumpAt < 2500;
+		const jump = jumpCount > 0
+			? `<div class="ant-follow-alert">⚠ ${ jumpCount } saut${ jumpCount > 1 ? 's' : '' } détecté${ jumpCount > 1 ? 's' : '' } · dernier ${ lastJumpMag.toFixed( 1 ) } u</div>`
+			: '';
+
+		return {
+			tone: recentJump ? 'danger' : diagnostic.tone,
+			html: `<div class="ant-follow-head">
+				<div class="ant-follow-title">Fourmi #${ selected } · ${ diagnostic.casteLabel }</div>
+				<div class="ant-follow-place">${ place }</div>
+			</div>
+			<div class="ant-follow-intent">${ diagnostic.intentLabel }</div>
+			<div class="ant-follow-motion">${ diagnostic.motionLabel }</div>
+			<div class="ant-follow-reason">${ diagnostic.reason }</div>
+			<div class="ant-follow-grid">
+				<div class="ant-follow-label">Objectif</div><div class="ant-follow-value">${ diagnostic.goalLabel }</div>
+				<div class="ant-follow-label">Route</div><div class="ant-follow-value">${ route }</div>
+				<div class="ant-follow-label">État réel</div><div class="ant-follow-value">${ diagnostic.stateLabel }${ carrying ? ' · charge en bouche' : '' }</div>
+				<div class="ant-follow-label">Vitalité</div><div class="ant-follow-value">énergie ${ Math.round( info.energy * 100 ) } % · venin ${ Math.round( info.venom * 100 ) } %${ info.hungry ? ' · faim' : '' }</div>
+				<div class="ant-follow-label">Mouvement</div><div class="ant-follow-value">${ info.measSpeed.toFixed( 2 ) } u/s · distance route ${ info.distance.toFixed( 2 ) } u</div>
+				<div class="ant-follow-label">Stocks</div><div class="ant-follow-value">${ stocks }</div>
+				<div class="ant-follow-label">Position</div><div class="ant-follow-value">${ position.x.toFixed( 2 ) }, ${ position.y.toFixed( 2 ) }, ${ position.z.toFixed( 2 ) }</div>
+			</div>${ jump }
+			<div class="ant-follow-help">Molette : zoom · clic vide / Échap : lâcher</div>`,
+		};
 
 	}
 
-	function setHud( text ) {
+	function setHud( view ) {
 
-		if ( text === lastHudText ) return;
-		lastHudText = text;
-		hud.textContent = text;
-		hud.style.display = text ? 'block' : 'none';
-		// rouge vif tant qu'un saut est récent : l'anomalie ne passe pas inaperçue
-		hud.style.color = ( performance.now() - lastJumpAt < 2500 ) ? '#ff5a4a' : '#ffd24a';
+		if ( ! view ) {
+
+			lastHudText = '';
+			hud.innerHTML = '';
+			hud.style.display = 'none';
+			return;
+
+		}
+
+		const html = typeof view === 'string' ? view : view.html;
+		if ( html === lastHudText ) return;
+		lastHudText = html;
+		hud.innerHTML = html;
+		hud.dataset.tone = typeof view === 'string' ? 'neutral' : view.tone;
+		hud.style.display = 'block';
 
 	}
 
@@ -224,11 +312,14 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		hasPrev = false;
 		jumpCount = 0;
 		info.measSpeed = 0;
+		info.stationarySeconds = 0;
 		lastJumpAt = - 1e9;
+		lastDiagnostic = null;
+		motionTracker.reset();
 		uFollowIdx.value = index;
 		savedMinDistance = controls.minDistance;
-		controls.minDistance = 0.8;      // inspection rapprochée de la fourmi
-		setHud( `#${ index } — en approche…` );
+		controls.minDistance = 0.8;
+		setHud( `<div class="ant-follow-title">Fourmi #${ index }</div><div class="ant-follow-reason">Lecture de son état réel…</div>` );
 
 	}
 
@@ -237,8 +328,10 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		if ( selected < 0 ) return;
 		selected = - 1;
 		hasPos = false;
+		lastDiagnostic = null;
+		motionTracker.reset();
 		controls.minDistance = savedMinDistance;
-		setHud( '' );
+		setHud( null );
 
 	}
 
@@ -312,29 +405,52 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 				// téléportation. Comptée, datée, et flashée en rouge au HUD.
 				const now = performance.now();
 				info.venom = f[ 5 ];
-				info.speed = Math.hypot( f[ 8 ], f[ 9 ] ) * TEXEL;   // texels/s → u/s
+				info.speed = Math.hypot( f[ 8 ], f[ 9 ] ) * TEXEL;
 				info.energy = f[ 12 ];
 				info.state = Math.round( f[ 13 ] );
 				info.layer = Math.round( f[ 14 ] );
 				info.attacking = Math.round( f[ 15 ] );
+				info.goal = Math.round( f[ 16 ] );
+				info.node = Math.round( f[ 17 ] );
+				info.resting = f[ 18 ] > 0.5;
+				info.restRemaining = Math.max( 0, f[ 19 ] );
+				info.granaryStock = Math.max( 0, Math.round( f[ 20 ] ) );
+				info.queenStock = Math.max( 0, Math.round( f[ 21 ] ) );
+				info.broodStock = Math.max( 0, Math.round( f[ 22 ] ) );
+				info.hungry = f[ 23 ] > 0.5;
+				info.layTimer = Math.max( 0, f[ 24 ] );
 
 				const under = ( Math.floor( f[ 7 ] / 4 ) % 2 ) === 1;
 
 				if ( under ) {
 
-					// antDyn souterrain : coordonnees intrinseques du reseau de corridors.
+					// Coordonnées intrinsèques exactes du réseau de corridors.
 					info.corridor = Math.round( f[ 8 ] );
 					info.progress = f[ 9 ];
 					info.floorDepth = f[ 10 ];
 					info.distance = f[ 11 ];
 					info.speed = 0;
 
+				} else {
+
+					info.corridor = 0;
+					info.progress = 0;
+					info.floorDepth = 0;
+					info.distance = 0;
+
 				}
+
+				const motion = motionTracker.sample( {
+					id: selected,
+					timeMs: now,
+					position,
+				} );
+				info.measSpeed = motion.measuredSpeed;
+				info.stationarySeconds = motion.stationarySeconds;
 
 				if ( hasPrev ) {
 
 					const d = position.distanceTo( prevPos );
-					info.measSpeed = d / Math.max( ( now - lastReadAt ) / 1000, 1e-3 );
 					if ( d > JUMP_U ) {
 
 						jumpCount ++;
@@ -346,7 +462,6 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 				}
 				prevPos.copy( position );
 				hasPrev = true;
-				lastReadAt = now;
 
 				setHud( buildHud( f[ 7 ], Math.round( f[ 6 ] ) ) );
 
@@ -369,11 +484,19 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 
 	}
 
+	function diagnostics() {
+
+		if ( ! lastDiagnostic ) return null;
+		return { ...lastDiagnostic, position: { ...lastDiagnostic.position }, telemetry: { ...lastDiagnostic.telemetry } };
+
+	}
+
 	return {
 		update,
 		requestPick,
 		select,
 		clear,
+		diagnostics,
 		position,
 		get selected() { return selected; },
 	};
