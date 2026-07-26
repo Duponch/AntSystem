@@ -7,6 +7,8 @@ const STORAGE_KEY = 'antsystem-settings-v1';
 function loadSaved() {
 
 	try {
+	if ( typeof localStorage === 'undefined' ) return null;
+
 
 		return JSON.parse( localStorage.getItem( STORAGE_KEY ) ) || null;
 
@@ -316,7 +318,7 @@ if ( saved ) {
 // kernel déjà instancié). `?perf=1` active les chronos GPU par passe.
 {
 
-	const q = new URLSearchParams( location.search );
+	const q = new URLSearchParams( typeof location === 'undefined' ? '' : location.search );
 	if ( q.has( 'physics' ) ) params.physics = q.get( 'physics' ) !== '0';
 	if ( q.has( 'perf' ) ) gfx.perfHud = q.get( 'perf' ) !== '0';
 
@@ -324,13 +326,14 @@ if ( saved ) {
 
 export function saveSettings() {
 
-	localStorage.setItem( STORAGE_KEY, JSON.stringify( { params, gfx } ) );
+	if ( typeof localStorage !== 'undefined' )
+		localStorage.setItem( STORAGE_KEY, JSON.stringify( { params, gfx } ) );
 
 }
 
 export function clearSettings() {
 
-	localStorage.removeItem( STORAGE_KEY );
+	if ( typeof localStorage !== 'undefined' ) localStorage.removeItem( STORAGE_KEY );
 
 }
 

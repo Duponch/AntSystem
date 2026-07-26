@@ -1,53 +1,37 @@
-// LE SURVEILLANT (warden) — batterie de tests d'intégration de la simulation.
+// LE SURVEILLANT (warden) — tests d'intégration GPU de la navigation v2.
 //
-// Usage : URL ?test=warden (au chargement) ou console : __antsys.warden.run()
+// Usage : URL ?test=warden (au chargement) ou console : __antsys.warden.run().
+// Chaque scénario avance la simulation par pas manuels et contrôle chaque
+// fourmi. Le rapport consolidé est publié en console et sur window.__antwarden.
 //
-// Pourquoi ce module existe : des comportements cassés (fourmis qui se
-// TÉLÉPORTENT d'une nappe à l'autre, fourmis qui font la TOUPIE dans une
-// cavité jusqu'à mourir de faim) ne se voient qu'en regardant des centaines
-// de vies de fourmis à la fois. Ici, chaque scénario rejoue la simulation en
-// pas MANUELS (boucle rAF figée) avec un noyau de surveillance qui relit
-// CHAQUE fourmi à CHAQUE pas et compte les anomalies — puis un rapport
-// consolidé sort en console et sur window.__antwarden.
+// ORACLES STRICTS (noyau kWatch, une invocation par fourmi et par pas) :
+//   1 POSE INTRINSÈQUE — reconstruction indépendante depuis corridor, progrès,
+//     voie et profondeur ; tout écart au corridor échoue.
+//   2 CINÉMATIQUE 3D — déplacement couvert par la distance curviligne accumulée,
+//     majorée par l'étirement géométrique mesuré des voies.
+//   3 WARP XZ — aucun saut planaire inexpliqué par la progression de route.
+//   4 TOUPIE / BLOCAGE — fenêtre de 8 s hors repos et destination atteinte ;
+//     une transition surface/sous-sol ouvre toujours une nouvelle fenêtre.
+//   5 BORNES DU VOLUME — aucune souterraine hors du volume réellement compilé,
+//     y compris avec le jitter des chambres profondes.
+//   6 MORT EN TOUPIE — corrélation entre anomalie et mort ultérieure.
 //
-// DÉTECTEURS (noyau kWatch, 1 invocation par fourmi et par pas) :
-//   1 TÉLÉPORTATION Y — le plancher résolu d'une souterraine change de plus
-//     d'1 u en un pas sans qu'elle vole (dyn.z ≈ 0). C'est le symptôme.
-//   2 NAPPE EMPRUNTÉE — la cause racine : la navigation est 2D (une cellule
-//     est praticable dès qu'UNE nappe y a une cavité) mais la hauteur dépend
-//     de la nappe de la fourmi. Quand sa colonne n'a PAS de cavité sur sa
-//     propre nappe, le rendu la rabat sur la cavité la plus haute : elle
-//     « emprunte » le plancher d'une autre nappe → saut vertical.
-//   3 WARP XZ — déplacement planaire > 8 texels en un pas (impossible à pied).
-//   4 TOUPIE — fenêtre glissante de 8 s : rotation cumulée > 6π avec moins de
-//     3 texels de déplacement → la fourmi tourne sur place.
-//   5 BLOQUÉE — moins de 0,5 texel de déplacement sur 8 s (même sans tourner).
-//   6 SOUS LE NID / EN SURFACE — plancher résolu hors des bornes physiques.
-//   7 MORT EN TOUPIE — une fourmi marquée toupie qui meurt : à rapprocher de
-//     son énergie (faim) pour distinguer bug et famine légitime.
+// Un échantillon CPU conserve chemins, états, énergie et traces intrinsèques.
+// Les verdicts n'acceptent aucune anomalie structurelle ; les indicateurs
+// biologiques stochastiques restent diagnostiques et séparés.
 //
-// CYCLE DE VIE (CPU) : un échantillon de fourmis est suivi toute la durée du
-// scénario — chemin parcouru, états traversés, énergie, cause de mort — avec
-// des gardes-fous : « une ouvrière doit bouger », « elle doit alterner
-// exploratrice/porteuse », « une mort s'explique (faim ou venin) ».
-//
-// Budget performance : NUL en jeu normal — les noyaux ne sont jamais
-// dispatchés hors campagne de tests (pas manuels). Les tampons dédiés
-// (~2 Mo de VRAM) dorment.
-//
-// Rappels des pièges (mémoire du projet, voir tests.js) : readbacks sérialisés
-// derrière le verrou global ; yield à l'event loop entre les chunks ; la sim
-// est stochastique → assertions en BORNES, pas en exacts.
+// Coût en jeu normal : nul. Ces noyaux et leurs tampons ne sont dispatchés que
+// pendant une campagne Warden ; les lectures GPU sont sérialisées par chunks.
 
 import {
 	Fn, If, instanceIndex, uniform, instancedArray, textureLoad,
 	uint, int, float, vec2, vec4, ivec2,
-	abs, min, clamp, length, select, PI2, atomicAdd, atomicStore, atomicLoad,
+	abs, min, max, clamp, floor, mix, sqrt, length, select, PI2, atomicAdd, atomicStore, atomicLoad,
 	hash, fract,
 } from 'three/tsl';
 
 import { params, gfx, TEXEL, MAX_ANTS } from './config.js';
-import { nestUnit, buildNest, K_MAX } from './nest.js';
+import { nestUnit, buildNest, K_MAX, MIN_TUNNEL_WIDTH } from './nest.js';
 
 const N_EVENTS = 256;         // anneau d'événements d'anomalies relus par le CPU
 const SPIN_T = 8.0;           // fenêtre toupie/blocage (s sim)
@@ -61,7 +45,7 @@ const STUCK_MOVE = 0.5;       // déplacement de blocage sur la fenêtre (texels
 
 // types d'événements (colonne « type » du rapport)
 const EV = { TELEPORT: 1, WARP: 2, NAPPE: 3, TOUPIE: 4, BLOQUE: 5, HORS_NID: 6, SURFACE: 7, MORT_TOUPIE: 8 };
-const EV_NOMS = [ '', 'téléport Y', 'warp XZ', 'nappe empruntée', 'toupie', 'bloquée', 'sous le nid', 'en surface', 'mort en toupie' ];
+const EV_NOMS = [ '', 'dépassement cinématique 3D', 'warp XZ', 'hors corridor', 'toupie', 'bloquée', 'sous le nid', 'en surface', 'mort en toupie' ];
 
 export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
@@ -72,7 +56,8 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 	// ------------------------------------------------------------------
 	// Tampons dédiés (jamais lus par le jeu normal)
 	// ------------------------------------------------------------------
-	// état au pas précédent : (x, y texels, cap rad, plancher résolu u | -999)
+	// état précédent : (x, y texels, distance-route sous terre / cap en surface,
+	// profondeur sous terre / marqueur surface / -999 au reset)
 	const prevData = instancedArray( MAX_ANTS, 'vec4' );
 	// fenêtre toupie : (rotation cumulée, déplacement cumulé, chrono, drapeaux)
 	// drapeaux : 1 toupie · 2 bloquée · 4 mort-en-toupie comptée · 8 nappe empruntée
@@ -87,6 +72,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 	const uDt = uniform( 1 / 60 );
 	const uSimTime = uniform( 0 );
 	const uDepthMax = uniform( 18 );
+	const uLaneStretch = uniform( layout.navigation?.maxLaneStretch || 1 );
 
 	const kWatch = Fn( () => {
 
@@ -108,10 +94,21 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			const acc = spinAcc.element( instanceIndex ).toVar();
 			const fl = acc.w.toUint().toVar();          // drapeaux en entier
 			const prevOk = prev.w.greaterThan( - 900 ); // prev.w = plancher | -999
+			const prevUnder = prev.w.lessThan( 0 );
+			const sameMode = prevOk.and( prevUnder.equal( under ) );
 			// plancher résolu CE pas : −999 tant que la fourmi n'est pas
 			// souterraine — un passage surface→nid ne peut pas être pris pour
 			// une téléportation (pas de plancher de référence)
 			const floorNow = float( - 999 ).toVar();
+			// Une transition surface/sous-sol change le sens de prev.z. Elle ouvre
+			// toujours une nouvelle fenêtre pour éviter tout mélange distance/cap.
+			If( prevOk.and( sameMode.not() ), () => {
+
+				acc.x.assign( 0 ); acc.y.assign( 0 ); acc.z.assign( 0 );
+				fl.assign( fl.bitAnd( uint( 0xFFFFFFFC ) ) );
+
+			} );
+
 
 			function emitEvent( type, magnitude ) {
 
@@ -119,11 +116,156 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 				events.element( c ).assign(
 					vec4( instanceIndex.toFloat(), float( type ), magnitude, uSimTime ) );
 				evExtra.element( c ).assign(
-					vec4( pos.x, pos.y, goalE.add( nodeE.mul( 8 ) ), layerE ) );
+					vec4( pos.x, pos.y, goalE.add( nodeE.mul( 8 ) ),
+						select( under, sim.antDyn.element( instanceIndex ).x.add(
+							sim.antDyn.element( instanceIndex ).y.mul( 0.001 ) ), layerE ) ) );
 
 			}
 
 			If( alive.and( under ), () => {
+
+				// L'oracle reconstruit la pose monde depuis l'état intrinsèque. Il ne
+				// consulte jamais la vieille heightmap : une divergence nav/rendu devient
+				// donc une erreur mesurable au lieu d'être masquée par le même modèle.
+				const dyn = sim.antDyn.element( instanceIndex );
+				floorNow.assign( dyn.z );
+				const edge = dyn.x.add( 0.5 ).toInt();
+				const corridorFault = float( 0 ).toVar();
+				const corridorError = float( 0 ).toVar();
+
+				If( edge.greaterThan( int( 0 ) ), () => {
+
+					If( edge.lessThan( int( layout.MAX_NODES ) ), () => {
+
+						const meta = textureLoad( layout.corridorMetaTexture, ivec2( edge, int( 0 ) ) );
+						const from = meta.x.add( 0.5 ).toInt();
+						const to = meta.y.add( 0.5 ).toInt();
+						const nodeI = nodeE.add( 0.5 ).toInt();
+						const incident = from.equal( nodeI ).or( to.equal( nodeI ) );
+						const validT = dyn.y.greaterThanEqual( - 1e-5 ).and( dyn.y.lessThanEqual( 1.00001 ) );
+						const direction = select( from.equal( nodeI ), float( 1 ), float( - 1 ) );
+
+						const f = clamp( dyn.y, 0, 1 ).mul( layout.CORRIDOR_SAMPLES - 1 );
+						const i0 = clamp( floor( f ).toInt(), int( 0 ), int( layout.CORRIDOR_SAMPLES - 2 ) );
+						const p0 = textureLoad( layout.corridorTexture, ivec2( i0, edge ) );
+						const p1 = textureLoad( layout.corridorTexture, ivec2( i0.add( int( 1 ) ), edge ) );
+						const pBefore = textureLoad( layout.corridorTexture,
+							ivec2( max( i0.sub( int( 1 ) ), int( 0 ) ), edge ) );
+						const pAfter = textureLoad( layout.corridorTexture,
+							ivec2( min( i0.add( int( 2 ) ), int( layout.CORRIDOR_SAMPLES - 1 ) ), edge ) );
+						const center = mix( p0.xyz, p1.xyz, f.sub( i0.toFloat() ) ).toVar();
+						const segment = p1.xy.sub( p0.xy );
+						const fallback = select( length( segment ).greaterThan( 1e-5 ),
+							segment.div( max( length( segment ), 1e-5 ) ), vec2( 1, 0 ) );
+						const tangent0Raw = p1.xy.sub( pBefore.xy );
+						const tangent1Raw = pAfter.xy.sub( p0.xy );
+						const tangent0 = select( length( tangent0Raw ).greaterThan( 1e-5 ),
+							tangent0Raw.div( max( length( tangent0Raw ), 1e-5 ) ), fallback );
+						const tangent1 = select( length( tangent1Raw ).greaterThan( 1e-5 ),
+							tangent1Raw.div( max( length( tangent1Raw ), 1e-5 ) ), fallback );
+						const tangentRaw = mix( tangent0, tangent1, f.sub( i0.toFloat() ) );
+						const tangent = select( length( tangentRaw ).greaterThan( 1e-5 ),
+							tangentRaw.div( max( length( tangentRaw ), 1e-5 ) ), fallback ).toVar();
+
+						const q0 = clamp( dyn.y.div( 0.12 ), 0, 1 );
+						const q1 = clamp( float( 1 ).sub( dyn.y ).div( 0.12 ), 0, 1 );
+						const fade0 = q0.mul( q0 ).mul( float( 3 ).sub( q0.mul( 2 ) ) );
+						const fade1 = q1.mul( q1 ).mul( float( 3 ).sub( q1.mul( 2 ) ) );
+						const lane = min( hash( instanceIndex.add( uint( 0x1A4E ) ) )
+							.mul( sim.u.laneOffset ), meta.w ).mul( direction ).mul( fade0 ).mul( fade1 );
+						const expected = center.xy.add( vec2( tangent.y.negate(), tangent.x ).mul( lane ) );
+						const horizontalError = length( pos.sub( expected ) ).mul( TEXEL );
+						const error3d = sqrt( horizontalError.mul( horizontalError )
+							.add( dyn.z.sub( center.z ).mul( dyn.z.sub( center.z ) ) ) );
+						corridorError.assign( error3d );
+						If( incident.not().or( validT.not() ).or( error3d.greaterThan( 0.002 ) ), () => {
+
+							corridorFault.assign( 1 );
+
+						} );
+
+					} ).Else( () => {
+
+						corridorFault.assign( 1 );
+						corridorError.assign( dyn.x );
+
+					} );
+
+				} ).Else( () => {
+
+					const here = textureLoad( layout.navNodeTexture,
+						ivec2( nodeE.add( 0.5 ).toInt(), int( 0 ) ) );
+					const roomDistance = length( pos.sub( here.xy ) );
+					const roomRadius = select( caste.isQueen, max( sim.u.queenR.sub( 2.5 ), 4 ),
+						max( here.w.mul( 1.25 ), 4 ) );
+					const depthError = abs( dyn.z.sub( here.z ) );
+					corridorError.assign( max( roomDistance.sub( roomRadius ).mul( TEXEL ), depthError ) );
+					If( dyn.x.lessThan( - 0.01 ).or( roomDistance.greaterThan( roomRadius ) )
+						.or( depthError.greaterThan( 0.002 ) ), () => {
+
+						corridorFault.assign( 1 );
+
+					} );
+
+				} );
+
+				If( corridorFault.greaterThan( 0.5 ), () => {
+
+					atomicAdd( counters.element( 2 ), uint( 1 ) );
+					If( fl.bitAnd( uint( 8 ) ).equal( uint( 0 ) ), () => {
+
+						fl.assign( fl.bitOr( uint( 8 ) ) );
+						emitEvent( EV.NAPPE, corridorError );
+
+					} );
+
+				} ).Else( () => {
+
+					fl.assign( fl.bitAnd( uint( 0xFFFFFFF7 ) ) );
+
+				} );
+
+				If( sameMode, () => {
+
+					const dxz = length( pos.sub( prev.xy ) );
+					const dxzWorld = dxz.mul( TEXEL );
+					const dy = abs( floorNow.sub( prev.w ) );
+					const displacement3d = sqrt( dxzWorld.mul( dxzWorld ).add( dy.mul( dy ) ) );
+					const travelledWorld = abs( dyn.w.sub( prev.z ) ).mul( TEXEL );
+					const kinematicBound = travelledWorld.mul( uLaneStretch ).add( 0.003 );
+
+					If( displacement3d.greaterThan( kinematicBound ), () => {
+
+						atomicAdd( counters.element( 0 ), uint( 1 ) );
+						emitEvent( EV.TELEPORT, displacement3d );
+
+					} );
+					const warpBound = max( float( DXZ_WARP ), abs( dyn.w.sub( prev.z ) ).mul( uLaneStretch ) );
+					If( dxz.greaterThan( warpBound ), () => {
+
+						atomicAdd( counters.element( 1 ), uint( 1 ) );
+						emitEvent( EV.WARP, dxz );
+
+					} );
+
+				} );
+
+				If( floorNow.greaterThan( 0.01 ), () => {
+
+					atomicAdd( counters.element( 6 ), uint( 1 ) );
+					emitEvent( EV.SURFACE, floorNow );
+
+				} );
+				If( floorNow.lessThan( uDepthMax.negate().sub( 3 ) ), () => {
+
+					atomicAdd( counters.element( 5 ), uint( 1 ) );
+					emitEvent( EV.HORS_NID, floorNow );
+
+				} );
+
+				// Le code 2.5D reste sous ce point uniquement le temps de la migration ;
+				// ce retour JS empêche sa construction dans le graphe TSL.
+				return;
 
 				const layer = st.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) );
 				// plancher résolu à la colonne (texels) sur SA nappe — MÊME
@@ -135,7 +277,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 						select( layer.equal( uint( 2 ) ), t.z, t.w ) ) ).toVar();
 				const any = min( min( t.x, t.y ), min( t.z, t.w ) ).toVar();
 				floorNow.assign( select( own.lessThan( - 1e-4 ), own, any ) );
-				const dyn = sim.antDyn.element( instanceIndex );
+				const legacyDyn = sim.antDyn.element( instanceIndex );
 
 				// --- 2 · NAPPE EMPRUNTÉE : la colonne n'a pas de cavité sur SA
 				// nappe, mais une autre en a une → le rendu la rabat verticalement
@@ -160,7 +302,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 					// --- 1 · TÉLÉPORTATION Y : le plancher a changé d'un coup
 					// sans vol balistique (dyn.z ≈ 0)
 					const dy = abs( floorNow.sub( prev.w ) ).toVar();
-					If( dy.greaterThan( float( DY_TELEPORT ) ).and( dyn.z.lessThan( 0.05 ) ), () => {
+					If( dy.greaterThan( float( DY_TELEPORT ) ).and( legacyDyn.z.lessThan( 0.05 ) ), () => {
 
 						atomicAdd( counters.element( 0 ), uint( 1 ) );
 						emitEvent( EV.TELEPORT, dy );
@@ -211,15 +353,22 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			const hungryR = sim.antVital.element( instanceIndex ).z.lessThan( sim.u.hungryHome );
 			const mayRest = state.equal( uint( 1 ) ).not()
 				.and( hungryR.not() ).and( caste.isNurse.not().or( qFed ) );
-			const resting = phaseR.lessThan( duty ).and( mayRest );
+			const resting = under.and( phaseR.lessThan( duty ).and( mayRest ) );
+			const routeGoalNode = select( goalE.lessThan( 0.5 ), nodeE,
+				select( goalE.lessThan( 1.5 ), sim.u.granaryNode,
+					select( goalE.lessThan( 2.5 ), sim.u.queenNode,
+						select( goalE.lessThan( 3.5 ), sim.u.broodNode, float( 0 ) ) ) ) );
+			const travelRequired = under.not().or( sim.antDyn.element( instanceIndex ).x.greaterThan( 0.5 ) )
+				.or( abs( nodeE.sub( routeGoalNode ) ).greaterThan( 0.5 ) );
 
-			If( alive.and( resting.not() ), () => {
+			If( alive.and( resting.not() ).and( travelRequired ), () => {
 
-				If( prevOk, () => {
+				If( sameMode, () => {
 
 					// écart angulaire ramené dans [0, π]
 					const dyaw = abs( yaw.sub( prev.z ) ).mod( PI2 );
-					acc.x.addAssign( select( dyaw.greaterThan( Math.PI ), PI2.sub( dyaw ), dyaw ) );
+					const angleDelta = select( dyaw.greaterThan( Math.PI ), PI2.sub( dyaw ), dyaw );
+					acc.x.addAssign( select( under, float( 0 ), angleDelta ) );
 					acc.y.addAssign( length( pos.sub( prev.xy ) ) );
 					acc.z.addAssign( uDt );
 
@@ -276,7 +425,8 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 			acc.w.assign( fl.toFloat() );
 			prevData.element( instanceIndex ).assign(
-				vec4( pos.x, pos.y, yaw, floorNow ) );
+				vec4( pos.x, pos.y, select( under, sim.antDyn.element( instanceIndex ).w, yaw ),
+					select( under, floorNow, float( 1 ) ) ) );
 			spinAcc.element( instanceIndex ).assign( acc );
 
 		} );
@@ -296,6 +446,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 	} )().compute( 16 );
 
+
 	const kCursorReset = Fn( () => {
 
 		atomicStore( evCursor.element( 0 ), uint( 0 ) );
@@ -307,12 +458,15 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 	// ------------------------------------------------------------------
 	let simClock = 0;
 
-	function resetWatch() {
+	function resetWatch( preserveClock = false ) {
 
 		renderer.compute( [ kWatchReset, kCountersReset, kCursorReset ] );
-		simClock = 0;
-		uDepthMax.value = layout.depthMax || 18;
+		if ( ! preserveClock ) simClock = 0;
+		const deepest = Math.min( 0,
+			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ) );
+		uDepthMax.value = Math.max( layout.depthMax || 18, - deepest );
 
+		uLaneStretch.value = layout.navigation?.maxLaneStretch || 1;
 	}
 
 	// pas manuels surveillés : sim → colonie → veille (les readbacks async
@@ -350,7 +504,9 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 				typeNom: EV_NOMS[ Math.round( ev[ i * 4 + 1 ] ) ] || '?',
 				value: + ev[ i * 4 + 2 ].toFixed( 2 ), t: + ev[ i * 4 + 3 ].toFixed( 1 ),
 				x: + ex[ i * 4 ].toFixed( 1 ), y: + ex[ i * 4 + 1 ].toFixed( 1 ),
-				goal: gn % 8, node: Math.floor( gn / 8 ), layer: Math.round( ex[ i * 4 + 3 ] ) } );
+				goal: gn % 8, node: Math.floor( gn / 8 ), layer: Math.round( ex[ i * 4 + 3 ] ),
+				edge: Math.floor( ex[ i * 4 + 3 ] + 1e-5 ),
+				progress: + ( ( ex[ i * 4 + 3 ] % 1 ) * 1000 ).toFixed( 4 ) } );
 
 		}
 
@@ -400,7 +556,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			// stratifié : reine + population répartie sur tout l'indice
 			const idx = i === 0 ? 0 : Math.floor( ( i - 1 ) * ( params.antCount - 1 ) / Math.max( 1, n - 2 ) );
 			antsT.push( { idx, path: 0, states: new Set(), minEnergy: 1,
-				dead: - 1, deathEnergy: - 1, lastPos: null } );
+				dead: - 1, deathEnergy: - 1, lastPos: null, routeTrace: [] } );
 
 		}
 
@@ -414,6 +570,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 				const st = new Uint32Array( await renderer.getArrayBufferAsync( sim.antState.value, null, 0, N * 4 ) );
 				const d = new Float32Array( await renderer.getArrayBufferAsync( sim.antData.value, null, 0, N * 16 ) );
 				const v = new Float32Array( await renderer.getArrayBufferAsync( sim.antVital.value, null, 0, N * 16 ) );
+				const nav = new Float32Array( await renderer.getArrayBufferAsync( sim.antDyn.value, null, 0, N * 16 ) );
 
 				for ( const t of antsT ) {
 
@@ -421,9 +578,23 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 					const state = st[ t.idx ] & 7;
 					const px = d[ t.idx * 4 ], py = d[ t.idx * 4 + 1 ];
 					const energy = v[ t.idx * 4 + 2 ];
+					const under = ( st[ t.idx ] & 8 ) !== 0;
+					const node = ( st[ t.idx ] >>> 7 ) & 127;
+					const goal = ( st[ t.idx ] >>> 4 ) & 7;
+					const edge = under ? Math.round( nav[ t.idx * 4 ] ) : 0;
+					const progress = under ? nav[ t.idx * 4 + 1 ] : 0;
+					const depth = under ? nav[ t.idx * 4 + 2 ] : 0;
+					const routeDistance = under ? nav[ t.idx * 4 + 3 ] : 0;
 
-					if ( t.lastPos ) t.path += Math.hypot( px - t.lastPos[ 0 ], py - t.lastPos[ 1 ] ) * TEXEL;
-					t.lastPos = [ px, py ];
+					if ( t.lastPos ) t.path += Math.hypot(
+						( px - t.lastPos[ 0 ] ) * TEXEL,
+						( py - t.lastPos[ 1 ] ) * TEXEL,
+						depth - t.lastPos[ 2 ] );
+					t.lastPos = [ px, py, depth ];
+					t.routeTrace.push( { tick: Math.round( simClock * 60 ), node, goal, edge,
+						progress: + progress.toFixed( 5 ), distance: + routeDistance.toFixed( 3 ),
+						x: + ( px * TEXEL ).toFixed( 3 ), z: + ( py * TEXEL ).toFixed( 3 ),
+						depth: + depth.toFixed( 3 ) } );
 					t.states.add( state );
 					if ( state < 2 ) t.minEnergy = Math.min( t.minEnergy, energy );
 					if ( state === 2 && t.dead < 0 ) { t.dead = simClock; t.deathEnergy = energy; }
@@ -461,7 +632,8 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 				}
 
-				return { total: antsT.length, healthy, bad };
+				return { total: antsT.length, healthy, bad,
+					traces: antsT.map( ( ant ) => ( { idx: ant.idx, samples: ant.routeTrace } ) ) };
 
 			},
 
@@ -570,27 +742,48 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 		console.log( `🛡 Scénario « ${ sc.name } » (${ sc.seconds } s sim, ${ sc.ants } fourmis)…` );
 		params.antCount = sc.ants;
+		sim.u.seed.value = sc.seed ?? 20260726;
 		sim.u.antCount.value = sc.ants;
 		ants.setCount( sc.ants );
 		cones.setCount( sc.ants );
 		if ( sc.configure ) sc.configure();
+		sim.applyLayout();
 		await sim.reset();
 		await colony.reset();
 		resetWatch();
 
 		const life = makeLifeTracker( 48 );
 		let lastStats = null;
-		const chunks = Math.max( 1, Math.round( sc.seconds / 10 ) );
+		const watchSegments = [];
+		const chunks = Math.max( sc.during ? 2 : 1, Math.round( sc.seconds / 10 ) );
 
 		for ( let c = 0; c < chunks; c ++ ) {
 
 			await steps( sc.seconds / chunks );
+			if ( sc.during && c + 1 === Math.ceil( chunks / 2 ) ) {
+
+				watchSegments.push( await readWatch() );
+				await sc.during();
+				// Nouvelle fenêtre de vitesse : le commit lui-même est couvert par la
+				// validation immuable du préfixe ; les pas suivants repartent d'une pose connue.
+				resetWatch( true );
+				await sim.synchronize();
+
+			}
 			lastStats = await tickColony();
 			await life.sample();
 
 		}
 
 		const watch = await readWatch();
+		for ( const segment of watchSegments ) {
+
+			for ( let i = 0; i < watch.counters.length; i ++ )
+				watch.counters[ i ] += segment.counters[ i ] || 0;
+			watch.events = [ ... segment.events, ... watch.events ];
+			watch.overflow ||= segment.overflow;
+
+		}
 		const lifeRep = life.report();
 		const st = lastStats || {};
 
@@ -602,9 +795,9 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			stats: { morts: st.eaten ?? - 1, livraisons: st.delivered ?? - 1,
 				pontes: st.laid ?? - 1, éclosions: st.hatched ?? - 1 },
 			anomalies: {
-				téléportY: watch.counters[ 0 ],
+				depassementsCinematiques3D: watch.counters[ 0 ],
 				warpXZ: watch.counters[ 1 ],
-				nappeEmpruntéePas: watch.counters[ 2 ],
+				horsCorridor: watch.counters[ 2 ],
 				toupies: watch.counters[ 3 ],
 				bloquées: watch.counters[ 4 ],
 				sousLeNid: watch.counters[ 5 ],
@@ -617,21 +810,20 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 		};
 
-		// verdict de scénario (bornes : la sim est stochastique)
-		const antMinutes = Math.max( 1, params.antCount * sc.seconds / 60 );
-		const teleportRatio = rep.anomalies.téléportY / antMinutes;
-		const ok =
-			rep.anomalies.warpXZ === 0 &&
-			rep.anomalies.sousLeNid === 0 &&
-			rep.anomalies.enSurface === 0 &&
-			teleportRatio < 0.01 &&                    // < 1 % de fourmi·minute téléportée
-			rep.cycleDeVie.bad.length <= Math.ceil( rep.cycleDeVie.total * 0.15 );
+		// Un seul écart structurel suffit à faire échouer la campagne.
+		const ok = watch.counters.slice( 0, 8 ).every( ( value ) => value === 0 );
 
 		rep.pass = ok;
-		console.log( `${ ok ? '✅' : '❌' } « ${ sc.name } » — téléportY=${ rep.anomalies.téléportY }`
-			+ ` nappeEmpruntée=${ rep.anomalies.nappeEmpruntéePas } pas, toupies=${ rep.anomalies.toupies }`
+		console.log( `${ ok ? '✅' : '❌' } « ${ sc.name } » — cinématique3D=${ rep.anomalies.depassementsCinematiques3D }`
+			+ ` horsCorridor=${ rep.anomalies.horsCorridor }, toupies=${ rep.anomalies.toupies }`
 			+ ` bloquées=${ rep.anomalies.bloquées } mortsEnToupie=${ rep.anomalies.mortsEnToupie }`
 			+ ` cycle=${ rep.cycleDeVie.healthy }/${ rep.cycleDeVie.total } saines` );
+		if ( ! ok && rep.events.length ) {
+
+			console.log( `[warden-events] ${ JSON.stringify( rep.events.slice( 0, 8 ) ) }` );
+			console.log( `[warden-traces] ${ JSON.stringify( lifeRep.traces.slice( - 8 ) ) }` );
+
+		}
 
 		return rep;
 
@@ -664,8 +856,11 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			const scenarios = [
 				{ name: 'référence', ants: 869, seconds },
 				{ name: 'colonie dense', ants: 2048, seconds },
+				{ name: 'capacité maximale', ants: MAX_ANTS, seconds: Math.min( seconds, 5 ) },
+				{ name: 'profondeur extrême', ants: 869, seconds: Math.min( seconds, 10 ),
+					configure: () => { params.nestDepth = 200; sim.layout.rebuild(); } },
 				{ name: 'tunnels étroits', ants: 869, seconds,
-					configure: () => { params.nestTunnelW = 3; sim.layout.rebuild(); } },
+					configure: () => { params.nestTunnelW = MIN_TUNNEL_WIDTH; sim.layout.rebuild(); } },
 				{ name: 'tunnels larges', ants: 869, seconds,
 					configure: () => { params.nestTunnelW = 10; sim.layout.rebuild(); } },
 				{ name: 'famine', ants: 869, seconds: Math.min( seconds, 150 ),
@@ -674,6 +869,12 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 						sim.u.granaryStart.value = 0;
 						sim.u.energyLife.value = 45;
 
+					} },
+				{ name: 'croissance append-only en trajet', ants: 869, seconds: Math.min( seconds, 20 ),
+					during: async () => {
+						await sim.synchronize();
+						if ( sim.layout.growTo( Math.min( K_MAX, sim.layout.K + 4 ) ) ) sim.applyLayout();
+						await sim.synchronize();
 					} },
 			];
 

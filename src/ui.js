@@ -6,7 +6,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 import { params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL, saveSettings, clearSettings } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
 import { CATALOG } from './graphics/props.js';
-import { nestBudget, quantK } from './nest.js';
+import { nestBudget, quantK, MIN_TUNNEL_WIDTH } from './nest.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
@@ -41,6 +41,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		applyAntShadows();
 		if ( antCountCtrl ) antCountCtrl.updateDisplay();
 
+		scheduleNestGrowth();
 	}
 
 	antCountCtrl = fColony.add( params, 'antCount', 10, MAX_ANTS, 1 ).name( 'Fourmis' ).onChange( ( v ) => {
@@ -50,7 +51,6 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		if ( v > prev ) sim.reinitAnts( prev );
 
 		setPopulation( v );
-		scheduleNestGrowth();
 
 	} );
 	fColony.add( params, 'simSpeed', 0, 4, 0.1 ).name( 'Vitesse ×' );
@@ -97,16 +97,55 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
 	}
+	// Profondeur et largeur changent la géométrie déjà occupée. Elles passent
+	// donc par une transaction explicite : pause, publication complète, reset
+	// attendu, puis reprise. Une croissance append-only reste, elle, live.
+	async function rebuildNestAndReset( depthChanged = false ) {
+
+		const wasPaused = params.paused;
+		params.paused = true;
+		try {
+
+			sim.layout.rebuild();
+			if ( depthChanged ) {
+
+				gfx.groundThickness = Math.max( 6, params.nestDepth + 4 );
+				env.setThickness( gfx.groundThickness );
+
+			}
+			applyNest();
+			await onReset();
+
+		} finally { params.paused = wasPaused; }
+
+	}
+	async function commitNestGrowth( target ) {
+
+		const wasPaused = params.paused;
+		params.paused = true;
+		try {
+
+			await sim.synchronize();
+			if ( ! sim.layout.growTo( target ) ) return false;
+			applyNest();
+			await sim.synchronize();
+			return true;
+
+		} finally { params.paused = wasPaused; }
+
+	}
+
+
 
 	function scheduleNestGrowth() {
 
 		if ( ! params.nestGrow || ! params.colony ) return;
 		clearTimeout( growTimer );
 		// debounce : un balayage du curseur ne doit pas declencher mille creusages
-		growTimer = setTimeout( () => {
+		growTimer = setTimeout( async () => {
 
 			const K = quantK( nestBudget( params.antCount, params.nestScale ) );
-			if ( sim.layout.growTo( K ) ) applyNest();
+			await commitNestGrowth( K );
 
 		}, 250 );
 
@@ -116,32 +155,28 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const nestInfoCtrl = fNest.add( nestInfo, 'etat' ).name( 'État' ).disable();
 	fNest.add( params, 'nestGrow' ).name( 'Pousse avec la colonie' );
 	fNest.add( params, 'nestScale', 0.3, 3, 0.1 ).name( 'Taille (× la loi biologique)' )
-		.onFinishChange( () => {
+		.onFinishChange( async () => {
 
 			const K = quantK( nestBudget( params.antCount, params.nestScale ) );
-			if ( sim.layout.growTo( K ) ) applyNest();
+			await commitNestGrowth( K );
 
 		} );
-	fNest.add( params, 'nestDepth', 10, 200, 5 ).name( 'Profondeur (u)' )
-		.onFinishChange( () => {
+	fNest.add( params, 'nestDepth', 10, 200, 1 ).name( 'Profondeur (u)' )
+		.onFinishChange( async () => {
 
-			sim.layout.rebuild();
-			gfx.groundThickness = Math.max( 6, params.nestDepth + 4 );
-			env.setThickness( gfx.groundThickness );
-			applyNest();
+			await rebuildNestAndReset( true );
+		} );
+	fNest.add( params, 'nestTunnelW', MIN_TUNNEL_WIDTH, 12, 0.5 ).name( 'Largeur des tunnels (texels)' )
+		.onFinishChange( async () => {
+
+			params.nestTunnelW = Math.max( MIN_TUNNEL_WIDTH, params.nestTunnelW );
+			await rebuildNestAndReset();
 
 		} );
-	fNest.add( params, 'nestTunnelW', 3, 12, 0.5 ).name( 'Largeur des tunnels (texels)' )
-		.onFinishChange( () => {
-
-			sim.layout.rebuild();
-			applyNest();
-
-		} );
-	fNest.add( { creuser: () => {
+	fNest.add( { creuser: async () => {
 
 		const K = quantK( sim.layout.K + 4 );
-		if ( sim.layout.growTo( K ) ) applyNest();
+		await commitNestGrowth( K );
 		overlayFlash( `⛏ Nid agrandi : ${sim.layout.K} loges` );
 
 	} }, 'creuser' ).name( '⛏ Creuser un étage de plus' );

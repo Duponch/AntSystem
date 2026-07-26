@@ -44,6 +44,10 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 	// --- buffers minuscules (lus en async, jamais de stall) ---
 	const pickBuf = instancedArray( 1, 'uint' ).toAtomic();
 	// [0] position+échelle · [1] phase/venin/caste/drapeaux · [2] antDyn brut
+	// antDyn est polymorphe :
+	//   surface    = (vx, vz, hauteur, vitesse verticale)
+	//   souterrain = (corridor, progression 0..1, profondeur du sol, distance cumulee)
+	// Le bit souterrain des drapeaux choisit le decodeur CPU approprie.
 	// [3] énergie, état, nappe, attaque (dépackés côté GPU, zéro décodage CPU)
 	const followBuf = instancedArray( 4, 'vec4' );
 
@@ -145,7 +149,11 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 	let lastHudText = '';
 	let savedMinDistance = 0;
 	// infos dépackées du readback (pour le HUD) et détection de saut
-	let info = { energy: 0, venom: 0, state: 0, layer: 0, attacking: 0, speed: 0, measSpeed: 0 };
+	let info = {
+		energy: 0, venom: 0, state: 0, layer: 0, attacking: 0,
+		speed: 0, measSpeed: 0,
+		corridor: - 1, progress: 0, floorDepth: 0, distance: 0,
+	};
 	let jumpCount = 0;
 	let lastJumpMag = 0;
 	let lastJumpAt = - 1e9;
@@ -154,6 +162,29 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 	function buildHud( flags, caste ) {
 
 		const under = ( Math.floor( flags / 4 ) % 2 ) === 1;
+
+		if ( under ) {
+
+			const undergroundQueen = ( Math.floor( flags / 8 ) % 2 ) === 1;
+			const undergroundCarrying = ( Math.floor( flags / 16 ) % 2 ) === 1;
+			const undergroundName = undergroundQueen ? 'reine' : CASTES[ caste ] || 'ouvri\u00e8re';
+			const undergroundAct = ETATS[ info.state ] || '?';
+			const header = `#${ selected } ${ undergroundName } \u00b7 souterraine \u00b7 ${ undergroundAct }`
+				+ ( undergroundCarrying ? ' \u00b7 transporte' : '' )
+				+ ( info.attacking ? ' \u00b7 ATTAQUE' : '' );
+			const vital = `\u00e9nergie ${ ( info.energy * 100 ).toFixed( 0 ) } % \u00b7 venin ${ ( info.venom * 100 ).toFixed( 0 ) } %`;
+			const route = `corridor #${ info.corridor } \u00b7 progression ${ ( info.progress * 100 ).toFixed( 1 ) } %`
+				+ ` \u00b7 distance ${ info.distance.toFixed( 2 ) } u`;
+			const floorLine = `sol ${ info.floorDepth.toFixed( 2 ) } u \u00b7 v mesur\u00e9e ${ info.measSpeed.toFixed( 2 ) } u/s`;
+			const posLine = `pos ${ position.x.toFixed( 2 ) }, ${ position.y.toFixed( 2 ) }, ${ position.z.toFixed( 2 ) }`;
+			const jump = jumpCount > 0
+				? `\u26a0 ${ jumpCount } saut${ jumpCount > 1 ? 's' : '' } \u2014 dernier +${ lastJumpMag.toFixed( 1 ) } u il y a ${ ( ( performance.now() - lastJumpAt ) / 1000 ).toFixed( 1 ) } s`
+				: null;
+			return [ header, vital, route, floorLine, posLine, jump,
+				'molette : zoom \u00b7 clic vide / \u00c9chap : l\u00e2cher' ]
+				.filter( Boolean ).join( '\n' );
+
+		}
 		const queen = ( Math.floor( flags / 8 ) % 2 ) === 1;
 		const carrying = ( Math.floor( flags / 16 ) % 2 ) === 1;
 		const name = queen ? 'reine' : CASTES[ caste ] || 'ouvrière';
@@ -192,6 +223,7 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		hasSmooth = false;
 		hasPrev = false;
 		jumpCount = 0;
+		info.measSpeed = 0;
 		lastJumpAt = - 1e9;
 		uFollowIdx.value = index;
 		savedMinDistance = controls.minDistance;
@@ -285,6 +317,19 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 				info.state = Math.round( f[ 13 ] );
 				info.layer = Math.round( f[ 14 ] );
 				info.attacking = Math.round( f[ 15 ] );
+
+				const under = ( Math.floor( f[ 7 ] / 4 ) % 2 ) === 1;
+
+				if ( under ) {
+
+					// antDyn souterrain : coordonnees intrinseques du reseau de corridors.
+					info.corridor = Math.round( f[ 8 ] );
+					info.progress = f[ 9 ];
+					info.floorDepth = f[ 10 ];
+					info.distance = f[ 11 ];
+					info.speed = 0;
+
+				}
 
 				if ( hasPrev ) {
 

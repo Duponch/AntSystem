@@ -150,7 +150,8 @@ export function createPose( sim, vat ) {
 			const pivotY = select( isSoldier, u.soldierPivotY, u.pivotY );
 			const modelHeight = select( isSoldier, u.soldierHeight, u.workerHeight );
 
-			const solY = select( under, floorDepth( a.xy, layer ).add( 0.04 ), float( 0 ) ).toVar();
+			// Sous terre, antDyn.z est la profondeur continue de la courbe 3D.
+			const solY = select( under, dyn.z.add( 0.04 ), float( 0 ) ).toVar();
 
 			const yaw = float( Math.PI / 2 ).sub( a.z );
 			const pitch = float( 0 ).toVar();
@@ -161,6 +162,12 @@ export function createPose( sim, vat ) {
 
 				lift.assign( dyn.z );              // hauteur balistique réelle
 
+				If( under, () => {
+
+					lift.assign( 0 );
+
+
+				} );
 				If( dead, () => {
 
 					// ================= CULBUTE DU CADAVRE =================

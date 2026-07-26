@@ -47,6 +47,20 @@ export const SEED_BLOBS = [
 	{ angle: 5.1, dist: 360, radius: 11 },
 ];
 
+// RNG CPU sans état caché, miroir du contrat déterministe GPU : un résultat
+// dépend uniquement de la seed du run, du tick/série et du flux demandé.
+function random01( seed, serial, stream ) {
+
+	let x = ( seed ^ Math.imul( serial + 1, 0x9E3779B9 ) ^ Math.imul( stream + 1, 0x85EBCA6B ) ) >>> 0;
+	x ^= x >>> 16;
+	x = Math.imul( x, 0x7FEB352D ) >>> 0;
+	x ^= x >>> 15;
+	x = Math.imul( x, 0x846CA68B ) >>> 0;
+	x ^= x >>> 16;
+	return x / 0x100000000;
+
+}
+
 export class AntSimulation {
 
 	// layout : topologie de la fourmilière souterraine (buildNestLayout de
@@ -59,6 +73,7 @@ export class AntSimulation {
 
 		// --- uniforms pilotés par l'UI ---
 		const u = this.u = {
+			tick: uniform( 0 ),
 			dt: uniform( 0 ),
 			antCount: uniform( params.antCount ),
 			moveSpeed: uniform( params.moveSpeed ),
@@ -165,6 +180,7 @@ export class AntSimulation {
 		u.broodR = uniform( layout.chambers.brood1.R );
 		u.granaryR = uniform( layout.chambers.granary.R );
 		u.granaryLayer = uniform( layout.nodes[ layout.GOAL_NODE[ 1 ] ].layer );
+		u.granaryNode = uniform( layout.GOAL_NODE[ 1 ] );
 		u.troughGranary = uniform( layout.troughs.granary.cell );
 		u.troughQueen = uniform( layout.troughs.queen.cell );
 		u.troughBrood = uniform( layout.troughs.brood.cell );
@@ -332,6 +348,59 @@ export class AntSimulation {
 		// hop : noeud suivant pour aller de `n` vers l'objectif `g`
 		const hopOf = ( n, g ) => textureLoad( layout.navTexture, ivec2( n, g ) ).x.add( 0.5 ).toInt();
 
+		// --- réseau intrinsèque 3D -------------------------------------------------
+		// antDyn est volontairement polymorphe afin de rester sous la limite WebGPU
+		// de 16 storage buffers : en surface (vx,vz,h,vy), sous terre
+		// (corridorId,t,profondeur,distanceCumulée). Les courbes et le SDF sont issus
+		// de la même source ; aucune projection heightfield n'intervient ici.
+		const navNodeAt = ( i ) => textureLoad( layout.navNodeTexture, ivec2( i, int( 0 ) ) );
+		const corridorMetaAt = ( i ) => textureLoad( layout.corridorMetaTexture, ivec2( i, int( 0 ) ) );
+		const corridorPointAt = ( edge, sample ) =>
+			textureLoad( layout.corridorTexture, ivec2( sample, edge ) );
+		const smooth01 = ( x ) => {
+
+			const q = clamp( x, 0, 1 );
+			return q.mul( q ).mul( float( 3 ).sub( q.mul( 2 ) ) );
+
+		};
+		const sampleCorridor = ( edge, t, direction, laneMagnitude ) => {
+
+			const f = clamp( t, 0, 1 ).mul( layout.CORRIDOR_SAMPLES - 1 );
+			const i0 = clamp( floor( f ).toInt(), int( 0 ), int( layout.CORRIDOR_SAMPLES - 2 ) );
+			const i1 = i0.add( int( 1 ) );
+			const p0 = corridorPointAt( edge, i0 );
+			const p1 = corridorPointAt( edge, i1 );
+			const pBefore = corridorPointAt( edge, max( i0.sub( int( 1 ) ), int( 0 ) ) );
+			const pAfter = corridorPointAt( edge,
+				min( i1.add( int( 1 ) ), int( layout.CORRIDOR_SAMPLES - 1 ) ) );
+			const local = f.sub( i0.toFloat() );
+			const center = mix( p0.xyz, p1.xyz, local ).toVar();
+			const segment = p1.xy.sub( p0.xy );
+			const fallback = select( length( segment ).greaterThan( 1e-5 ),
+				segment.div( max( length( segment ), 1e-5 ) ), vec2( 1, 0 ) );
+			const tangent0Raw = p1.xy.sub( pBefore.xy );
+			const tangent1Raw = pAfter.xy.sub( p0.xy );
+			const tangent0 = select( length( tangent0Raw ).greaterThan( 1e-5 ),
+				tangent0Raw.div( max( length( tangent0Raw ), 1e-5 ) ), fallback );
+			const tangent1 = select( length( tangent1Raw ).greaterThan( 1e-5 ),
+				tangent1Raw.div( max( length( tangent1Raw ), 1e-5 ) ), fallback );
+			const tangentRaw = mix( tangent0, tangent1, local );
+			const tangent = select( length( tangentRaw ).greaterThan( 1e-5 ),
+				tangentRaw.div( max( length( tangentRaw ), 1e-5 ) ), fallback ).toVar();
+			const fade = smooth01( t.div( 0.12 ) )
+				.mul( smooth01( float( 1 ).sub( t ).div( 0.12 ) ) );
+			const safeLane = min( laneMagnitude, corridorMetaAt( edge ).w );
+			const offset = safeLane.mul( direction ).mul( fade );
+			const position = center.xy.add( vec2( tangent.y.negate(), tangent.x ).mul( offset ) );
+
+			return {
+				position,
+				depth: center.z,
+				tangent: tangent.mul( direction ),
+			};
+
+		};
+
 		// --- murs packés en bits : bit 0 = mur de SURFACE, bit 1 = creusé ---
 		const surfaceWall = ( w ) => w.bitAnd( uint( 1 ) ).notEqual( uint( 0 ) );
 		const dug = ( w ) => w.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
@@ -426,6 +495,7 @@ export class AntSimulation {
 
 				const pos = vec2( 0 ).toVar();
 				const st = uint( 0 ).toVar();
+				const dyn0 = vec4( 0 ).toVar();
 
 				If( isQueen, () => {
 
@@ -435,6 +505,7 @@ export class AntSimulation {
 					// souterraine, etat 0, sans objectif, sur la nappe de sa chambre
 					st.assign( uint( 8 ).bitOr( u.queenNode.toUint().shiftLeft( uint( 7 ) ) )
 						.bitOr( u.queenLayer.toUint().shiftLeft( uint( 14 ) ) ) );
+					dyn0.z.assign( navNodeAt( u.queenNode.toInt() ).z );
 
 				} ).ElseIf( u.colonyOn.greaterThan( 0.5 )
 					.and( isNurse.or( u.spawnMode.greaterThan( 0.5 ) ) ), () => {
@@ -448,6 +519,7 @@ export class AntSimulation {
 					st.assign( uint( 8 ).bitOr( goal.shiftLeft( uint( 4 ) ) )
 						.bitOr( u.broodNode.toUint().shiftLeft( uint( 7 ) ) )
 						.bitOr( u.broodLayer.toUint().shiftLeft( uint( 14 ) ) ) );
+					dyn0.z.assign( navNodeAt( u.broodNode.toInt() ).z );
 
 				} ).Else( () => {
 
@@ -469,7 +541,7 @@ export class AntSimulation {
 					0, 0, hash( i.add( uint( 4409 ) ) ).mul( 0.5 ).add( 0.5 ),
 					hash( i.add( uint( 7717 ) ) ),      // phase de démarche désynchronisée
 				) );
-				antDyn.element( instanceIndex ).assign( vec4( 0 ) );
+				antDyn.element( instanceIndex ).assign( dyn0 );
 
 			} );
 
@@ -572,7 +644,7 @@ export class AntSimulation {
 
 				// graine entière par fourmi, par frame et par run (hash() tronque les flottants)
 				const iseed = instanceIndex
-					.add( frameId.mul( uint( 0x9E3779B9 ) ) )
+					.add( u.tick.toUint().mul( uint( 0x9E3779B9 ) ) )
 					.add( u.seed.toUint().mul( uint( 2654435761 ) ) );
 				const a = antData.element( instanceIndex );
 
@@ -604,9 +676,13 @@ export class AntSimulation {
 
 				// --- état dynamique : vitesse planaire, hauteur, vitesse verticale ---
 				const dyn = antDyn.element( instanceIndex );
-				const vel = dyn.xy.toVar();
-				const height = dyn.z.toVar();
-				const vHeight = dyn.w.toVar();
+				const vel = select( under.equal( uint( 0 ) ), dyn.xy, vec2( 0 ) ).toVar();
+				const height = select( under.equal( uint( 0 ) ), dyn.z, float( 0 ) ).toVar();
+				const vHeight = select( under.equal( uint( 0 ) ), dyn.w, float( 0 ) ).toVar();
+				const navEdge = select( under.equal( uint( 1 ) ), dyn.x, float( 0 ) ).toVar();
+				const navT = select( under.equal( uint( 1 ) ), dyn.y, float( 0 ) ).toVar();
+				const navFloor = select( under.equal( uint( 1 ) ), dyn.z, float( 0 ) ).toVar();
+				const navDistance = select( under.equal( uint( 1 ) ), dyn.w, float( 0 ) ).toVar();
 				const phys = u.physOn.greaterThan( 0.5 );
 
 				// alive = vivante (drapeau flottant) : cadavres ET dévorées restent figés.
@@ -894,9 +970,12 @@ export class AntSimulation {
 				// PLANCHER COURANT : sur SA nappe si elle y est creusée, sinon la
 				// plus profonde disponible (repli cohérent avec le rendu — ne
 				// devrait plus arriver, la continuité interdit ces colonnes)
-				const curFloor = float( 0 ).toVar();
+				const curFloor = select( under.equal( uint( 1 ) ), navFloor, float( 0 ) ).toVar();
 
 				If( under.equal( uint( 1 ) ), () => {
+
+					// La profondeur vient de la coordonnée intrinsèque du corridor.
+					return;
 
 					const t = depth4At( pos );
 					const own = select( layer.equal( uint( 0 ) ), t.x,
@@ -915,6 +994,9 @@ export class AntSimulation {
 				const prevFloorQ = stPacked.shiftRight( uint( 25 ) ).bitAnd( uint( 127 ) ).toVar();
 
 				If( under.equal( uint( 1 ) ).and( prevFloorQ.greaterThan( uint( 0 ) ) ), () => {
+
+					// Un rebuild conserve les corridors existants ; aucune projection verticale.
+					return;
 
 					const drop = prevFloorQ.toFloat().mul( - 0.25 ).sub( curFloor ).toVar();
 
@@ -996,6 +1078,13 @@ export class AntSimulation {
 
 						under.assign( uint( 1 ) );
 						pos.assign( u.queenPos );
+						node.assign( u.queenNode.toUint() );
+						layer.assign( u.queenLayer.toUint() );
+						navEdge.assign( 0 );
+						navT.assign( 0 );
+						navFloor.assign( navNodeAt( u.queenNode.toInt() ).z );
+						navDistance.assign( 0 );
+
 
 					} );
 
@@ -1037,6 +1126,10 @@ export class AntSimulation {
 						pos.assign( u.queenPos.add( off.div( offL ).mul( u.queenR.sub( 2.5 ) ) ) );
 
 					} );
+					// La reine n'emprunte pas d'arête, mais son compteur intrinsèque reste
+					// un registre exact de distance pour l'oracle cinématique du Warden.
+					navDistance.addAssign( length( pos.sub( pos0 ) ) );
+
 
 					// PONTE : chrono porté par a.w — assez d'énergie requise
 					If( timer.greaterThan( u.queenLayInterval ).and( energy.greaterThan( u.queenLayMin ) ), () => {
@@ -1056,6 +1149,35 @@ export class AntSimulation {
 					const moveMult = float( 1 ).toVar();
 
 					If( under.equal( uint( 1 ) ).and( u.colonyOn.greaterThan( 0.5 ) ), () => {
+
+						// Navigation v2 : l'objectif choisit une suite d'arêtes précompilée.
+						// Aucun nearest-node, flow-field, changement de nappe ou rebond.
+						If( goal.equal( uint( 0 ) ), () => {
+
+							goal.assign( select( isNurse, uint( 1 ), uint( 4 ) ) );
+
+						} );
+
+						// Le repos reste un état biologique volontaire. Il ne peut ni modifier
+						// la route ni l'orientation et est explicitement exclu des tests de
+						// blocage.
+						const periodV2 = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
+						const phaseV2 = fract( u.simTime.add(
+							hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( periodV2 ) );
+						const lazyV2 = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( u.lazyFrac );
+						const dutyV2 = select( lazyV2, float( 0.82 ),
+							hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( u.lazyFrac ).mul( 0.5 ) );
+						const queenFedV2 = atomicLoad( stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
+						const mayRestV2 = carrying.not().and( hungry.not() ).and( isNurse.not().or( queenFedV2 ) );
+						const restingV2 = phaseV2.lessThan( dutyV2 ).and( mayRestV2 );
+						const speedTraitV2 = hash( instanceIndex.add( uint( 0x5E01 ) ) )
+							.mul( u.speedSpread ).add( float( 1 ).sub( u.speedSpread.mul( 0.5 ) ) );
+						moveMult.assign( float( 0.8 ).mul( speedTraitV2 )
+							.mul( select( restingV2, float( 0 ), float( 1 ) ) ).mul( paralysis ) );
+
+						// Cette instruction arrête la construction JS de l'ancien graphe 2.5D
+						// tout en conservant le code historique dans le diff pour comparaison.
+						return;
 
 						// ==================== SOUS TERRE : graphe ====================
 						// La navigation suit les ARÊTES : le nœud courant (bits 7-10)
@@ -1462,7 +1584,91 @@ export class AntSimulation {
 					const stepLen = u.moveSpeed.mul( u.dt ).mul( moveMult );
 					const disp = vec2( 0 ).toVar();
 
-					If( phys, () => {
+					// Mouvement intrinsèque 3D : progression scalaire monotone, puis
+					// Évaluation de la courbe. La position ne peut structurellement ni
+					// couper un virage, ni sortir de la galerie, ni changer d'étage.
+					If( under.equal( uint( 1 ) ), () => {
+
+						const remaining = stepLen.toVar();
+						const laneMagnitude = hash( instanceIndex.add( uint( 0x1A4E ) ) )
+							.mul( u.laneOffset );
+
+						// edge=0 signifie « dans le patch sûr du nœud ». Une fourmi née
+						// ailleurs dans la chambre rejoint d'abord son hub, sans snap.
+						If( navEdge.lessThan( 0.5 ), () => {
+
+							const here = navNodeAt( node.toInt() );
+							const hopRoom = hopOf( node.toInt(), goal.toInt() );
+							const atTarget = hopRoom.equal( node.toInt() );
+							const seatA = hash( instanceIndex.add( uint( 0x5EA7 ) ) ).mul( PI2 );
+							const seatR = sqrt( hash( instanceIndex.add( uint( 0x5EA8 ) ) ) )
+								.mul( min( u.seatScatter, here.w.mul( 0.45 ) ) );
+							const seat = here.xy.add( vec2( cos( seatA ), sin( seatA ) ).mul( seatR ) );
+							const roomTarget = select( atTarget, seat, here.xy );
+							const roomDelta = roomTarget.sub( pos ).toVar();
+							const roomDistance = length( roomDelta ).toVar();
+							const roomStep = min( remaining, roomDistance ).toVar();
+
+							If( roomDistance.greaterThan( 1e-5 ), () => {
+
+								const roomDirection = roomDelta.div( roomDistance );
+								pos.addAssign( roomDirection.mul( roomStep ) );
+								ang.assign( atan( roomDirection.y, roomDirection.x ) );
+								navDistance.addAssign( roomStep );
+								remaining.subAssign( roomStep );
+
+							} );
+
+							If( atTarget.not().and( roomDistance.lessThanEqual( stepLen.add( 1e-5 ) ) ), () => {
+
+								pos.assign( here.xy );
+								navFloor.assign( here.z );
+								const edge = max( node.toInt(), hopRoom );
+								const meta = corridorMetaAt( edge );
+								const direction = select( meta.x.add( 0.5 ).toInt().equal( node.toInt() ),
+									float( 1 ), float( - 1 ) );
+								navEdge.assign( edge.toFloat() );
+								navT.assign( select( direction.greaterThan( 0 ), float( 0 ), float( 1 ) ) );
+
+							} );
+
+						} );
+
+						If( navEdge.greaterThan( 0.5 ).and( remaining.greaterThan( 1e-6 ) ), () => {
+
+							const edge = navEdge.add( 0.5 ).toInt();
+							const meta = corridorMetaAt( edge );
+							const reachedNode = select( meta.x.add( 0.5 ).toInt().equal( node.toInt() ), meta.y, meta.x ).add( 0.5 ).toInt();
+							const direction = select( meta.x.add( 0.5 ).toInt().equal( node.toInt() ),
+								float( 1 ), float( - 1 ) );
+							const available = select( direction.greaterThan( 0 ),
+								float( 1 ).sub( navT ), navT ).mul( meta.z );
+							const travel = min( remaining, available ).toVar();
+							navT.addAssign( direction.mul( travel.div( max( meta.z, 1e-5 ) ) ) );
+							navT.assign( clamp( navT, 0, 1 ) );
+							navDistance.addAssign( travel );
+
+							const sampled = sampleCorridor( edge, navT, direction, laneMagnitude );
+							pos.assign( sampled.position );
+							navFloor.assign( sampled.depth );
+							ang.assign( atan( sampled.tangent.y, sampled.tangent.x ) );
+
+							If( available.lessThanEqual( remaining.add( 1e-5 ) ), () => {
+
+								node.assign( reachedNode.toUint() );
+								layer.assign( nodeAt( reachedNode ).w.add( 0.5 ).toUint() );
+								navEdge.assign( 0 );
+								navT.assign( 0 );
+								const reached = navNodeAt( reachedNode );
+								pos.assign( reached.xy );
+								navFloor.assign( reached.z );
+
+							} );
+
+						} );
+
+					} );
+					If( phys.and( under.equal( uint( 0 ) ) ), () => {
 
 						const grounded = height.lessThanEqual( 1e-4 ).and( vHeight.lessThanEqual( 0 ) );
 						const vDes = vec2( cos( ang ), sin( ang ) ).mul( u.moveSpeed.mul( moveMult ) );
@@ -1500,7 +1706,7 @@ export class AntSimulation {
 
 						disp.assign( vel.mul( u.dt ) );
 
-					} ).Else( () => {
+					} ).ElseIf( under.equal( uint( 0 ) ), () => {
 
 						disp.assign( vec2( cos( ang ), sin( ang ) ).mul( stepLen ) );
 
@@ -1508,8 +1714,9 @@ export class AntSimulation {
 
 					// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
 					const dispLen = select( phys, length( disp ), stepLen ).toVar();
-					const nSub = clamp( ceil( dispLen ).toInt(), int( 1 ), int( 16 ) ).toVar();
-					const subStep = disp.div( nSub.toFloat() ).toVar();
+					const nSub = select( under.equal( uint( 1 ) ), int( 0 ),
+						clamp( ceil( dispLen ).toInt(), int( 1 ), int( 16 ) ) ).toVar();
+					const subStep = disp.div( max( nSub.toFloat(), 1 ) ).toVar();
 					// en mode historique la vitesse ne doit PAS être touchée par les
 					// rebonds (elle n'est pas utilisée) : le facteur vaut alors 1
 					const bounceF = select( phys, u.wallBounce.negate(), float( 1 ) ).toVar();
@@ -1566,6 +1773,9 @@ export class AntSimulation {
 					// oscillation 66 s à deux colonnes du chemin). Repli : la plus
 					// proche en hauteur.
 					If( under.equal( uint( 1 ) ), () => {
+
+						// v2 porte directement la profondeur et l'arête ; aucun canal à adopter.
+						return;
 
 						const t = depth4At( pos );
 						const lcA = clamp(
@@ -1662,9 +1872,9 @@ export class AntSimulation {
 								.and( abs( dE.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) );
 
 						};
-						const doorG = doorAt( u.granaryLayer );
-						const doorQ = doorAt( u.queenLayer );
-						const doorB = doorAt( u.broodLayer );
+						const doorG = node.equal( u.granaryNode.toUint() );
+						const doorQ = node.equal( u.queenNode.toUint() );
+						const doorB = node.equal( u.broodNode.toUint() );
 
 						If( goal.equal( uint( 1 ) ).and( dGranary.lessThan( u.troughReach ) ).and( doorG ), () => {
 
@@ -1748,13 +1958,17 @@ export class AntSimulation {
 
 							const dExit = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
 
-							If( dExit.lessThan( u.entranceR ), () => {
+							If( node.equal( uint( 0 ) ).and( dExit.lessThan( u.entranceR ) ), () => {
 
 								under.assign( uint( 0 ) );
 								goal.assign( uint( 0 ) );
 								node.assign( uint( 0 ) );
 								layer.assign( uint( 0 ) );
 								timer.assign( 0 );          // elle sort du nid : fraîcheur pleine
+								vel.assign( vec2( cos( ang ), sin( ang ) ).mul( u.moveSpeed ) );
+								height.assign( 0 );
+								vHeight.assign( 0 );
+
 
 							} );
 
@@ -1815,6 +2029,11 @@ export class AntSimulation {
 										under.assign( uint( 1 ) );
 										goal.assign( uint( 1 ) );   // au grenier (manger / navette)
 										node.assign( uint( 0 ) );   // départ : tête de spirale
+									navEdge.assign( 0 );
+									navT.assign( 0 );
+									navFloor.assign( navNodeAt( int( 0 ) ).z );
+									navDistance.assign( 0 );
+
 
 									} );
 
@@ -1837,6 +2056,11 @@ export class AntSimulation {
 										under.assign( uint( 1 ) );
 										goal.assign( uint( 1 ) );
 										node.assign( uint( 0 ) );   // départ : tête de spirale
+									navEdge.assign( 0 );
+									navT.assign( 0 );
+									navFloor.assign( navNodeAt( int( 0 ) ).z );
+									navDistance.assign( 0 );
+
 										timer.assign( 0 );
 
 									} );
@@ -1931,7 +2155,8 @@ export class AntSimulation {
 				// rebondit, dérape et s'immobilise là où la physique le mène. Sa
 				// position reste dans antData — donc l'araignée qui vient le dévorer
 				// le trouve VRAIMENT, et la hitbox de débogage ne ment pas.
-				If( phys.and( alive.lessThan( 0.5 ) ).and( state.equal( uint( 2 ) ) ), () => {
+				If( phys.and( under.equal( uint( 0 ) ) )
+					.and( alive.lessThan( 0.5 ) ).and( state.equal( uint( 2 ) ) ), () => {
 
 					gait.assign( min( gait.add( u.dt ), 8 ) );   // horloge de culbute
 
@@ -1976,6 +2201,12 @@ export class AntSimulation {
 					a.assign( vec4( pos, ang, timer ) );
 
 				} );
+				If( under.equal( uint( 1 ) ).and( state.equal( uint( 2 ) ) ), () => {
+
+					gait.assign( min( gait.add( u.dt ), 8 ) );
+
+				} );
+
 
 				// --- écriture finale : état re-packé + signes vitaux + dynamique ---
 				// (aussi pour les mortes : le cap de cadavres et la dévoration font
@@ -1997,7 +2228,15 @@ export class AntSimulation {
 						.bitOr( floorQ.shiftLeft( uint( 25 ) ) ),
 				);
 				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, gait ) );
-				antDyn.element( instanceIndex ).assign( vec4( vel, height, vHeight ) );
+				If( under.equal( uint( 1 ) ), () => {
+
+					antDyn.element( instanceIndex ).assign( vec4( navEdge, navT, navFloor, navDistance ) );
+
+				} ).Else( () => {
+
+					antDyn.element( instanceIndex ).assign( vec4( vel, height, vHeight ) );
+
+				} );
 
 			} );
 
@@ -2283,6 +2522,10 @@ export class AntSimulation {
 	async reset() {
 
 		this.cur = 0;
+		this._clock = 0;
+		this._tick = 0;
+		this._regenSerial = 0;
+		this.u.tick.value = 0;
 		this._brushQueue.length = 0;
 		this._regenAccum = 0;
 		this.statsData = { delivered: 0, picked: 0, eaten: 0, devoured: 0, laid: 0, hatched: 0, granary: 0, queenEnergy: 1 };
@@ -2294,10 +2537,23 @@ export class AntSimulation {
 	// et re-creuser. Les positions des trois mangeoires, elles, ne bougent JAMAIS
 	// — c'est l'invariant du registre (nest.js) qui garantit que les stocks de
 	// nourriture atomiques ne deviennent pas orphelins.
+
+	// Barrière rare utilisée par les transactions de géométrie. Aucun readback
+	// n'est nécessaire sur WebGPU : on attend simplement la fin des commandes
+	// déjà soumises avant de remplacer les textures partagées.
+	async synchronize() {
+
+		// computeAsync force d'abord la soumission de l'encodeur interne Three.js,
+		// puis attend sa fin. onSubmittedWorkDone() seul ne vide pas cet encodeur.
+		await this.renderer.computeAsync( this.kClearSpiderAlarm );
+
+	}
+
 	applyLayout() {
 
 		const l = this.layout;
 		this.u.nodeCount.value = l.nodeCount;
+		this.u.granaryNode.value = l.GOAL_NODE[ 1 ];
 		this.u.granaryPos.value.set( l.troughs.granary.x, l.troughs.granary.y );
 		this.u.queenPos.value.set( l.troughs.queen.x, l.troughs.queen.y );
 		this.u.broodPos.value.set( l.troughs.brood.x, l.troughs.brood.y );
@@ -2309,6 +2565,9 @@ export class AntSimulation {
 		this.u.broodLayer.value = l.nodes[ l.GOAL_NODE[ 3 ] ].layer;
 		this.u.queenLayer.value = l.nodes[ l.GOAL_NODE[ 2 ] ].layer;
 		this.u.granaryLayer.value = l.nodes[ l.GOAL_NODE[ 1 ] ].layer;
+		this.u.granaryR.value = l.chambers.granary.R;
+		this.u.queenR.value = l.chambers.queen.R;
+		this.u.broodR.value = l.chambers.brood1.R;
 		this.renderer.compute( this.kDig );
 
 	}
@@ -2353,6 +2612,8 @@ export class AntSimulation {
 	step( dt ) {
 
 		this.u.dt.value = dt;
+		this._tick = ( this._tick || 0 ) + 1;
+		this.u.tick.value = this._tick;
 		this._clock = ( ( this._clock || 0 ) + dt ) % 840;
 		this.u.simTime.value = this._clock;
 		// alarme ressentie par les araignées : instantanée → on la vide avant le
@@ -2372,13 +2633,15 @@ export class AntSimulation {
 			if ( this._regenAccum > 60 / params.foodRegen ) {
 
 				this._regenAccum = 0;
-				const angle = Math.random() * Math.PI * 2;
-				const dist = 150 + Math.random() * 280;
+				const serial = this._regenSerial ++;
+				const seed = this.u.seed.value | 0;
+				const angle = random01( seed, serial, 0 ) * Math.PI * 2;
+				const dist = 150 + random01( seed, serial, 1 ) * 280;
 				this.queueBrush(
 					NEST.x + Math.cos( angle ) * dist,
 					NEST.y + Math.sin( angle ) * dist,
 					0,
-					7 + Math.random() * 5,
+					7 + random01( seed, serial, 2 ) * 5,
 					params.foodAmount,
 				);
 

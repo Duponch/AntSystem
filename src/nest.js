@@ -35,6 +35,9 @@ import { GRID, TEXEL, NEST, params } from './config.js';
 // nombre de nappes = nombre de niveaux de chambres (une par canal RGBA)
 export const LAYERS = 4;
 export const K_MAX = 96;                 // loges candidates (registre complet)
+// Rayon visuel = largeur * TEXEL * 0,85. 5,5 garantit l'enveloppe de la
+// plus grosse caste (soldate) + 5 cm de marge, même voie latérale incluse.
+export const MIN_TUNNEL_WIDTH = 5.5;
 export const DEPTH_SIZE = 384;           // côté de la carte de profondeur (texels)
 
 // angle d'or : deux loges consécutives ne sont jamais alignées, la couverture
@@ -474,6 +477,7 @@ export const GOAL = { NONE: 0, GRANARY: 1, QUEEN: 2, BROOD: 3, EXIT: 4 };
 // `carve = false` : on ne veut que le graphe (cas de la croissance, ou le
 // creusage a deja ete fait de maniere incrementale dans le champ existant).
 export function buildNest( K, depthMax, tunnelW, carve = true ) {
+	tunnelW = Math.max( MIN_TUNNEL_WIDTH, tunnelW );
 
 	const ox = Math.round( NEST.x - DEPTH_SIZE / 2 );
 	const oy = Math.round( NEST.y - DEPTH_SIZE / 2 );
@@ -485,17 +489,19 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 	for ( let k = 0; k < K_MAX; k ++ ) PAR.push( parentOf( k, U ) );
 
 	// pied du puits : juste sous l'entrée, à la profondeur du premier niveau
+	const shaftAngle = HELIX_TURN * 0.5;
 	const shaft = {
-		x: NEST.x, y: NEST.y,
+		x: NEST.x + Math.cos( shaftAngle ) * HELIX_R / TEXEL,
+		y: NEST.y + Math.sin( shaftAngle ) * HELIX_R / TEXEL,
 		depth: - depthMax * LEVEL[ 0 ].zf * 0.45,
 		layer: 0,
 	};
-	const entry = { x: NEST.x, y: NEST.y, depth: - 0.35, layer: 0 };
+	const entry = { x: NEST.x, y: NEST.y, depth: - 0.04, layer: 0 };
 
 	// --- creusage du préfixe actif ---
 	if ( carve ) {
 
-		carveTube( field, ox, oy, entry, shaft, tunnelW * 1.15, 0 );
+		carvePath( field, ox, oy, tunnelPath( entry, shaft, K_MAX + 0x51 ), tunnelW * 1.15, 0 );
 
 		for ( let k = 0; k < K; k ++ ) {
 
@@ -614,7 +620,7 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 	}
 
 	return {
-		K, depthMax, units: U, parents: PAR,
+		K, depthMax, tunnelW, units: U, parents: PAR,
 		nodes, edges, nextHop, GOAL_NODE,
 		troughs, field, depthAt,
 		origin: { x: ox, y: oy },
@@ -628,6 +634,7 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 // CROISSANCE : creuse les loges [Kold, Knew) DANS le champ existant. C'est tout
 // l'intérêt du registre append-only — on n'efface et ne recalcule jamais rien.
 export function growNest( nest, Knew, tunnelW ) {
+	tunnelW = nest.tunnelW;
 
 	const { origin: { x: ox, y: oy }, field, units: U, parents: PAR } = nest;
 
@@ -650,7 +657,7 @@ export function nestParams() {
 	return {
 		K: quantK( nestBudget( params.antCount, params.nestScale ) ),
 		depthMax: params.nestDepth,
-		tunnelW: params.nestTunnelW,
+		tunnelW: Math.max( MIN_TUNNEL_WIDTH, params.nestTunnelW ),
 	};
 
 }

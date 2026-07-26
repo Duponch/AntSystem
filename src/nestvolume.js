@@ -36,7 +36,7 @@ import {
 } from 'three/tsl';
 
 import { TEXEL, NEST, GRID, WORLD, gfx } from './config.js';
-import { K_MAX, tunnelPath } from './nest.js';
+import { K_MAX } from './nest.js';
 
 // Résolution du volume. Le nid fait ~45 unités de large pour ~20 de profondeur ;
 // à 128×64×128 un voxel vaut ~0,4 unité, soit trois voxels en travers d'un
@@ -47,8 +47,11 @@ export const VOL_X = 128, VOL_Y = 64, VOL_Z = 128;
 // nombre de capsules par tunnel. Chaque voxel les évalue TOUTES : c'est le
 // poste dominant du bake, d'où un pas volontairement grossier (le lissage du
 // smin rattrape la discrétisation).
-const SEGS = 5;
-const MAX_SEGS = K_MAX * SEGS;
+// Eight capsules retain the authoritative 64-point corridor shape without
+// overflowing WebGPU uniform limits. +1 includes entrance -> vestibule.
+const SDF_SEGS_PER_CORRIDOR = 8;
+const MAX_CORRIDORS = K_MAX + 1;
+const MAX_SEGS = MAX_CORRIDORS * SDF_SEGS_PER_CORRIDOR;
 
 export function createNestVolume( { renderer, layout } ) {
 
@@ -147,6 +150,11 @@ export function createNestVolume( { renderer, layout } ) {
 			d.assign( smin( d, sdCapsule( p, A.xyz, B.xyz, A.w ), uBlend.mul( 0.6 ) ) );
 
 		} );
+		// Noyau navigable conservateur : le bruit peut agrandir et bosseler la
+		// cavité, jamais mordre dans ce cœur. Ainsi la courbe suivie par la fourmi
+		// reste contenue dans le volume affich? avec une marge positive.
+		const dCore = d.add( 0.06 ).toVar();
+
 
 		// DÉFORMATION. Sans elle, les chambres restent des ellipsoïdes lisses :
 		// c'est ce bruit qui donne les parois bosselées et les contours
@@ -170,7 +178,12 @@ export function createNestVolume( { renderer, layout } ) {
 		// d'un plafond parfaitement plat.
 		d.assign( max( d, p.y.add( 0.55 ).add( n1.mul( 0.45 ) ) ) );
 
-		textureStore( volume, ivec3( vx.toInt(), vy.toInt(), vz.toInt() ), vec4( d, dClean, 0, 0 ) ).toStack();
+		// Union finale avec le cœur sûr, appliquée après le plafond afin que la
+		// rampe d'entrée ouvre réellement une bouche à la surface.
+		d.assign( min( d, dCore ) );
+		const dCleanSafe = min( dClean, dCore );
+		textureStore( volume, ivec3( vx.toInt(), vy.toInt(), vz.toInt() ), vec4( d, dCleanSafe, 0, 0 ) ).toStack();
+
 
 	} )().compute( VOL_X * VOL_Y * VOL_Z );
 
@@ -186,8 +199,11 @@ export function createNestVolume( { renderer, layout } ) {
 		const K = Math.min( layout.K || 0, K_MAX );
 
 		// bornes : le nid plus une marge, et on remonte jusqu'à la surface
+		const deepestNavigationPoint = Math.min( 0,
+			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ) );
 		const radius = ( layout.radiusWorld || 20 ) + 4;
-		const depth = ( layout.depthMax || 18 ) + 3;
+		const depth = Math.max( layout.depthMax || 18, - deepestNavigationPoint ) + 3;
+		// La borne suit la géométrie compilée, y compris son jitter vertical.
 		uMin.value.set( cx - radius, - depth, cz - radius );
 		uSize.value.set( radius * 2, depth + 1.5, radius * 2 );
 
@@ -207,20 +223,28 @@ export function createNestVolume( { renderer, layout } ) {
 		uChamberCount.value = K;
 
 		// --- tunnels : capsules le long de l'arc réel ---
-		const tw = Math.max( 0.6, ( layout.tunnelW || 7 ) * TEXEL * 0.85 );
+		const navigation = layout.navigation;
+
+		if ( ! navigation || ! Array.isArray( navigation.corridors ) )
+			throw new Error( 'Nest volume requires layout.navigation.corridors' );
+
 		let n = 0;
 
-		for ( let k = 0; k < K && n < MAX_SEGS; k ++ ) {
+		for ( const corridor of navigation.corridors ) {
 
-			const c = units[ k ];
-			const pi = layout.parents ? layout.parents[ k ] : - 1;
-			const par = pi < 0 ? layout.shaft : units[ pi ];
-			if ( ! par ) continue;
-			const path = tunnelPath( par, c, k, SEGS );
+			if ( ! corridor || ! Array.isArray( corridor.points ) || corridor.points.length < 2 ) continue;
 
-			for ( let s = 0; s < path.length - 1 && n < MAX_SEGS; s ++ ) {
+			const width = corridor.tunnelW ?? corridor.radius
+				?? navigation.tunnelW ?? layout.tunnelW ?? 7;
+			const tw = Math.max( 0.6, width * TEXEL * 0.85 );
+			const count = Math.min( SDF_SEGS_PER_CORRIDOR, corridor.points.length - 1 );
 
-				const a = path[ s ], b = path[ s + 1 ];
+			for ( let s = 0; s < count; s ++ ) {
+
+				if ( n >= MAX_SEGS ) throw new Error( `Nest corridor segment capacity exceeded (${ MAX_SEGS })` );
+
+				const a = corridor.points[ Math.round( s * ( corridor.points.length - 1 ) / count ) ];
+				const b = corridor.points[ Math.round( ( s + 1 ) * ( corridor.points.length - 1 ) / count ) ];
 				segA[ n ].set( ( a.x / GRID - 0.5 ) * WORLD, a.depth + tw * 0.4, ( a.y / GRID - 0.5 ) * WORLD, tw );
 				segB[ n ].set( ( b.x / GRID - 0.5 ) * WORLD, b.depth + tw * 0.4, ( b.y / GRID - 0.5 ) * WORLD, 0 );
 				n ++;

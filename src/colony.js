@@ -27,9 +27,10 @@ import {
 import { GRID, WORLD, NEST, MAX_BROOD, params, gfx } from './config.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 import {
-	buildNest, growNest, nestParams, nestBudget, quantK, bakeNavField,
-	LAYERS, K_MAX, DEPTH_SIZE as NEST_DEPTH_SIZE, NODE_CHAMBER0, ROOM,
+	buildNest, growNest, nestParams,
+	LAYERS, K_MAX, DEPTH_SIZE as NEST_DEPTH_SIZE,
 } from './nest.js';
+import { buildCorridorNetwork, CORRIDOR_SAMPLES, validateNetwork } from './navigation/corridor-network.js';
 
 const TEXEL = WORLD / GRID;
 
@@ -84,29 +85,95 @@ export function buildNestLayout() {
 	nodeTexture.minFilter = nodeTexture.magFilter = THREE.NearestFilter;
 	nodeTexture.generateMipmaps = false;
 
+	// Réseau intrinsèque 3D. Une ligne de corridorTexture correspond à une
+	// arête (son id est le nœud enfant) et contient des échantillons à longueur
+	// d'arc uniforme : (x grille, z grille, profondeur monde, marge de voie).
+	let navigation = null;
+	const corridorData = new Float32Array( MAX_NODES * CORRIDOR_SAMPLES * 4 );
+	const corridorMetaData = new Float32Array( MAX_NODES * 4 );
+	const navNodeData = new Float32Array( MAX_NODES * 4 );
+	const corridorTexture = new THREE.DataTexture(
+		corridorData, CORRIDOR_SAMPLES, MAX_NODES, THREE.RGBAFormat, THREE.FloatType );
+	const corridorMetaTexture = new THREE.DataTexture(
+		corridorMetaData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
+	const navNodeTexture = new THREE.DataTexture(
+		navNodeData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
+	for ( const texture of [ corridorTexture, corridorMetaTexture, navNodeTexture ] ) {
+
+		texture.minFilter = texture.magFilter = THREE.NearestFilter;
+		texture.generateMipmaps = false;
+
+	}
+
 	// champ de navigation : distance BFS à chaque objectif, PAR (cellule,
 	// canal) — 4 textures (grenier, reine, couvain, sortie), rebakées à chaque
 	// changement du nid (publish)
-	const navFieldData = [ 0, 1, 2, 3 ].map( () => new Float32Array( DEPTH_SIZE * DEPTH_SIZE * 4 ) );
-	const navFieldTex = navFieldData.map( ( data ) => {
-
-		const t = new THREE.DataTexture( data, DEPTH_SIZE, DEPTH_SIZE, THREE.RGBAFormat, THREE.FloatType );
-		t.minFilter = t.magFilter = THREE.NearestFilter;
-		t.generateMipmaps = false;
-		return t;
-
-	} );
 
 	const layout = {
-		depthTexture, navTexture, nodeTexture, navFieldTex,
+		depthTexture, navTexture, nodeTexture,
+		corridorTexture, corridorMetaTexture, navNodeTexture,
 		origin: nest.origin,
-		LAYERS, MAX_NODES,
+		LAYERS, MAX_NODES, CORRIDOR_SAMPLES,
 	};
 
-	function publish() {
+	const compileNavigation = ( source ) => buildCorridorNetwork( source, {
+		samples: CORRIDOR_SAMPLES,
+		maxNodes: MAX_NODES,
+		tunnelWidth: source.tunnelW,
+		agentRadiusWorld: 0.45 * 1.45,
+		safetyWorld: 0.05,
+	} );
+
+	function assertAppendOnlyNavigation( previous, candidate ) {
+
+		const verdict = validateNetwork( candidate );
+		if ( ! verdict.ok ) throw new Error( `Invalid navigation candidate: ${ verdict.errors.join( '; ' ) }` );
+		const fail = ( part, index ) => {
+
+			throw new Error( `Nest growth changed occupied navigation (${ part } ${ index })` );
+
+		};
+		const oldNodes = previous.nodes.length;
+		for ( let i = 0; i < oldNodes; i ++ ) {
+
+			const a = previous.nodes[ i ], b = candidate.nodes[ i ];
+			if ( ! b || a.x !== b.x || a.y !== b.y || a.depth !== b.depth || a.parent !== b.parent )
+				fail( 'node', i );
+
+		}
+		for ( let edge = 1; edge < oldNodes; edge ++ ) {
+
+			const a = previous.corridors[ edge ], b = candidate.corridors[ edge ];
+			if ( ! b || a.from !== b.from || a.to !== b.to || a.length !== b.length
+				|| a.safeLane !== b.safeLane || a.maxLaneStretch !== b.maxLaneStretch )
+				fail( 'corridor', edge );
+			const start = edge * CORRIDOR_SAMPLES * 4;
+			const end = start + CORRIDOR_SAMPLES * 4;
+			for ( let i = start; i < end; i ++ ) if ( previous.sampleData[ i ] !== candidate.sampleData[ i ] )
+				fail( 'sample', i );
+
+		}
+		for ( let node = 0; node < oldNodes; node ++ ) for ( let goal = 0; goal < previous.maxGoals; goal ++ ) {
+
+			const i = node * previous.maxGoals + goal;
+			if ( previous.nextHop[ i ] !== candidate.nextHop[ i ] ) fail( 'route', i );
+
+		}
+
+	}
+
+	function publish( compiled = null ) {
 
 		const n = Math.min( nest.nodes.length, MAX_NODES );
 		nodeData.fill( 0 );
+		navigation = compiled ?? compileNavigation( nest );
+		corridorData.set( navigation.sampleData );
+		corridorMetaData.set( navigation.metaData );
+		navNodeData.set( navigation.nodeData );
+		corridorTexture.needsUpdate = true;
+		corridorMetaTexture.needsUpdate = true;
+		navNodeTexture.needsUpdate = true;
+
 		for ( let i = 0; i < n; i ++ ) {
 
 			const nd = nest.nodes[ i ];
@@ -134,18 +201,11 @@ export function buildNestLayout() {
 		depthTexture.needsUpdate = true;
 
 		// champ de navigation : rebaké à chaque changement de forme du nid
-		const baked = bakeNavField( nest );
-
-		for ( let g = 0; g < 4; g ++ ) {
-
-			navFieldData[ g ].set( baked[ g ] );
-			navFieldTex[ g ].needsUpdate = true;
-
-		}
 
 		// interface consommee par le reste du projet
 		layout.nodes = nest.nodes;
 		layout.edges = nest.edges;
+		layout.navigation = navigation;
 		layout.nextHop = nest.nextHop;
 		layout.GOAL_NODE = nest.GOAL_NODE;
 		layout.troughs = nest.troughs;
@@ -160,7 +220,7 @@ export function buildNestLayout() {
 		layout.parents = nest.parents;
 		layout.shaft = nest.shaft;
 		layout.entry = nest.entry;
-		layout.tunnelW = params.nestTunnelW;
+		layout.tunnelW = nest.tunnelW;
 		// chambres remarquables, sous le nom historique
 		const nodeOf = ( g ) => nest.nodes[ nest.GOAL_NODE[ g ] ];
 		layout.chambers = {
@@ -182,17 +242,21 @@ export function buildNestLayout() {
 
 		const target = Math.min( K_MAX, K );
 		if ( target <= nest.K ) return false;
-		growNest( nest, target, params.nestTunnelW );
-		nest.K = target;
 		// le graphe doit etre recalcule : on rebatit a l'identique (l'invariant
 		// garantit que les loges deja creusees retombent aux memes coordonnees)
 		// on ne recalcule QUE le graphe : le creusage vient d'etre fait de maniere
 		// incrementale ci-dessus, re-creuser tout serait du travail jete
-		const rebuilt = buildNest( target, nest.depthMax, params.nestTunnelW, false );
+		const rebuilt = buildNest( target, nest.depthMax, nest.tunnelW, false );
+		const candidateNavigation = compileNavigation( rebuilt );
+		// Validation AVANT toute mutation : une croissance qui déplacerait le
+		// préfixe occupé échoue sans creuser un seul texel.
+		assertAppendOnlyNavigation( navigation, candidateNavigation );
+		growNest( nest, target, nest.tunnelW );
+		nest.K = target;
 		rebuilt.field = nest.field;              // on garde le creusage cumule
 		rebuilt.depthAt = nest.depthAt;
 		nest = rebuilt;
-		publish();
+		publish( candidateNavigation );
 		return true;
 
 	};
