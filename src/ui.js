@@ -3,10 +3,14 @@
 import * as THREE from 'three/webgpu';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-import { params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL, saveSettings, clearSettings } from './config.js';
+import {
+	params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL,
+	MIN_NEST_DEPTH, MAX_NEST_DEPTH, saveSettings, clearSettings,
+} from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
 import { CATALOG } from './graphics/props.js';
 import { nestBudget, quantK, MIN_TUNNEL_WIDTH } from './nest.js';
+import { createNestCommitPause } from './nest-mutation-ui.js';
 
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
@@ -62,13 +66,31 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	// ------------------------------------------------------------------
 	const fLife = gui.addFolder( '👑 Fourmilière & castes' );
 
-	fLife.add( params, 'colony' ).name( 'Colonie vivante (reine, castes)' ).onChange( async ( v ) => {
+	let colonyToggleTail = Promise.resolve();
+	fLife.add( params, 'colony' ).name( 'Colonie vivante (reine, castes)' ).onChange( ( v ) => {
 
-		await sim.setColonyEnabled( v );
-		ants.queen.visible = v;
-		colony.setVisible( v );
-		if ( ! v ) { gfx.scannerView = false; }
-		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
+		const requested = Boolean( v );
+		const migration = colonyToggleTail.then( async () => {
+
+			const migrated = await sim.setColonyEnabled( requested );
+			if ( migrated ) {
+
+				spiders?.reset();
+				await colony.reset();
+
+			}
+			ants.queen.visible = requested;
+			colony.setVisible( requested );
+			if ( ! requested ) gfx.scannerView = false;
+			gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
+
+		} );
+		colonyToggleTail = migration.catch( ( error ) => {
+
+			console.error( 'Migration du mode colonie impossible', error );
+
+		} );
+		return migration;
 
 	} );
 
@@ -78,7 +100,21 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	// terre ne peut pas se retrouver dans la terre pleine.
 	// ------------------------------------------------------------------
 	let growTimer = null;
+	let nestUiMutationTail = Promise.resolve();
 	const nestInfo = { etat: '' };
+
+	function serializeNestUiMutation( operation ) {
+
+		// Serialize complete UI side-effects, but let the simulation continue while
+		// the Worker prepares and validates the candidate geometry.
+		const transaction = nestUiMutationTail.then( operation, operation );
+		nestUiMutationTail = transaction.then(
+			() => undefined,
+			() => undefined,
+		);
+		return transaction;
+
+	}
 
 	function refreshNestInfo() {
 
@@ -92,46 +128,72 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	function applyNest() {
 
 		sim.applyLayout();
+		env.rebuildEntrance();
 		nestVolume.rebuild();          // la forme a change : on refait le champ 3D
 		refreshNestInfo();
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
 	}
-	// Profondeur et largeur changent la géométrie déjà occupée. Elles passent
-	// donc par une transaction explicite : pause, publication complète, reset
-	// attendu, puis reprise. Une croissance append-only reste, elle, live.
-	async function rebuildNestAndReset( depthChanged = false ) {
+	// Depth and width replace occupied geometry. Candidate compilation stays
+	// live; only the synchronized publication/apply/reset window is paused.
+	function createCommitPause() {
 
-		const wasPaused = params.paused;
-		params.paused = true;
-		try {
-
-			sim.layout.rebuild();
-			if ( depthChanged ) {
-
-				gfx.groundThickness = Math.max( 6, params.nestDepth + 4 );
-				env.setThickness( gfx.groundThickness );
-
-			}
-			applyNest();
-			await onReset();
-
-		} finally { params.paused = wasPaused; }
+		return createNestCommitPause( {
+			isPaused: () => params.paused,
+			setPaused: ( value ) => { params.paused = value; },
+			synchronize: () => sim.synchronize(),
+		} );
 
 	}
-	async function commitNestGrowth( target ) {
+	function rebuildNestAndReset( depthChanged = false ) {
 
-		const wasPaused = params.paused;
-		params.paused = true;
-		try {
+		return serializeNestUiMutation( async () => {
 
-			await sim.synchronize();
-			if ( ! sim.layout.growTo( target ) ) return false;
-			applyNest();
-			await sim.synchronize();
-			return true;
+			const commitPause = createCommitPause();
+			try {
 
-		} finally { params.paused = wasPaused; }
+				await sim.layout.rebuildAsync( {
+					beforeCommit: commitPause.beforeCommit,
+				} );
+				if ( depthChanged ) {
+
+					gfx.groundThickness = Math.max( 6, params.nestDepth + 4 );
+					env.setThickness( gfx.groundThickness );
+
+				}
+				applyNest();
+				await onReset();
+
+			} finally {
+
+				commitPause.restore();
+
+			}
+
+		} );
+
+	}
+	function commitNestGrowth( target ) {
+
+		return serializeNestUiMutation( async () => {
+
+			const commitPause = createCommitPause();
+			try {
+
+				if ( ! await sim.layout.growToAsync( target, {
+					beforeCommit: commitPause.beforeCommit,
+				} ) ) return false;
+				applyNest();
+				await sim.synchronize();
+				return true;
+
+			} finally {
+
+				commitPause.restore();
+
+			}
+
+		} );
 
 	}
 
@@ -161,7 +223,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 			await commitNestGrowth( K );
 
 		} );
-	fNest.add( params, 'nestDepth', 10, 200, 1 ).name( 'Profondeur (u)' )
+	fNest.add( params, 'nestDepth', MIN_NEST_DEPTH, MAX_NEST_DEPTH, 1 ).name( 'Profondeur (u)' )
 		.onFinishChange( async () => {
 
 			await rebuildNestAndReset( true );
@@ -506,8 +568,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( v ) => spiders.uSpiderColor.value.set( v ) );
 	fColors.addColor( gfx, 'spiderAccent' ).name( 'Araignée (pattes)' )
 		.onChange( ( v ) => spiders.uSpiderAccent.value.set( v ) );
-	fColors.addColor( gfx, 'anthillColor' ).name( 'Fourmilière' )
-		.onChange( ( v ) => env.anthillMat.color.set( v ) );
+	fColors.addColor( gfx, 'entranceColor' ).name( 'Entrée souterraine' )
+		.onChange( ( v ) => env.entranceMat.color.set( v ) );
 	fColors.addColor( gfx, 'foodColor' ).name( 'Nourriture' ).onChange( ( v ) => {
 
 		uFoodColor.value.set( v );
@@ -854,6 +916,13 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	// raccourcis clavier
 	window.addEventListener( 'keydown', ( e ) => {
+
+		// Le guide et les champs de saisie possedent leur propre clavier. Aucun
+		// raccourci de jeu ne doit modifier la simulation pendant leur utilisation.
+		const target = e.target;
+		const typing = target?.isContentEditable
+			|| [ 'INPUT', 'TEXTAREA', 'SELECT' ].includes( target?.tagName );
+		if ( typing || document.documentElement.classList.contains( 'ant-guide-open' ) ) return;
 
 		if ( e.key === ' ' ) {
 

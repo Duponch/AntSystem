@@ -8,7 +8,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { params, gfx, MAX_ANTS } from './config.js';
 import { AntSimulation } from './simulation.js';
 import { createAnts } from './ants.js';
-import { buildNestLayout, createColony } from './colony.js';
+import { buildNestLayoutAsync, createColony } from './colony.js';
 import { createUnderground } from './underground.js';
 import { createNestVolume } from './nestvolume.js';
 import { createEnvironment, uShowWalls, uTrailGamma } from './environment.js';
@@ -26,6 +26,7 @@ import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
 import { createRagdoll } from './ragdoll.js';
 import { createAntFollow } from './antfollow.js';
+import { createSimulationGuide } from './guide.js';
 import { createUI } from './ui.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
@@ -134,7 +135,23 @@ async function main() {
 	// topologie de la fourmilière souterraine : UNE source de vérité partagée
 	// par le kernel (creusage, navigation), le rendu des fourmis (profondeur)
 	// et la vue en fosse
-	const layout = buildNestLayout();
+	const loadingOverlay = document.getElementById( 'overlay' );
+	const loadingMessage = 'Pr\u00e9paration des galeries et surfaces de marche\u2026';
+	loadingOverlay.textContent = loadingMessage;
+	let layout;
+	try {
+
+		layout = await buildNestLayoutAsync();
+		const bake = layout.navigation.surfaceBake;
+		if ( bake ) console.info(
+			`Bake des surfaces : ${ bake.mode } \u00b7 ${ bake.workerCount } worker(s) \u00b7 ${ bake.durationMs.toFixed( 1 ) } ms`,
+		);
+
+	} finally {
+
+		if ( loadingOverlay.textContent === loadingMessage ) loadingOverlay.textContent = '';
+
+	}
 	const sim = new AntSimulation( renderer, layout );
 	const sky = createSky( scene );
 
@@ -178,6 +195,9 @@ async function main() {
 
 	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
 	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
+	// Manuel fonctionnel indépendant des réglages lil-gui. Il consomme les
+	// mêmes fichiers Markdown que doc/guide et contextualise la sélection.
+	const guide = createSimulationGuide( { antfollow, mount: document.getElementById( 'app' ) } );
 
 	// Le socle de terre doit ENGLOBER le nid : sans ca la chambre royale flotte
 	// sous le terrain (le bug existait deja avec une chambre a -3,9 pour un
@@ -495,10 +515,10 @@ async function main() {
 	const tests = createColonyTests( { sim, colony, spiders, ants, cones, renderer } );
 	// surveillant d'anomalies (téléportations, toupies, cycle de vie) :
 	// ?test=warden (&wdur=120) ou __antsys.warden.run()
-	const warden = createWarden( { sim, colony, ants, cones, renderer } );
+	const warden = createWarden( { sim, colony, ants, cones, renderer, nestVolume } );
 
 	// accès console pour le débogage
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, guide, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

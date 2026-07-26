@@ -33,8 +33,12 @@ import {
 } from 'three/tsl';
 
 import { GRID, WORLD, TEXEL, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
-import { NAV_UNREACH } from './nest.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
+import { STARTUP_DELAY } from './colony-startup.js';
+import {
+	corridorSurfaceLengthTSL,
+	sampleCorridorSurfaceTSL,
+} from './navigation/corridor-sampling-tsl.js';
 
 // gisements de départ (partagés avec la caméra cinématique)
 // (1 bille = 1 unité : zones élargies pour offrir ~15-25 billes chacune)
@@ -70,6 +74,7 @@ export class AntSimulation {
 
 		this.renderer = renderer;
 		this.layout = layout;
+		this._colonyModeTail = Promise.resolve();
 
 		// --- uniforms pilotés par l'UI ---
 		const u = this.u = {
@@ -85,7 +90,8 @@ export class AntSimulation {
 			fade: uniform( params.fade ),
 			evap: uniform( params.evaporation ),
 			diffuse: uniform( params.diffusion ),
-			nest: uniform( new THREE.Vector2( NEST.x, NEST.y ) ),
+			// La maison de surface est la bouche physique, pas le centre abstrait du registre.
+			nest: uniform( new THREE.Vector2( layout.entry.x, layout.entry.y ) ),
 			nestRadius: uniform( NEST.radius ),
 			reinitFrom: uniform( 0 ),    // ré-initialisation partielle des fourmis (slider)
 			stampCount: uniform( 0 ),    // nombre de coups de pinceau de la frame
@@ -125,8 +131,7 @@ export class AntSimulation {
 			queenLayCost: uniform( params.queenLayCost ),
 			queenLayMin: uniform( params.queenLayMin ),
 			granaryStart: uniform( params.granaryStart ),
-			spawnMode: uniform( 0 ),                     // kInitAnts : 0 = disque du nid, 1 = éclosion (couvain, sous terre)
-			entranceR: uniform( 3 ),                     // rayon d'arrivée au nœud d'entrée (texels)
+			spawnMode: uniform( 0 ),                     // 0 = colonie établie, 1 = éclosion au couvain
 
 			// --- PHYSIQUE ---
 			// physOn = 0 : chemin cinématique historique, bit à bit (témoin perf).
@@ -239,9 +244,7 @@ export class AntSimulation {
 		//   bits 14-15 = nappe/étage souterrain
 		//   bits 16-23 = mot de mort (culbute figée)
 		//   bit  24    = soldate en train d'attaquer (hystérésis de contact)
-		//   bits 25-31 = plancher résolu au pas précédent (pas de 0,25 u, valeur
-		//              positive) — détection du creusage sous elle → chute
-		//              balistique au lieu d'un rabattement sec
+		//   bits 25-31 = réservés, maintenus à zéro
 		this.antState = instancedArray( MAX_ANTS, 'uint' );
 		// signes vitaux (mono-écrivain : chaque fourmi possède son élément) :
 		//   x = venin (0 = saine ; ≥ bitesToKill = morte)
@@ -349,61 +352,14 @@ export class AntSimulation {
 		const hopOf = ( n, g ) => textureLoad( layout.navTexture, ivec2( n, g ) ).x.add( 0.5 ).toInt();
 
 		// --- réseau intrinsèque 3D -------------------------------------------------
-		// antDyn est volontairement polymorphe afin de rester sous la limite WebGPU
-		// de 16 storage buffers : en surface (vx,vz,h,vy), sous terre
-		// (corridorId,t,profondeur,distanceCumulée). Les courbes et le SDF sont issus
-		// de la même source ; aucune projection heightfield n'intervient ici.
+		// Les points de contact et repères 360° sont précompilés une fois dans le
+		// layout. Le coût de cet échantillonnage est strictement constant.
 		const navNodeAt = ( i ) => textureLoad( layout.navNodeTexture, ivec2( i, int( 0 ) ) );
 		const corridorMetaAt = ( i ) => textureLoad( layout.corridorMetaTexture, ivec2( i, int( 0 ) ) );
-		const corridorPointAt = ( edge, sample ) =>
-			textureLoad( layout.corridorTexture, ivec2( sample, edge ) );
-		const smooth01 = ( x ) => {
-
-			const q = clamp( x, 0, 1 );
-			return q.mul( q ).mul( float( 3 ).sub( q.mul( 2 ) ) );
-
-		};
-		const sampleCorridor = ( edge, t, direction, laneMagnitude ) => {
-
-			const f = clamp( t, 0, 1 ).mul( layout.CORRIDOR_SAMPLES - 1 );
-			const i0 = clamp( floor( f ).toInt(), int( 0 ), int( layout.CORRIDOR_SAMPLES - 2 ) );
-			const i1 = i0.add( int( 1 ) );
-			const p0 = corridorPointAt( edge, i0 );
-			const p1 = corridorPointAt( edge, i1 );
-			const pBefore = corridorPointAt( edge, max( i0.sub( int( 1 ) ), int( 0 ) ) );
-			const pAfter = corridorPointAt( edge,
-				min( i1.add( int( 1 ) ), int( layout.CORRIDOR_SAMPLES - 1 ) ) );
-			const local = f.sub( i0.toFloat() );
-			const center = mix( p0.xyz, p1.xyz, local ).toVar();
-			const segment = p1.xy.sub( p0.xy );
-			const fallback = select( length( segment ).greaterThan( 1e-5 ),
-				segment.div( max( length( segment ), 1e-5 ) ), vec2( 1, 0 ) );
-			const tangent0Raw = p1.xy.sub( pBefore.xy );
-			const tangent1Raw = pAfter.xy.sub( p0.xy );
-			const tangent0 = select( length( tangent0Raw ).greaterThan( 1e-5 ),
-				tangent0Raw.div( max( length( tangent0Raw ), 1e-5 ) ), fallback );
-			const tangent1 = select( length( tangent1Raw ).greaterThan( 1e-5 ),
-				tangent1Raw.div( max( length( tangent1Raw ), 1e-5 ) ), fallback );
-			const tangentRaw = mix( tangent0, tangent1, local );
-			const tangent = select( length( tangentRaw ).greaterThan( 1e-5 ),
-				tangentRaw.div( max( length( tangentRaw ), 1e-5 ) ), fallback ).toVar();
-			const fade = smooth01( t.div( 0.12 ) )
-				.mul( smooth01( float( 1 ).sub( t ).div( 0.12 ) ) );
-			const safeLane = min( laneMagnitude, corridorMetaAt( edge ).w );
-			const offset = safeLane.mul( direction ).mul( fade );
-			const position = center.xy.add( vec2( tangent.y.negate(), tangent.x ).mul( offset ) );
-
-			return {
-				position,
-				depth: center.z,
-				tangent: tangent.mul( direction ),
-			};
-
-		};
-
-		// --- murs packés en bits : bit 0 = mur de SURFACE, bit 1 = creusé ---
+		const sampleCorridor = ( edge, t, direction, antId ) =>
+			sampleCorridorSurfaceTSL( layout, edge, t, direction, antId );
+		// bit 0 du mur packé = obstacle de surface
 		const surfaceWall = ( w ) => w.bitAnd( uint( 1 ) ).notEqual( uint( 0 ) );
-		const dug = ( w ) => w.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) );
 
 		// Le stock souterrain ne vit QUE dans les trois cellules de mangeoire.
 		// On excluait auparavant toute cellule creusee de la surface — tenable
@@ -501,10 +457,10 @@ export class AntSimulation {
 		};
 
 		// ------------------------------------------------------------------
-		// Initialisation des fourmis. spawnMode 0 : reine en chambre royale,
-		// nourrices au couvain (sous terre), le reste en disque autour du nid.
-		// spawnMode 1 (éclosion) : naissance au couvain, sous terre, objectif
-		// sortie (les nourrices restent). Énergie initiale RANDOMISÉE pour
+		// Initialisation naturelle : une colonie vivante commence déjà installée.
+		// Reine, nourrices et autres castes occupent leurs chambres ; les activités
+		// reprennent avec un délai déterministe échelonné. Une éclosion démarre au
+		// couvain avec une courte maturation. Énergie initiale RANDOMISÉE pour
 		// désynchroniser la première vague de repas (sinon famine synchrone).
 		// ------------------------------------------------------------------
 		this.kInitAnts = Fn( () => {
@@ -519,6 +475,7 @@ export class AntSimulation {
 				const pos = vec2( 0 ).toVar();
 				const st = uint( 0 ).toVar();
 				const dyn0 = vec4( 0 ).toVar();
+				const startTimer = float( 0 ).toVar();
 
 				If( isQueen, () => {
 
@@ -530,19 +487,33 @@ export class AntSimulation {
 						.bitOr( u.queenLayer.toUint().shiftLeft( uint( 14 ) ) ) );
 					dyn0.z.assign( navNodeAt( u.queenNode.toInt() ).z );
 
-				} ).ElseIf( u.colonyOn.greaterThan( 0.5 )
-					.and( isNurse.or( u.spawnMode.greaterThan( 0.5 ) ) ), () => {
+				} ).ElseIf( u.colonyOn.greaterThan( 0.5 ), () => {
 
-					// nourrices et nouvelles écloses : chambre du couvain
-					const radius = sqrt( hash( i.add( uint( 531 ) ) ) ).mul( u.broodR.mul( 0.6 ) );
-					pos.assign( u.broodPos.add( vec2( cos( around ), sin( around ) ).mul( radius ) ) );
-					// nourrice → navette grenier ; éclose d'une autre caste → sortie ;
-					// nœud courant = chambre de couvain
+					const hatchling = u.spawnMode.greaterThan( 0.5 );
+					const chamberCount = max( u.nodeCount.toInt().sub( int( 2 ) ), int( 1 ) );
+					const distributedNode = int( 2 ).add( min(
+						floor( hash( i.add( uint( 0xC01 ) ) ).mul( chamberCount.toFloat() ) ).toInt(),
+						chamberCount.sub( int( 1 ) ),
+					) );
+					const startNode = select( hatchling.or( isNurse ),
+						u.broodNode.toInt(), distributedNode ).toVar();
+					const here = navNodeAt( startNode );
+					const radius = sqrt( hash( i.add( uint( 531 ) ) ) )
+						.mul( min( u.seatScatter, here.w.mul( 0.35 ) ) );
+					pos.assign( here.xy.add( vec2( cos( around ), sin( around ) ).mul( radius ) ) );
 					const goal = select( isNurse, uint( 1 ), uint( 4 ) );
+					const startLayer = nodeAt( startNode ).w.add( 0.5 ).toUint();
 					st.assign( uint( 8 ).bitOr( goal.shiftLeft( uint( 4 ) ) )
-						.bitOr( u.broodNode.toUint().shiftLeft( uint( 7 ) ) )
-						.bitOr( u.broodLayer.toUint().shiftLeft( uint( 14 ) ) ) );
-					dyn0.z.assign( navNodeAt( u.broodNode.toInt() ).z );
+						.bitOr( startNode.toUint().shiftLeft( uint( 7 ) ) )
+						.bitOr( startLayer.shiftLeft( uint( 14 ) ) ) );
+					dyn0.z.assign( here.z );
+					const delayHash = hash( i.add( uint( 0xA11 ) ) );
+					const delay = select( hatchling,
+						delayHash.mul( STARTUP_DELAY.HATCHLING_MAX - STARTUP_DELAY.HATCHLING_MIN )
+							.add( STARTUP_DELAY.HATCHLING_MIN ),
+						delayHash.mul( STARTUP_DELAY.ESTABLISHED_MAX - STARTUP_DELAY.ESTABLISHED_MIN )
+							.add( STARTUP_DELAY.ESTABLISHED_MIN ) );
+					startTimer.assign( delay.negate() );
 
 				} ).Else( () => {
 
@@ -554,7 +525,7 @@ export class AntSimulation {
 				} );
 
 				antData.element( instanceIndex ).assign( vec4(
-					pos, hash( i.add( uint( 923 ) ) ).mul( PI2 ), 0,
+					pos, hash( i.add( uint( 923 ) ) ).mul( PI2 ), startTimer,
 				) );
 				// st est construit de zéro : le MOT DE MORT (bits 11+) repart donc
 				// à 0 — une fourmi éclose qui recycle un slot n'hérite pas de la
@@ -630,8 +601,8 @@ export class AntSimulation {
 				.and( ly.greaterThanEqual( int( 0 ) ) ).and( ly.lessThan( int( depthTexSize ) ) ), () => {
 
 				// la carte porte 4 planchers superposes : la cellule est praticable
-				// des qu'UNE nappe y a une cavite (la navigation est 2D, seule la
-				// hauteur de rendu depend de la nappe)
+				// des qu'UNE nappe y a une cavite. Ce masque sert aux interactions
+				// de surface ; le deplacement souterrain suit les pistes 3D compilees.
 				const t = textureLoad( layout.depthTexture, ivec2( lx, ly ) );
 				const anyDug = min( min( t.x, t.y ), min( t.z, t.w ) );
 
@@ -679,9 +650,9 @@ export class AntSimulation {
 				// 7 bits de noeud (128 max) : le graphe du nid grandit avec la colonie,
 				// les 4 bits d'origine ne tenaient que 16 noeuds.
 				const node = stPacked.shiftRight( uint( 7 ) ).bitAnd( uint( 127 ) ).toVar();
-				// NAPPE courante (2 bits) : a quel etage superpose la fourmi se trouve.
-				// Ne sert qu'a savoir a quelle HAUTEUR la dessiner — la navigation,
-				// elle, reste strictement 2D.
+				// NAPPE courante (2 bits) : etage logique de la chambre courante.
+				// Le contact et l'orientation physiques viennent de la piste 3D ; cette
+				// valeur reste utile aux objectifs, aux stocks et a la telemetrie.
 				const layer = stPacked.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) ).toVar();
 				// MOT DE MORT (bits 11-18) : figé à l'instant de la mort, il décrit
 				// la culbute (quadrant de repos, tours, tangage, sens). Il DOIT être
@@ -706,6 +677,12 @@ export class AntSimulation {
 				const navT = select( under.equal( uint( 1 ) ), dyn.y, float( 0 ) ).toVar();
 				const navFloor = select( under.equal( uint( 1 ) ), dyn.z, float( 0 ) ).toVar();
 				const navDistance = select( under.equal( uint( 1 ) ), dyn.w, float( 0 ) ).toVar();
+				// Prevent an exit from immediately re-entering during the same kernel.
+				// This step-local flag requires no persistent per-ant storage.
+				const entranceTransition = uint( 0 ).toVar();
+				// Renseignés uniquement par la branche surface puis consommés par la
+				// collision de lèvre après le pilotage. Aucun échantillonnage additionnel.
+				const surfaceEntrance = vec2( 0 ).toVar();
 				const phys = u.physOn.greaterThan( 0.5 );
 
 				// alive = vivante (drapeau flottant) : cadavres ET dévorées restent figés.
@@ -963,22 +940,10 @@ export class AntSimulation {
 
 				} );
 
-				// --- collision avec le terrain (partagée vivantes / cadavres) ---
-				// Surface : bit 0 (une fourmi enterrée sous un mur fraîchement peint
-				// ignore les murs le temps d'en sortir). Sous terre : tout ce qui
-				// n'est PAS creusé (bit 1) est de la terre pleine — ET, depuis la
-				// règle de CONTINUITÉ, toute colonne dont la cavité n'est pas à
-				// hauteur de marche du plancher courant (anti-téléportation).
-				//
-				// RÈGLE DE CONTINUITÉ DES PLANCHERS. La navigation souterraine est
-				// 2D (une cellule est praticable dès qu'UNE nappe y a une cavité),
-				// mais la hauteur dépend de la nappe : une fourmi qui entrait dans
-				// une colonne creusée sur une AUTRE nappe se retrouvait rabattue
-				// verticalement (jusqu'à 16 u mesurés par le warden). Ici on
-				// interdit le pas si AUCUNE cavité de la colonne cible n'est à
-				// moins de MAX_STEP_U du plancher courant — une rampe est
-				// franchissable (pente douce), un plafond/une dalle est un mur.
-				const MAX_STEP_U = 0.75;    // hauteur de marche max (u) — ≥ pente des rampes
+				// La texture de profondeur ne sert plus au déplacement souterrain :
+				// elle vérifie seulement qu'une interaction de mangeoire a lieu sur
+				// le même plancher physique que la piste intrinsèque.
+				const MAX_STEP_U = 0.75;
 
 				// plancher résolu à une colonne (texels) : les 4 nappes
 				const depth4At = ( gp ) => {
@@ -990,60 +955,10 @@ export class AntSimulation {
 
 				};
 
-				// PLANCHER COURANT : sur SA nappe si elle y est creusée, sinon la
-				// plus profonde disponible (repli cohérent avec le rendu — ne
-				// devrait plus arriver, la continuité interdit ces colonnes)
+				// Le plancher courant vient exclusivement de la piste de contact 3D.
 				const curFloor = select( under.equal( uint( 1 ) ), navFloor, float( 0 ) ).toVar();
 
-				If( under.equal( uint( 1 ) ), () => {
-
-					// La profondeur vient de la coordonnée intrinsèque du corridor.
-					return;
-
-					const t = depth4At( pos );
-					const own = select( layer.equal( uint( 0 ) ), t.x,
-						select( layer.equal( uint( 1 ) ), t.y,
-							select( layer.equal( uint( 2 ) ), t.z, t.w ) ) ).toVar();
-					curFloor.assign( select( own.lessThan( - 1e-4 ), own,
-						min( min( t.x, t.y ), min( t.z, t.w ) ) ) );
-
-				} );
-
-				// CREUSAGE SOUS ELLE : si le plancher résolu a chuté de plus d'une
-				// marche depuis le pas précédent (le nid grandit et creuse sous
-				// les pattes), elle TOMBE en balistique au lieu d'être rabattue
-				// d'un coup — la descente devient une chute fluide, pas un saut.
-				// Le plancher de référence est rangé dans antState (bits 25-31).
-				const prevFloorQ = stPacked.shiftRight( uint( 25 ) ).bitAnd( uint( 127 ) ).toVar();
-
-				If( under.equal( uint( 1 ) ).and( prevFloorQ.greaterThan( uint( 0 ) ) ), () => {
-
-					// Un rebuild conserve les corridors existants ; aucune projection verticale.
-					return;
-
-					const drop = prevFloorQ.toFloat().mul( - 0.25 ).sub( curFloor ).toVar();
-
-					If( drop.greaterThan( float( MAX_STEP_U ) ), () => {
-
-						height.addAssign( drop );
-
-					} );
-
-				} );
-
-				// écart entre le plancher courant et la cavité la plus PROCHE en
-				// hauteur à la colonne (px, py) — 1e9 si rien n'est creusé
-				const floorGapAt = ( px, py ) => {
-
-					const t = depth4At( vec2( px, py ) );
-					const g0 = select( t.x.lessThan( - 1e-4 ), abs( t.x.sub( curFloor ) ), float( 1e9 ) );
-					const g1 = select( t.y.lessThan( - 1e-4 ), abs( t.y.sub( curFloor ) ), float( 1e9 ) );
-					const g2 = select( t.z.lessThan( - 1e-4 ), abs( t.z.sub( curFloor ) ), float( 1e9 ) );
-					const g3 = select( t.w.lessThan( - 1e-4 ), abs( t.w.sub( curFloor ) ), float( 1e9 ) );
-					return min( min( g0, g1 ), min( g2, g3 ) );
-
-				};
-
+				// Collision grille strictement réservée au monde de surface.
 				const startWalled = surfaceWall( wall.element(
 					cellIndex( clamp( ivec2( pos ), ivec2( 1 ), ivec2( GRID - 2 ) ) ),
 				) ).toVar();
@@ -1052,9 +967,7 @@ export class AntSimulation {
 
 					const c = clamp( ivec2( px, py ), ivec2( 1 ), ivec2( GRID - 2 ) );
 					const w = wall.element( cellIndex( c ) );
-					const hitWall = select( under.equal( uint( 1 ) ),
-						dug( w ).not().or( floorGapAt( px, py ).greaterThan( float( MAX_STEP_U ) ) ),
-						surfaceWall( w ).and( startWalled.not() ) );
+					const hitWall = surfaceWall( w ).and( startWalled.not() );
 					const out = px.lessThan( 1 ).or( px.greaterThanEqual( GRID - 1 ) )
 						.or( py.lessThan( 1 ) ).or( py.greaterThanEqual( GRID - 1 ) );
 					return out.or( hitWall );
@@ -1185,280 +1098,13 @@ export class AntSimulation {
 						// la route ni l'orientation et est explicitement exclu des tests de
 						// blocage.
 						const restingV2 = restStateOf( instanceIndex, carrying, hungry, isNurse ).resting;
+						const awaitingActivation = timer.lessThan( 0 );
 						const speedTraitV2 = hash( instanceIndex.add( uint( 0x5E01 ) ) )
 							.mul( u.speedSpread ).add( float( 1 ).sub( u.speedSpread.mul( 0.5 ) ) );
 						moveMult.assign( float( 0.8 ).mul( speedTraitV2 )
-							.mul( select( restingV2, float( 0 ), float( 1 ) ) ).mul( paralysis ) );
+							.mul( select( restingV2.or( awaitingActivation ), float( 0 ), float( 1 ) ) )
+							.mul( paralysis ) );
 
-						// Cette instruction arrête la construction JS de l'ancien graphe 2.5D
-						// tout en conservant le code historique dans le diff pour comparaison.
-						return;
-
-						// ==================== SOUS TERRE : graphe ====================
-						// La navigation suit les ARÊTES : le nœud courant (bits 7-10)
-						// donne le prochain saut vers l'objectif ; on ne « devine »
-						// jamais le nœud par proximité (ambigu entre deux tunnels
-						// voisins → fourmis coincées contre la terre pleine).
-						// anti-softlock : une non-nourrice sans objectif remonte, et
-						// on resynchronise son nœud courant au plus proche (cas rare)
-						If( goal.equal( uint( 0 ) ), () => {
-
-							goal.assign( select( isNurse, uint( 1 ), uint( 4 ) ) );
-
-							const bestI = int( 0 ).toVar();
-							const bestD = float( 1e20 ).toVar();
-
-							Loop( { start: int( 0 ), end: u.nodeCount.toInt(), type: 'int', condition: '<' }, ( { i } ) => {
-
-								const d = length( pos.sub( nodeAt( i ).xy ) )
-									.add( select( nodeAt( i ).w.sub( layer.toFloat() ).abs().greaterThan( 0.5 ),
-										float( 1e4 ), float( 0 ) ) );
-
-								If( d.lessThan( bestD ), () => {
-
-									bestD.assign( d );
-									bestI.assign( i );
-
-								} );
-
-							} );
-
-							node.assign( bestI.toUint() );
-
-						} );
-
-						// RESYNCHRONISATION PÉRIODIQUE (~37 s) : un nœud courant
-						// désaccordé (tunnels qui se croisent, changement de nappe
-						// dans une chambre partagée) finissait en blocage durable —
-						// la fourmi tournait autour d'un objectif inatteignable. On
-						// réaligne au nœud le plus proche EN PÉNALISANT les autres
-						// nappes, sans aucun bit d'état (fenêtre tirée de l'horloge
-						// globale et d'un hash stable).
-						const resyncPhase = fract( u.simTime.add(
-							hash( instanceIndex.add( uint( 0x3E5C ) ) ).mul( 211 ) ).div( 37 ) );
-
-						If( resyncPhase.lessThan( u.dt.div( 37 ).mul( 1.5 ) ), () => {
-
-							const bestI = int( 0 ).toVar();
-							const bestD = float( 1e20 ).toVar();
-
-							Loop( { start: int( 0 ), end: u.nodeCount.toInt(), type: 'int', condition: '<' }, ( { i } ) => {
-
-								const d = length( pos.sub( nodeAt( i ).xy ) )
-									.add( select( nodeAt( i ).w.sub( layer.toFloat() ).abs().greaterThan( 0.5 ),
-										float( 1e4 ), float( 0 ) ) );
-
-								If( d.lessThan( bestD ), () => {
-
-									bestD.assign( d );
-									bestI.assign( i );
-
-								} );
-
-							} );
-
-							node.assign( bestI.toUint() );
-
-						} );
-
-						// saut courant ; nœud atteint → on avance d'une arête.
-						// PORTE DE NŒUD : la proximité 2D ne suffit pas — un tunnel
-						// qui passe AU-DESSUS d'une chambre validait le nœud alors
-						// que la fourmi est à deux étages de lui. Il faut aussi une
-						// cavité de la nappe du nœud à hauteur de marche : elle
-						// « entre » alors dans la nappe du nœud (montée comme
-						// descente) et l'arête est franchie pour de vrai.
-						const hop1 = hopOf( node.toInt(), goal.toInt() );
-						const hop1Node = nodeAt( hop1 );
-
-						If( length( pos.sub( hop1Node.xy ) ).lessThan( hop1Node.z ), () => {
-
-							const tN = depth4At( pos );
-							const lN = hop1Node.w.add( 0.5 ).toUint();
-							const dN = select( lN.equal( uint( 0 ) ), tN.x,
-								select( lN.equal( uint( 1 ) ), tN.y,
-									select( lN.equal( uint( 2 ) ), tN.z, tN.w ) ) ).toVar();
-
-							If( dN.lessThan( - 1e-4 )
-								.and( abs( dN.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ), () => {
-
-								layer.assign( lN );
-								curFloor.assign( dN );
-								node.assign( hop1.toUint() );
-
-							} );
-
-						} );
-
-						// cible : la mangeoire de l'objectif quand on approche de sa
-						// chambre, sinon le prochain nœud du graphe (recalculé après
-						// la mise à jour du nœud courant)
-						const hop = hopOf( node.toInt(), goal.toInt() );
-						// NAPPE : plus d'assignation d'office — la règle de continuité
-						// (voir blockedAt) fait adopter à la fourmi la nappe de la
-						// cavité qu'elle emprunte réellement, au fil des colonnes.
-						// Fini le rabattement vertical sur la nappe du nœud visé.
-						const goalPos = select( goal.equal( uint( 1 ) ), u.granaryPos,
-							select( goal.equal( uint( 2 ) ), u.queenPos,
-								select( goal.equal( uint( 3 ) ), u.broodPos,
-									nodeAt( int( 0 ) ).xy ) ) ).toVar();
-
-						// SIÈGE PERSONNEL. Toutes les fourmis d'un même objectif visaient
-						// EXACTEMENT le même texel (une mangeoire = une cellule) : elles
-						// s'empilaient littéralement les unes dans les autres. Chacune vise
-						// maintenant son propre point, tiré une fois pour toutes par un hash
-						// stable dans un disque autour de la mangeoire — assez petit pour
-						// que le rayon d'arrivée (4 texels) reste franchi, donc l'économie
-						// est intacte. Racine carrée = distribution uniforme en AIRE, sinon
-						// tout le monde se retasse au centre.
-						const seatA = hash( instanceIndex.add( uint( 0x5EA7 ) ) );
-						const seatB = hash( instanceIndex.add( uint( 0x5EA8 ) ) ).mul( PI2 );
-						const seat = goalPos.add(
-							vec2( cos( seatB ), sin( seatB ) ).mul( sqrt( seatA ).mul( u.seatScatter ) ) ).toVar();
-
-						const dGoal = length( pos.sub( goalPos ) ).toVar();
-						// PORTE D'OBJECTIF : le siège n'est visé que depuis la
-						// nappe de l'objectif (à hauteur de marche). Sans ça une
-						// fourmi dans un tunnel passant AU-DESSUS du grenier
-						// « arrive » en 2D et tourne en rond au plafond de la
-						// chambre, sans jamais pouvoir y descendre.
-						const goalLayerF = select( goal.equal( uint( 1 ) ), u.granaryLayer,
-							select( goal.equal( uint( 2 ) ), u.queenLayer,
-								select( goal.equal( uint( 3 ) ), u.broodLayer, float( 0 ) ) ) ).toVar();
-						const tG = depth4At( pos );
-						const dG = select( goalLayerF.lessThan( 0.5 ), tG.x,
-							select( goalLayerF.lessThan( 1.5 ), tG.y,
-								select( goalLayerF.lessThan( 2.5 ), tG.z, tG.w ) ) ).toVar();
-						const atGoalDoor = dG.lessThan( - 1e-4 )
-							.and( abs( dG.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ).toVar();
-
-						// CHAMP DE NAVIGATION (bake BFS à chaque changement du nid,
-						// nest.js) : la cible est la colonne voisine dont la distance
-						// à l'objectif est la plus faible — la fourmi descend le
-						// gradient. La distance retenue à une colonne est le MIN sur
-						// les canaux CONTINUS avec son plancher courant (≤ hauteur de
-						// marche) : changer de canal est justement ce qui ouvre les
-						// routes (puits → tube d'un autre canal) ; lire seulement son
-						// canal actuel rendrait ces routes invisibles.
-						const navMin = ( tF, tN ) => min( min(
-							select( tF.x.lessThan( - 1e-4 ).and( abs( tF.x.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ), tN.x, float( NAV_UNREACH ) ),
-							select( tF.y.lessThan( - 1e-4 ).and( abs( tF.y.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ), tN.y, float( NAV_UNREACH ) ) ),
-							min(
-								select( tF.z.lessThan( - 1e-4 ).and( abs( tF.z.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ), tN.z, float( NAV_UNREACH ) ),
-								select( tF.w.lessThan( - 1e-4 ).and( abs( tF.w.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) ), tN.w, float( NAV_UNREACH ) ) ) );
-
-						const navAt = ( gp ) => {
-
-							const lc = clamp(
-								ivec2( gp.x.sub( layout.origin.x ), gp.y.sub( layout.origin.y ) ),
-								ivec2( 0 ), ivec2( depthTexSize - 1 ) );
-							const tF = textureLoad( layout.depthTexture, lc );
-							const d = float( NAV_UNREACH ).toVar();
-
-							If( goal.equal( uint( 1 ) ), () => {
-
-								d.assign( navMin( tF, textureLoad( layout.navFieldTex[ 0 ], lc ) ) );
-
-							} ).ElseIf( goal.equal( uint( 2 ) ), () => {
-
-								d.assign( navMin( tF, textureLoad( layout.navFieldTex[ 1 ], lc ) ) );
-
-							} ).ElseIf( goal.equal( uint( 3 ) ), () => {
-
-								d.assign( navMin( tF, textureLoad( layout.navFieldTex[ 2 ], lc ) ) );
-
-							} ).Else( () => {
-
-								d.assign( navMin( tF, textureLoad( layout.navFieldTex[ 3 ], lc ) ) );
-
-							} );
-
-							return d;
-
-						};
-						const navBest = navAt( pos ).toVar();
-						const navDir = vec2( 0 ).toVar();
-
-						for ( const [ ndx, ndy ] of [ [ 1, 0 ], [ - 1, 0 ], [ 0, 1 ], [ 0, - 1 ],
-							[ 1, 1 ], [ 1, - 1 ], [ - 1, 1 ], [ - 1, - 1 ] ] ) {
-
-							const dN = navAt( pos.add( vec2( ndx, ndy ) ) );
-
-							If( dN.lessThan( navBest ), () => {
-
-								navBest.assign( dN );
-								navDir.assign( vec2( ndx, ndy ) );
-
-							} );
-
-						}
-
-						// objectif inaccessible depuis ici (poche fermée — creusage
-						// en cours, cas transitoire) : repli sur l'ancien guidage
-						const target = select( dGoal.lessThan( 14 ).and( atGoalDoor ),
-							seat,
-							select( navBest.greaterThanEqual( float( NAV_UNREACH - 1 ) ),
-								hopTarget( hop, pos, node ),
-								pos.add( navDir ).add( 0.5 ) ) ).toVar();
-
-						// VOIES DE CIRCULATION : un décalage latéral stable, sur la
-						// perpendiculaire du trajet. Les montantes et les descendantes se
-						// séparent en deux files au lieu de se rentrer dedans au milieu du
-						// tunnel. Borné bien en deçà de la demi-largeur praticable.
-						If( dGoal.greaterThanEqual( 14 ).or( atGoalDoor.not() ), () => {
-
-							const tv = target.sub( pos );
-							const tn = tv.div( max( length( tv ), 0.0001 ) );
-							target.addAssign( vec2( tn.y.negate(), tn.x )
-								.mul( hash( instanceIndex.add( uint( 0x1A4E ) ) ).sub( 0.5 ).mul( u.laneOffset ) ) );
-
-						} );
-
-						// REPOS. Une part importante d'une vraie colonie ne fait rien à un
-						// instant donné (immobilité prolongée mesurée chez plusieurs
-						// espèces). Ici c'est surtout ce qui supprime la fourmi qui
-						// « tourne sur elle-même » : quand sa course est impossible
-						// (grenier vide), elle restait à virer indéfiniment autour de la
-						// mangeoire. Le cycle est dérivé de hashs stables + horloge globale
-						// — AUCUN bit d'état, AUCUN buffer.
-						const period = hash( instanceIndex.add( uint( 0xC10C ) ) ).mul( 14 ).add( 6 );
-						const phaseR = fract( u.simTime.add(
-							hash( instanceIndex.add( uint( 0xC10D ) ) ).mul( 97 ) ).div( period ) );
-						const lazy = hash( instanceIndex.add( uint( 0x1A21 ) ) ).lessThan( u.lazyFrac );
-						// le curseur pilote AUSSI la sieste des actives, pour qu'a 0 il
-						// n'y ait vraiment plus aucun repos (temoin de comparaison)
-						const duty = select( lazy, float( 0.82 ),
-							hash( instanceIndex.add( uint( 0xC10E ) ) ).mul( u.lazyFrac ).mul( 0.5 ) );
-						// GARDE-FOU : jamais de repos pour une porteuse ni une affamée, et
-						// pas pour une nourrice tant que la reine n'est pas rassasiée —
-						// sinon la navette s'arrête et la colonie meurt.
-						const qFed = atomicLoad( stats.element( 7 ) ).toFloat().div( 1000 ).greaterThan( 0.55 );
-						const mayRest = carrying.not().and( hungry.not() ).and( isNurse.not().or( qFed ) );
-						const resting = phaseR.lessThan( duty ).and( mayRest ).toVar();
-
-						// virage vers la cible + légère errance (files organiques).
-						// AU REPOS ON NE VIRE PAS : sans cette garde, une fourmi immobile
-						// continuerait de tourner sur place — le bug qu'on corrige.
-						If( resting.not(), () => {
-
-							const dir = vec2( cos( ang ), sin( ang ) );
-							const to = target.sub( pos );
-							const toN = to.div( max( length( to ), 0.0001 ) );
-							const crossZ = dir.x.mul( toN.y ).sub( dir.y.mul( toN.x ) );
-							const dotv = dir.x.mul( toN.x ).add( dir.y.mul( toN.y ) );
-							ang.addAssign( select( crossZ.greaterThanEqual( 0 ), float( 1 ), float( - 1 ) )
-								.mul( u.steer ).mul( 2.6 ).mul( u.dt ).mul( float( 1.3 ).sub( dotv.mul( 0.9 ) ) ) );
-							ang.addAssign( hash( iseed.add( uint( 0x77 ) ) ).sub( 0.5 ).mul( 0.9 ).mul( u.dt ) );
-
-						} );
-
-						// DIVERSITÉ DE VITESSE : toutes les souterraines avançaient à
-						// exactement 0,8× — d'où l'aspect « banc de poissons ». Chaque
-						// fourmi a maintenant son tempérament, stable dans le temps.
-						const speedTrait = hash( instanceIndex.add( uint( 0x5E01 ) ) )
-							.mul( u.speedSpread ).add( float( 1 ).sub( u.speedSpread.mul( 0.5 ) ) );
-						moveMult.assign( float( 0.8 ).mul( speedTrait )
-							.mul( select( resting, float( 0 ), float( 1 ) ) ).mul( paralysis ) );
 
 					} ).Else( () => {
 
@@ -1566,10 +1212,11 @@ export class AntSimulation {
 						// proche du nid vise la BOUCHE du nid (tête de spirale) en direct
 						const wantsIn = u.colonyOn.greaterThan( 0.5 )
 							.and( carrying.or( hungry ).or( isNurse ) ).toVar();
-						const entry = nodeAt( int( 0 ) ).xy;
-						const dNestHere = length( pos.sub( u.nest ) );
+						const entry = sampleCorridor( int( 1 ), float( 0 ), float( 1 ), instanceIndex ).position;
+						surfaceEntrance.assign( entry );
+						const dEntranceHere = length( pos.sub( u.nest ) );
 
-						If( wantsIn.and( dNestHere.lessThan( u.nestRadius.mul( 1.8 ) ) ), () => {
+						If( wantsIn.and( dEntranceHere.lessThan( u.nestRadius.mul( 1.8 ) ) ), () => {
 
 							const dirv = vec2( cos( ang ), sin( ang ) );
 							const toE = entry.sub( pos );
@@ -1605,8 +1252,6 @@ export class AntSimulation {
 					If( under.equal( uint( 1 ) ), () => {
 
 						const remaining = stepLen.toVar();
-						const laneMagnitude = hash( instanceIndex.add( uint( 0x1A4E ) ) )
-							.mul( u.laneOffset );
 
 						// edge=0 signifie « dans le patch sûr du nœud ». Une fourmi née
 						// ailleurs dans la chambre rejoint d'abord son hub, sans snap.
@@ -1656,34 +1301,66 @@ export class AntSimulation {
 							const reachedNode = select( meta.x.add( 0.5 ).toInt().equal( node.toInt() ), meta.y, meta.x ).add( 0.5 ).toInt();
 							const direction = select( meta.x.add( 0.5 ).toInt().equal( node.toInt() ),
 								float( 1 ), float( - 1 ) );
+							const surfaceLength = corridorSurfaceLengthTSL(
+								layout, edge, instanceIndex );
 							const available = select( direction.greaterThan( 0 ),
-								float( 1 ).sub( navT ), navT ).mul( meta.z );
+								float( 1 ).sub( navT ), navT ).mul( surfaceLength );
 							const travel = min( remaining, available ).toVar();
-							navT.addAssign( direction.mul( travel.div( max( meta.z, 1e-5 ) ) ) );
+							navT.addAssign( direction.mul(
+								travel.div( max( surfaceLength, 1e-5 ) ) ) );
 							navT.assign( clamp( navT, 0, 1 ) );
 							navDistance.addAssign( travel );
+							remaining.subAssign( travel );
 
-							const sampled = sampleCorridor( edge, navT, direction, laneMagnitude );
+							const sampled = sampleCorridor( edge, navT, direction, instanceIndex );
 							pos.assign( sampled.position );
 							navFloor.assign( sampled.depth );
 							ang.assign( atan( sampled.tangent.y, sampled.tangent.x ) );
 
-							If( available.lessThanEqual( remaining.add( 1e-5 ) ), () => {
+							If( travel.greaterThanEqual( available.sub( 1e-5 ) ), () => {
 
 								node.assign( reachedNode.toUint() );
 								layer.assign( nodeAt( reachedNode ).w.add( 0.5 ).toUint() );
 								navEdge.assign( 0 );
 								navT.assign( 0 );
 								const reached = navNodeAt( reachedNode );
-								pos.assign( reached.xy );
-								navFloor.assign( reached.z );
+								const surfacePortal = reachedNode.equal( int( 0 ) );
+
+								// Leave at this ant's exact support-track contact. The remaining
+								// step is consumed radially on the ground: no centre projection,
+								// no snap and no movement budget lost at the mode boundary.
+								If( surfacePortal.and( goal.equal( uint( 4 ) ) )
+									.and( entranceTransition.equal( uint( 0 ) ) ), () => {
+
+									const mouthDelta = sampled.position.sub( reached.xy );
+									const outward = mouthDelta.div( max( length( mouthDelta ), 1e-5 ) );
+									pos.assign( sampled.position.add( outward.mul( remaining ) ) );
+									ang.assign( atan( outward.y, outward.x ) );
+									under.assign( uint( 0 ) );
+									goal.assign( uint( 0 ) );
+									node.assign( uint( 0 ) );
+									layer.assign( uint( 0 ) );
+									timer.assign( 0 );
+									vel.assign( outward.mul( u.moveSpeed.mul( moveMult ) ) );
+									height.assign( 0 );
+									vHeight.assign( 0 );
+									remaining.assign( 0 );
+									entranceTransition.assign( uint( 1 ) );
+
+								} ).Else( () => {
+
+									pos.assign( select( surfacePortal, sampled.position, reached.xy ) );
+									navFloor.assign( select( surfacePortal, sampled.depth, reached.z ) );
+
+								} );
 
 							} );
 
 						} );
 
 					} );
-					If( phys.and( under.equal( uint( 0 ) ) ), () => {
+					If( phys.and( under.equal( uint( 0 ) ) )
+						.and( entranceTransition.equal( uint( 0 ) ) ), () => {
 
 						const grounded = height.lessThanEqual( 1e-4 ).and( vHeight.lessThanEqual( 0 ) );
 						const vDes = vec2( cos( ang ), sin( ang ) ).mul( u.moveSpeed.mul( moveMult ) );
@@ -1721,7 +1398,8 @@ export class AntSimulation {
 
 						disp.assign( vel.mul( u.dt ) );
 
-					} ).ElseIf( under.equal( uint( 0 ) ), () => {
+					} ).ElseIf( under.equal( uint( 0 ) )
+						.and( entranceTransition.equal( uint( 0 ) ) ), () => {
 
 						disp.assign( vec2( cos( ang ), sin( ang ) ).mul( stepLen ) );
 
@@ -1729,7 +1407,8 @@ export class AntSimulation {
 
 					// sous-pas de ≤ 1 texel pour ne pas traverser les murs minces
 					const dispLen = select( phys, length( disp ), stepLen ).toVar();
-					const nSub = select( under.equal( uint( 1 ) ), int( 0 ),
+					const nSub = select( under.equal( uint( 1 ) )
+						.or( entranceTransition.equal( uint( 1 ) ) ), int( 0 ),
 						clamp( ceil( dispLen ).toInt(), int( 1 ), int( 16 ) ) ).toVar();
 					const subStep = disp.div( max( nSub.toFloat(), 1 ) ).toVar();
 					// en mode historique la vitesse ne doit PAS être touchée par les
@@ -1778,94 +1457,136 @@ export class AntSimulation {
 
 					} );
 
-					// ADOPTION DE NAPPE GUIDÉE PAR L'OBJECTIF : à colonne nouvelle,
-					// parmi les cavités à hauteur de marche (≤ MAX_STEP_U — la
-					// continuité du mouvement en garantit toujours une), on prend
-					// celle dont la distance À L'OBJECTIF est la plus faible.
-					// Prendre systématiquement la plus proche en hauteur gardait
-					// la fourmi sur un canal SANS ISSUE à 0,3 u alors que le chemin
-					// passait par un canal voisin à 0,7 u (mesuré : porteuses en
-					// oscillation 66 s à deux colonnes du chemin). Repli : la plus
-					// proche en hauteur.
-					If( under.equal( uint( 1 ) ), () => {
+					// Surface -> tunnel uses the exact contact of this ant's compiled
+					// support track. The path inside this frame is explicitly split into
+					// surface-to-mouth + mouth-to-tunnel, both paid from the measured
+					// movement budget. It therefore cannot create a measurable snap.
+					const enterThroughMouth = () => {
 
-						// v2 porte directement la profondeur et l'arête ; aucun canal à adopter.
-						return;
+						const mouth = sampleCorridor(
+							int( 1 ), float( 0 ), float( 1 ), instanceIndex );
+						const surfaceDelta = pos.sub( pos0 );
+						const surfaceTravel = length( surfaceDelta );
+						const toMouth = mouth.position.sub( pos0 );
+						const headingDot = surfaceDelta.x.mul( toMouth.x )
+							.add( surfaceDelta.y.mul( toMouth.y ) );
+						const segmentLengthSq = max( surfaceTravel.mul( surfaceTravel ), 1e-8 );
+						const contactT = headingDot.div( segmentLengthSq );
+						const closest = surfaceDelta.mul( clamp( contactT, 0, 1 ) );
+						const crossTrackError = length( toMouth.sub( closest ) );
+						const afterContact = surfaceTravel.mul( float( 1 ).sub( contactT ) );
 
-						const t = depth4At( pos );
-						const lcA = clamp(
-							ivec2( pos.x.sub( layout.origin.x ), pos.y.sub( layout.origin.y ) ),
-							ivec2( 0 ), ivec2( depthTexSize - 1 ) );
-						const tN = vec4( float( NAV_UNREACH ) ).toVar();
+						If( entranceTransition.equal( uint( 0 ) )
+							.and( height.lessThanEqual( 1e-4 ) )
+							.and( vHeight.lessThanEqual( 0 ) )
+							.and( contactT.greaterThanEqual( 0 ) )
+							.and( contactT.lessThanEqual( 1 ) )
+							.and( crossTrackError.lessThanEqual( afterContact.add( 1e-5 ) ) ), () => {
 
-						If( goal.equal( uint( 1 ) ), () => {
+							const residual = max( afterContact.sub( crossTrackError ), 0 );
+							const surfaceLength = corridorSurfaceLengthTSL(
+								layout, int( 1 ), instanceIndex );
+							const progress = clamp(
+								residual.div( max( surfaceLength, 1e-5 ) ), 0, 1 );
+							const inside = sampleCorridor(
+								int( 1 ), progress, float( 1 ), instanceIndex );
 
-							tN.assign( textureLoad( layout.navFieldTex[ 0 ], lcA ) );
-
-						} ).ElseIf( goal.equal( uint( 2 ) ), () => {
-
-							tN.assign( textureLoad( layout.navFieldTex[ 1 ], lcA ) );
-
-						} ).ElseIf( goal.equal( uint( 3 ) ), () => {
-
-							tN.assign( textureLoad( layout.navFieldTex[ 2 ], lcA ) );
-
-						} ).Else( () => {
-
-							tN.assign( textureLoad( layout.navFieldTex[ 3 ], lcA ) );
-
-						} );
-
-						const bestD = float( NAV_UNREACH ).toVar();
-						const bestC = uint( 4 ).toVar();      // 4 = aucun candidat
-
-						for ( const [ fC, dC, iC ] of [
-							[ t.x, tN.x, uint( 0 ) ], [ t.y, tN.y, uint( 1 ) ],
-							[ t.z, tN.z, uint( 2 ) ], [ t.w, tN.w, uint( 3 ) ] ] ) {
-
-							If( fC.lessThan( - 1e-4 )
-								.and( abs( fC.sub( curFloor ) ).lessThan( float( MAX_STEP_U ) ) )
-								.and( dC.lessThan( bestD ) ), () => {
-
-								bestD.assign( dC );
-								bestC.assign( iC );
-
-							} );
-
-						}
-
-						If( bestC.lessThan( uint( 4 ) ), () => {
-
-							layer.assign( bestC );
-							curFloor.assign( select( bestC.equal( uint( 0 ) ), t.x,
-								select( bestC.equal( uint( 1 ) ), t.y,
-									select( bestC.equal( uint( 2 ) ), t.z, t.w ) ) ) );
-
-						} ).Else( () => {
-
-							// repli : la cavité la plus proche en hauteur (aucun
-							// canal continu — ne devrait pas arriver)
-							const g0 = select( t.x.lessThan( - 1e-4 ), abs( t.x.sub( curFloor ) ), float( 1e9 ) );
-							const g1 = select( t.y.lessThan( - 1e-4 ), abs( t.y.sub( curFloor ) ), float( 1e9 ) );
-							const g2 = select( t.z.lessThan( - 1e-4 ), abs( t.z.sub( curFloor ) ), float( 1e9 ) );
-							const g3 = select( t.w.lessThan( - 1e-4 ), abs( t.w.sub( curFloor ) ), float( 1e9 ) );
-							const gBest = min( min( g0, g1 ), min( g2, g3 ) ).toVar();
-
-							If( gBest.lessThan( 1e8 ), () => {
-
-								layer.assign( select( gBest.equal( g0 ), uint( 0 ),
-									select( gBest.equal( g1 ), uint( 1 ),
-										select( gBest.equal( g2 ), uint( 2 ), uint( 3 ) ) ) ) );
-								curFloor.assign( select( gBest.equal( g0 ), t.x,
-									select( gBest.equal( g1 ), t.y,
-										select( gBest.equal( g2 ), t.z, t.w ) ) ) );
-
-							} );
+							under.assign( uint( 1 ) );
+							goal.assign( uint( 1 ) );
+							node.assign( uint( 0 ) );
+							layer.assign( uint( 0 ) );
+							pos.assign( inside.position );
+							ang.assign( atan( inside.tangent.y, inside.tangent.x ) );
+							navEdge.assign( 1 );
+							navT.assign( progress );
+							navFloor.assign( inside.depth );
+							navDistance.assign( residual );
+							height.assign( 0 );
+							vHeight.assign( 0 );
+							timer.assign( 0 );
+							entranceTransition.assign( uint( 1 ) );
 
 						} );
 
-					} );
+					};
 
+					// Lèvre physique continue : après une éventuelle tentative de portail,
+					// toute fourmi restée en surface est résolue contre le disque du trou
+					// augmenté de sa hitbox. Le solveur balaie le segment complet, rabat au
+					// premier impact et conserve la composante tangentielle (glissement O(1)).
+					const resolveSurfaceEntranceLip = () => {
+
+						If( under.equal( uint( 0 ) ).and( entranceTransition.equal( uint( 0 ) ) ), () => {
+
+							const center = u.nest;
+							const mouthRadius = length( surfaceEntrance.sub( center ) );
+							// Une candidate déclarée entre déjà dans la gorge : son point
+							// de contact peut parcourir le collier entre le rayon de sécurité
+							// du corps et la bouche. Elle reste bloquée au rayon exact de la
+							// bouche tant qu'elle n'a pas croisé SA piste dans
+							// enterThroughMouth(). Les autres fourmis conservent la collision
+							// bouche + hitbox et ne peuvent donc pas tomber dans le trou.
+							const entering = u.colonyOn.greaterThan( 0.5 )
+								.and( carrying.or( hungry ).or( isNurse ) );
+							const safeRadius = mouthRadius.add(
+								select( entering, float( 0 ), u.antHitR ) );
+							const epsilon = float( 1e-5 );
+							const startRel = pos0.sub( center );
+							const targetRel = pos.sub( center );
+							const startDistance = length( startRel );
+							const targetDistance = length( targetRel );
+							const startedInside = startDistance.lessThan( safeRadius.sub( epsilon ) );
+							// Une fourmi qui vient de sortir est encore partiellement dans la gorge.
+							// Elle peut s'en extraire avec son budget normal, mais jamais revenir plus profond.
+							const collisionRadius = select( startedInside,
+								max( startDistance, epsilon ), safeRadius );
+							const resolvedRadius = collisionRadius.add( epsilon );
+							const delta = pos.sub( pos0 );
+							const aLip = max( delta.x.mul( delta.x ).add( delta.y.mul( delta.y ) ), 1e-8 );
+							const bLip = startRel.x.mul( delta.x ).add( startRel.y.mul( delta.y ) );
+							const cLip = startRel.x.mul( startRel.x ).add( startRel.y.mul( startRel.y ) )
+								.sub( collisionRadius.mul( collisionRadius ) );
+							const discriminant = bLip.mul( bLip ).sub( aLip.mul( cLip ));
+							const candidateT = bLip.negate().sub( sqrt( max( discriminant, 0 ) ) )
+								.div( aLip );
+							const atLip = startDistance.lessThanEqual( collisionRadius.add( epsilon ) );
+							const candidateValid = discriminant.greaterThanEqual( 0 )
+								.and( candidateT.greaterThanEqual( 0 ) ).and( candidateT.lessThanEqual( 1 ) );
+							const candidateRel = startRel.add( delta.mul( clamp( candidateT, 0, 1 ) ) );
+							const candidateEntering = candidateRel.x.mul( delta.x )
+								.add( candidateRel.y.mul( delta.y ) ).lessThan( epsilon.negate() );
+							const outsideCollision = atLip.and( bLip.lessThan( epsilon.negate() ) )
+								.or( atLip.not().and( candidateValid ).and( candidateEntering ) );
+							const insideCollision = targetDistance.lessThan( startDistance.sub( epsilon ) );
+							const collided = select( startedInside, insideCollision, outsideCollision );
+							const impactT = select( atLip, float( 0 ), clamp( candidateT, 0, 1 ) );
+							const impactRel = startRel.add( delta.mul( impactT ) );
+							const deltaLength = length( delta );
+							const fallbackNormal = select( startDistance.greaterThan( epsilon ),
+								startRel.div( max( startDistance, epsilon ) ),
+								select( deltaLength.greaterThan( epsilon ),
+									delta.negate().div( max( deltaLength, epsilon ) ), vec2( 1, 0 ) ) );
+							const impactLength = length( impactRel );
+							const normal = select( impactLength.greaterThan( epsilon ),
+								impactRel.div( max( impactLength, epsilon ) ), fallbackNormal );
+							const remainingLip = delta.mul( float( 1 ).sub( impactT ) );
+							const inward = min( remainingLip.x.mul( normal.x )
+								.add( remainingLip.y.mul( normal.y ) ), 0 );
+							const slide = remainingLip.sub( normal.mul( inward ) );
+							const resolved = center.add( normal.mul( resolvedRadius ) ).add( slide );
+
+							If( collided, () => {
+
+								pos.assign( resolved );
+								const velocityInward = min(
+									vel.x.mul( normal.x ).add( vel.y.mul( normal.y ) ), 0 );
+								vel.subAssign( normal.mul( velocityInward ) );
+
+							} );
+
+						} );
+
+					};
 					// --- événements ---
 					If( under.equal( uint( 1 ) ).and( u.colonyOn.greaterThan( 0.5 ) ), () => {
 
@@ -1967,28 +1688,6 @@ export class AntSimulation {
 
 						} );
 
-						// sortie : au nœud d'entrée (profondeur ≈ 0) → surface, bits
-						// hauts remis à zéro (INVARIANT araignées, voir antState)
-						If( goal.equal( uint( 4 ) ), () => {
-
-							const dExit = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
-
-							If( node.equal( uint( 0 ) ).and( dExit.lessThan( u.entranceR ) ), () => {
-
-								under.assign( uint( 0 ) );
-								goal.assign( uint( 0 ) );
-								node.assign( uint( 0 ) );
-								layer.assign( uint( 0 ) );
-								timer.assign( 0 );          // elle sort du nid : fraîcheur pleine
-								vel.assign( vec2( cos( ang ), sin( ang ) ).mul( u.moveSpeed ) );
-								height.assign( 0 );
-								vHeight.assign( 0 );
-
-
-							} );
-
-						} );
-
 					} ).Else( () => {
 
 						// ================== ÉVÉNEMENTS DE SURFACE ==================
@@ -2037,20 +1736,7 @@ export class AntSimulation {
 								// affamée ou nourrice égarée : elle DESCEND par l'entrée
 								If( u.colonyOn.greaterThan( 0.5 ).and( hungry.or( isNurse ) ), () => {
 
-									const dEntry = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
-
-									If( dEntry.lessThan( u.entranceR ), () => {
-
-										under.assign( uint( 1 ) );
-										goal.assign( uint( 1 ) );   // au grenier (manger / navette)
-										node.assign( uint( 0 ) );   // départ : tête de spirale
-									navEdge.assign( 0 );
-									navT.assign( 0 );
-									navFloor.assign( navNodeAt( int( 0 ) ).z );
-									navDistance.assign( 0 );
-
-
-									} );
+									enterThroughMouth();
 
 								} );
 
@@ -2064,21 +1750,7 @@ export class AntSimulation {
 
 									// COLONIE : la porteuse passe par l'entrée et va déposer
 									// sa bille au grenier (la livraison est comptée en bas)
-									const dEntry = length( pos.sub( nodeAt( int( 0 ) ).xy ) );
-
-									If( dEntry.lessThan( u.entranceR ), () => {
-
-										under.assign( uint( 1 ) );
-										goal.assign( uint( 1 ) );
-										node.assign( uint( 0 ) );   // départ : tête de spirale
-									navEdge.assign( 0 );
-									navT.assign( 0 );
-									navFloor.assign( navNodeAt( int( 0 ) ).z );
-									navDistance.assign( 0 );
-
-										timer.assign( 0 );
-
-									} );
+									enterThroughMouth();
 
 								} ).Else( () => {
 
@@ -2098,6 +1770,9 @@ export class AntSimulation {
 
 						} );
 
+						resolveSurfaceEntranceLip();
+						ci.assign( cellIndex( clamp( ivec2( pos ), ivec2( 1 ), ivec2( GRID - 2 ) ) ) );
+
 						// --- dépôt de phéromone : sémantique de FRAÎCHEUR (Pezzza) ---
 						// la valeur du champ = exp(-fade·temps_depuis_source) du visiteur le
 						// plus « frais » (atomicMax), pas une accumulation : le gradient vers
@@ -2110,7 +1785,8 @@ export class AntSimulation {
 							0, 1,
 						).mul( float( 1 ).sub( panic.mul( 0.85 ) ) ).mul( FIXED ).toUint();
 
-						If( freshness.greaterThan( uint( 0 ) ), () => {
+						If( freshness.greaterThan( uint( 0 ) )
+							.and( entranceTransition.equal( uint( 0 ) ) ), () => {
 
 							atomicMax( deposit.element( ci.mul( 2 ).add( state.toInt() ) ), freshness );
 
@@ -2226,11 +1902,6 @@ export class AntSimulation {
 				// --- écriture finale : état re-packé + signes vitaux + dynamique ---
 				// (aussi pour les mortes : le cap de cadavres et la dévoration font
 				// évoluer leur état)
-				// plancher résolu courant, bits 25-31 (pas de 0,25 u, valeur
-				// positive) : la référence de la détection de creusage sous elle
-				const floorQ = select( under.equal( uint( 1 ) ),
-					clamp( curFloor.negate().mul( 4 ).add( 0.5 ), float( 0 ), float( 127 ) ).toUint(),
-					uint( 0 ) );
 				antState.element( instanceIndex ).assign(
 					state.bitOr( under.shiftLeft( uint( 3 ) ) )
 						.bitOr( goal.shiftLeft( uint( 4 ) ) )
@@ -2239,8 +1910,7 @@ export class AntSimulation {
 						.bitOr( deathWord.shiftLeft( uint( 16 ) ) )
 						.bitOr( select( isSoldier.and( state.lessThan( uint( 2 ) ) )
 							.and( attacking.greaterThan( 0.5 ) ),
-							uint( 1 ).shiftLeft( uint( 24 ) ), uint( 0 ) ) )
-						.bitOr( floorQ.shiftLeft( uint( 25 ) ) ),
+							uint( 1 ).shiftLeft( uint( 24 ) ), uint( 0 ) ) ),
 				);
 				antVital.element( instanceIndex ).assign( vec4( venom, biteClock, energy, gait ) );
 				If( under.equal( uint( 1 ) ), () => {
@@ -2568,6 +2238,7 @@ export class AntSimulation {
 
 		const l = this.layout;
 		this.u.nodeCount.value = l.nodeCount;
+		this.u.nest.value.set( l.entry.x, l.entry.y );
 		this.u.granaryNode.value = l.GOAL_NODE[ 1 ];
 		this.u.granaryPos.value.set( l.troughs.granary.x, l.troughs.granary.y );
 		this.u.queenPos.value.set( l.troughs.queen.x, l.troughs.queen.y );
@@ -2588,15 +2259,30 @@ export class AntSimulation {
 	}
 
 	// activer/couper la colonie en cours de partie (recreuse le réseau au besoin)
-	async setColonyEnabled( on ) {
+	setColonyEnabled( on ) {
 
-		this.u.colonyOn.value = on ? 1 : 0;
+		const enabled = Boolean( on );
+		const migration = this._colonyModeTail.then( async () => {
 
-		if ( on ) {
+			const next = enabled ? 1 : 0;
+			const changed = this.u.colonyOn.value !== next || params.colony !== enabled;
+			params.colony = enabled;
+			this.u.colonyOn.value = next;
+			if ( ! changed ) return false;
 
-			await this.renderer.computeAsync( this.kDig );
+			// Changer de modèle comportemental sans migrer les bits under/goal/node
+			// produit un état hybride invisible. Le changement est une nouvelle partie
+			// explicite : OFF réinitialise toute la population en surface historique ;
+			// ON relance le démarrage naturel dans les chambres.
+			await this.reset();
+			this.refreshDisplay();
+			this.updateFieldNodes();
+			return true;
 
-		}
+		} );
+		// Une erreur est rendue à l'appelant mais ne condamne pas la file suivante.
+		this._colonyModeTail = migration.catch( () => {} );
+		return migration;
 
 	}
 

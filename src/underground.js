@@ -48,7 +48,7 @@ import {
 	select, smoothstep, exp, fract, color, mx_noise_float,
 } from 'three/tsl';
 
-import { GRID, WORLD, NEST, gfx, params } from './config.js';
+import { GRID, WORLD, NEST, MIN_NEST_DEPTH, gfx, params } from './config.js';
 
 export function createUnderground( { scene, layout, env, camera, volume } ) {
 
@@ -57,9 +57,11 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	const centerX = ( NEST.x / GRID - 0.5 ) * WORLD;
 	const centerZ = ( NEST.y / GRID - 0.5 ) * WORLD;
+	const entryX = ( layout.entry.x / GRID - 0.5 ) * WORLD;
+	const entryZ = ( layout.entry.y / GRID - 0.5 ) * WORLD;
 
 	// ------------------------------------------------------------------
-	const uDepthMax = uniform( 18 );
+	const uDepthMax = uniform( MIN_NEST_DEPTH );
 	const uSurfaceY = uniform( 0 );
 	const uHeadLight = uniform( 1 );
 	const uAO = uniform( 1 );
@@ -75,7 +77,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 	const uScanFire = uniform( 1e6 );
 
 	// constantes du scanner : l'onde part du puits d'entrée du nid
-	const SCAN_CENTER = vec3( centerX, 0, centerZ );
+	const SCAN_CENTER = vec3( entryX, 0, entryZ );
 	const GRID_FREQ = 1.5;        // fréquence de la cage 3D (~0,67 u par maille :
 	                              // dense comme le scanner DRG, sans virer au gruyère)
 	const SCAN_PERIOD = 5.0;      // période de l'impulsion périodique (s)
@@ -625,7 +627,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	function update( dt ) {
 
-		uDepthMax.value = layout.depthMax || 18;
+		uDepthMax.value = layout.depthMax || MIN_NEST_DEPTH;
 		uHeadLight.value = gfx.nestLight;
 		uAO.value = gfx.nestAO;
 		uGhost.value = gfx.nestGhost;
@@ -679,13 +681,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		bSize.value.set( half * 2, - floorY + 0.05, half * 2 );
 		fitBox();
 
-		if ( env.anthill ) {
 
-			// la fourmilière de surface disparaît dès que la caméra entre dans
-			// le bloc : on quitte le monde de surface
-			env.anthill.visible = ! dive;
-
-		}
 
 	}
 

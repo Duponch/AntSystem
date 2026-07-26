@@ -1,0 +1,443 @@
+#!/usr/bin/env node
+
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve( path.dirname( fileURLToPath( import.meta.url ) ), '..' );
+const DOC_ROOT = path.join( ROOT, 'doc' );
+const MANIFEST = path.join( DOC_ROOT, 'manifest.json' );
+const SELF = 'scripts/docs-sync.mjs';
+
+const CONTRACTS = Object.freeze( {
+	'COL-ECO': {
+		document: 'doc/fonctionnel/colonie.md',
+		guides: [
+			'doc/guide/colonie.md',
+			'doc/guide/cycle-vie-ressources.md',
+			'doc/guide/attentes-menaces-limites.md',
+		],
+		sources: [
+			'src/config.js',
+			'src/colony.js',
+			'src/colony-layout.js',
+			'src/guide.js',
+			'src/guide.css',
+			'src/ragdoll.js',
+			'src/simulation.js',
+			'src/spiders.js',
+		],
+		tests: [ 'test/colony-layout.test.js' ],
+		runtimeTests: [ 'src/tests.js' ],
+		evidence: [
+			'T2 ponte (reine nourrie)',
+			'T3 éclosions → croissance',
+			'T5 aller-retour bouche + livraison au grenier',
+			'T6 famine sans nourriture',
+			'T9 échantillon araignées',
+			'COLONY-TROUGH-001',
+			'COLONY-TROUGH-002',
+			'COLONY-BROOD-001',
+		],
+	},
+	'COL-START': {
+		document: 'doc/fonctionnel/demarrage-naturel.md',
+		guides: [ 'doc/guide/demarrage-naturel.md' ],
+		sources: [ 'src/colony-startup.js', 'src/colony.js', 'src/simulation.js' ],
+		tests: [ 'test/colony-startup.test.js' ],
+		runtimeTests: [ 'src/tests.js' ],
+		evidence: [
+			'COL-START-001',
+			'COL-START-002',
+			'COL-START-003',
+			'COL-START-004',
+			'T1 démarrage naturel',
+			'T10 toggle colonie ON→OFF→ON atomique',
+		],
+	},
+	'NAV-SURFACE': {
+		document: 'doc/technique/navigation-contact-3d.md',
+		guides: [ 'doc/guide/navigation-3d.md' ],
+		sources: [
+			'src/ants.js',
+			'src/colony.js',
+			'src/config.js',
+			'src/main.js',
+			'src/nest-mutation-ui.js',
+			'src/navigation/corridor-network.js',
+			'src/navigation/corridor-sampling-tsl.js',
+			'src/navigation/corridor-surface-parallel.js',
+			'src/navigation/corridor-surface-partition.js',
+			'src/navigation/corridor-surface.worker.js',
+			'src/navigation/nest-mutation-transaction.js',
+			'src/navigation/nest-volume-probe.js',
+			'src/navigation/support-geometry.js',
+			'src/nest.js',
+			'src/nestvolume.js',
+			'src/pose.js',
+			'src/simulation.js',
+			'src/ui.js',
+			'src/underground.js',
+		],
+		tests: [
+			'test/corridor-network.surface-contact.test.js',
+			'test/colony-runtime-oracles.test.js',
+			'test/chamber-surface.test.js',
+			'test/corridor-network.complexity.test.js',
+			'test/corridor-network.continuity.test.js',
+			'test/corridor-network.invariants.test.js',
+			'test/corridor-network.lane-stretch.test.js',
+			'test/corridor-network.regression.test.js',
+			'test/corridor-network.routes.test.js',
+			'test/corridor-network.sample-boundary.test.js',
+			'test/corridor-network.vertical-shaft.test.js',
+			'test/corridor-surface-parallel.test.js',
+			'test/helpers/corridor-fixtures.js',
+			'test/nest-layout-async.integration.test.js',
+			'test/nest-mutation-transaction.test.js',
+			'test/nest-mutation-ui.test.js',
+			'test/nest-volume-probe.test.js',
+			'test/warden-verdict.test.js',
+			'test/support-geometry.spatial-hash.test.js',
+			'test/nest.phyllotactic-layout.test.js',
+			'test/nest.depth-resolution.test.js',
+		],
+		runtimeTests: [ 'src/tests.js', 'src/warden.js' ],
+		evidence: [
+			'NAV-SURFACE-001',
+			'NAV-SURFACE-002',
+			'NAV-SURFACE-003',
+			'NAV-SURFACE-004',
+			'NAV-SURFACE-005',
+			'NAV-SURFACE-006',
+			'NAV-SURFACE-007',
+			'NAV-SURFACE-008',
+			'NAV-SURFACE-PERF-001',
+			'NAV-SURFACE-PAR-001',
+			'NAV-SURFACE-PAR-002',
+			'NAV-SURFACE-PAR-003',
+			'NAV-SURFACE-PAR-004',
+			'NAV-NEST-TXN-001',
+			'NAV-NEST-TXN-002',
+			'NAV-NEST-TXN-003',
+			'NAV-NEST-TXN-004',
+			'NAV-NEST-PAUSE-001',
+			'NAV-NEST-PAUSE-002',
+			'NEST-LAYOUT-001',
+			'NEST-LAYOUT-002',
+			'NEST-LAYOUT-003',
+			'NEST-LAYOUT-004',
+			'NAV-VOLUME-001',
+			'NAV-VOLUME-002',
+			'NAV-VOLUME-GPU-001',
+			'NAV-VOLUME-GPU-002',
+			'NAV-VOLUME-GPU-003',
+			'NAV-VOLUME-GPU-004',
+			'NAV-VOLUME-GPU-005',
+			'NAV-VOLUME-GPU-006',
+			'NAV-VOLUME-GPU-007',
+			'COL-CONFINEMENT-001',
+			'COL-CONFINEMENT-002',
+			'COL-CONFINEMENT-003',
+			'posesNonFinies',
+			'pivotsHorsSupport',
+			'orientationsHorsRepere',
+		],
+	},
+	'NAV-ENTRANCE': {
+		document: 'doc/technique/navigation-contact-3d.md',
+		guides: [ 'doc/guide/navigation-3d.md' ],
+		sources: [
+			'src/environment.js',
+			'src/graphics/grass.js',
+			'src/navigation/corridor-network.js',
+			'src/navigation/entrance-geometry.js',
+			'src/nest.js',
+			'src/nestvolume.js',
+			'src/simulation.js',
+		],
+		tests: [
+			'test/corridor-network.surface-contact.test.js',
+			'test/entrance-geometry.test.js',
+			'test/warden-verdict.test.js',
+		],
+		runtimeTests: [ 'src/warden.js' ],
+		evidence: [
+			'NAV-ENTRANCE-001',
+			'NAV-ENTRANCE-002',
+			'NAV-ENTRANCE-003',
+			'NAV-ENTRANCE-004',
+			'NAV-ENTRANCE-005',
+			'NAV-ENTRANCE-006',
+			'NAV-ENTRANCE-007',
+			'NAV-ENTRANCE-008',
+			'NAV-ENTRANCE-009',
+			'NAV-ENTRANCE-010',
+			'NAV-ENTRANCE-RUNTIME-001',
+		],
+	},
+	OBS: {
+		document: 'doc/fonctionnel/intentions-et-arrets.md',
+		guides: [ 'doc/guide/inspecteur.md', 'doc/guide/attentes-menaces-limites.md' ],
+		sources: [ 'src/ant-observer.js', 'src/antfollow.js' ],
+		tests: [ 'test/ant-observer.intent.test.js', 'test/ant-observer.motion.test.js' ],
+		runtimeTests: [],
+		evidence: [ 'OBS-START-001', 'OBS-PAUSE-001', 'OBS-DIST-001' ],
+	},
+} );
+
+const REQUIRED_GUIDES = Object.freeze( [
+	{ path: 'doc/guide/colonie.md', order: 10 },
+	{ path: 'doc/guide/demarrage-naturel.md', order: 20 },
+	{ path: 'doc/guide/cycle-vie-ressources.md', order: 30 },
+	{ path: 'doc/guide/attentes-menaces-limites.md', order: 40 },
+	{ path: 'doc/guide/navigation-3d.md', order: 50 },
+	{ path: 'doc/guide/inspecteur.md', order: 60 },
+] );
+
+const REQUIRED_DOCS = Object.freeze( [
+	'doc/index.md',
+	'doc/fonctionnel/colonie.md',
+	'doc/fonctionnel/demarrage-naturel.md',
+	'doc/fonctionnel/intentions-et-arrets.md',
+	'doc/technique/architecture.md',
+	'doc/technique/navigation-contact-3d.md',
+	'doc/technique/performance.md',
+	'doc/qualite/strategie-tests.md',
+	'doc/qualite/matrice-contrats.md',
+	... REQUIRED_GUIDES.map( ( guide ) => guide.path ),
+] );
+
+const REQUIRED_SCRIPTS = Object.freeze( {
+	'docs:sync': 'node scripts/docs-sync.mjs --write',
+	'docs:check': 'node scripts/docs-sync.mjs --check',
+	check: 'npm run docs:check && npm test && npm run build',
+} );
+
+const full = ( relative ) => path.join( ROOT, ... relative.split( '/' ) );
+const posix = ( value ) => value.split( path.sep ).join( '/' );
+const normalize = ( value ) => value.replace( /^\uFEFF/, '' ).replace( /\r\n?/g, '\n' );
+const read = ( relative ) => normalize( readFileSync( full( relative ), 'utf8' ) );
+const digest = ( relative ) => `sha256:${ createHash( 'sha256' )
+	.update( read( relative ), 'utf8' ).digest( 'hex' ) }`;
+const contractTestFiles = ( contract ) => [
+	... contract.tests,
+	... ( contract.runtimeTests ?? [] ),
+];
+
+function frontMatter( relative ) {
+
+	const match = read( relative ).match( /^---\n([\s\S]*?)\n---(?:\n|$)/ );
+	if ( ! match ) return null;
+	const metadata = {};
+	for ( const line of match[ 1 ].split( '\n' ) ) {
+
+		const separator = line.indexOf( ':' );
+		if ( separator < 1 ) continue;
+		metadata[ line.slice( 0, separator ).trim() ] = line.slice( separator + 1 ).trim();
+
+	}
+	return metadata;
+
+}
+
+function markdownFiles( directory ) {
+
+	const files = [];
+	for ( const entry of readdirSync( directory, { withFileTypes: true } ) ) {
+
+		const candidate = path.join( directory, entry.name );
+		if ( entry.isDirectory() ) files.push( ... markdownFiles( candidate ) );
+		else if ( entry.isFile() && entry.name.endsWith( '.md' ) )
+			files.push( posix( path.relative( ROOT, candidate ) ) );
+
+	}
+	return files.sort();
+
+}
+
+function validateLinks( files, errors ) {
+
+	const pattern = /!?\[[^\]]*]\(([^)]+)\)/g;
+	for ( const relative of files ) {
+
+		let match;
+		const text = read( relative );
+		while ( ( match = pattern.exec( text ) ) ) {
+
+			let target = match[ 1 ].trim();
+			if ( target.startsWith( '<' ) && target.endsWith( '>' ) ) target = target.slice( 1, - 1 );
+			target = target.split( /\s+["']/ )[ 0 ];
+			if ( /^(?:[a-z]+:|#)/i.test( target ) ) continue;
+			const clean = target.split( '#' )[ 0 ].split( '?' )[ 0 ];
+			if ( ! clean ) continue;
+
+			let decoded;
+			try { decoded = decodeURIComponent( clean ); }
+			catch { errors.push( `${ relative }: lien non décodable « ${ target } »` ); continue; }
+
+			const destination = path.resolve( path.dirname( full( relative ) ), decoded );
+			const inside = destination === ROOT || destination.startsWith( `${ ROOT }${ path.sep }` );
+			if ( ! inside || ( destination !== MANIFEST && ! existsSync( destination ) ) )
+				errors.push( `${ relative }: cible locale absente « ${ target } »` );
+
+		}
+
+	}
+
+}
+
+function validate() {
+
+	const errors = [];
+	for ( const relative of REQUIRED_DOCS )
+		if ( ! existsSync( full( relative ) ) ) errors.push( `document requis absent « ${ relative } »` );
+	if ( errors.length ) return { errors, files: [] };
+
+	const guideOrders = new Map();
+	for ( const guide of REQUIRED_GUIDES ) {
+
+		const metadata = frontMatter( guide.path );
+		if ( ! metadata ) {
+
+			errors.push( `${ guide.path }: frontmatter requis absent` );
+			continue;
+
+		}
+		if ( ! metadata.title ) errors.push( `${ guide.path }: champ title absent` );
+		if ( ! metadata.summary ) errors.push( `${ guide.path }: champ summary absent` );
+		const order = Number( metadata.order );
+		if ( order !== guide.order )
+			errors.push( `${ guide.path }: ordre ${ metadata.order ?? 'absent' }, attendu ${ guide.order }` );
+		if ( guideOrders.has( order ) )
+			errors.push( `${ guide.path }: ordre dupliqué avec ${ guideOrders.get( order ) }` );
+		else guideOrders.set( order, guide.path );
+
+		const references = ( metadata.contracts ?? '' )
+			.split( ',' ).map( ( value ) => value.trim() ).filter( Boolean );
+		if ( references.length === 0 ) errors.push( `${ guide.path }: champ contracts absent` );
+		for ( const reference of references )
+			if ( ! Object.hasOwn( CONTRACTS, reference ) )
+				errors.push( `${ guide.path }: contrat inconnu « ${ reference } »` );
+
+	}
+
+	for ( const [ id, contract ] of Object.entries( CONTRACTS ) ) {
+
+		const heading = new RegExp( `^#{1,6}\\s+${ id }(?:\\s|$)`, 'm' );
+		if ( ! heading.test( read( contract.document ) ) )
+			errors.push( `${ contract.document }: titre canonique ${ id } absent` );
+		for ( const guide of contract.guides ) {
+
+			const references = ( frontMatter( guide )?.contracts ?? '' )
+				.split( ',' ).map( ( value ) => value.trim() );
+			if ( ! references.includes( id ) )
+				errors.push( `${ guide }: référence au contrat ${ id } absente du frontmatter` );
+
+		}
+
+		const watched = [ ... contract.sources, ... contractTestFiles( contract ) ];
+		for ( const relative of watched )
+			if ( ! existsSync( full( relative ) ) ) errors.push( `${ id }: fichier absent « ${ relative } »` );
+		if ( watched.some( ( relative ) => ! existsSync( full( relative ) ) ) ) continue;
+
+		const corpus = contractTestFiles( contract ).map( read ).join( '\n' );
+		for ( const evidence of contract.evidence )
+			if ( ! corpus.includes( evidence ) ) errors.push( `${ id }: preuve ${ evidence } absente` );
+
+	}
+
+	const ownedSources = new Set( Object.values( CONTRACTS ).flatMap( ( contract ) => contract.sources ) );
+	const navigationSources = readdirSync( full( 'src/navigation' ), { withFileTypes: true } )
+		.filter( ( entry ) => entry.isFile() && entry.name.endsWith( '.js' ) )
+		.map( ( entry ) => `src/navigation/${ entry.name }` );
+	const simulationSources = [
+		'src/config.js',
+		'src/colony.js',
+		'src/colony-layout.js',
+		'src/colony-startup.js',
+		'src/environment.js',
+		'src/main.js',
+		'src/nest-mutation-ui.js',
+		'src/nest.js',
+		'src/nestvolume.js',
+		'src/pose.js',
+		'src/simulation.js',
+		'src/spiders.js',
+		'src/ui.js',
+		... navigationSources,
+	];
+	for ( const relative of simulationSources )
+		if ( ! ownedSources.has( relative ) )
+			errors.push( `source de simulation sans contrat documentaire « ${ relative } »` );
+
+	const packageJson = JSON.parse( read( 'package.json' ) );
+	for ( const [ name, command ] of Object.entries( REQUIRED_SCRIPTS ) )
+		if ( packageJson.scripts?.[ name ] !== command )
+			errors.push( `package.json: script « ${ name } » invalide` );
+
+	const files = markdownFiles( DOC_ROOT );
+	validateLinks( files, errors );
+	return { errors, files };
+
+}
+
+function makeManifest( files ) {
+
+	const documents = Object.fromEntries( files.map( ( relative ) => [ relative, digest( relative ) ] ) );
+	const watchedFiles = [ ... new Set( Object.values( CONTRACTS ).flatMap(
+		( contract ) => [ ... contract.sources, ... contractTestFiles( contract ) ],
+	) ) ].sort();
+	const watched = Object.fromEntries( watchedFiles.map( ( relative ) => [ relative, digest( relative ) ] ) );
+
+	return {
+		schemaVersion: 2,
+		algorithm: 'sha256',
+		generator: { path: SELF, hash: digest( SELF ) },
+		contracts: CONTRACTS,
+		hashes: { documents, watched },
+	};
+
+}
+
+function fail( messages ) {
+
+	for ( const message of messages ) console.error( `docs-sync: ${ message }` );
+	process.exitCode = 1;
+
+}
+
+const mode = process.argv[ 2 ] ?? '--write';
+if ( mode !== '--write' && mode !== '--check' ) {
+
+	fail( [ `option inconnue « ${ mode } » ; utiliser --write ou --check` ] );
+
+} else {
+
+	const { errors, files } = validate();
+	if ( errors.length ) fail( errors );
+	else {
+
+		const expected = `${ JSON.stringify( makeManifest( files ), null, 2 ) }\n`;
+		if ( mode === '--write' ) {
+
+			writeFileSync( MANIFEST, expected, 'utf8' );
+			console.log( `docs-sync: manifeste mis à jour (${ files.length } documents).` );
+
+		} else if ( ! existsSync( MANIFEST ) ) {
+
+			fail( [ 'doc/manifest.json absent ; relire les contrats puis lancer npm run docs:sync' ] );
+
+		} else if ( readFileSync( MANIFEST, 'utf8' ).replace( /\r\n?/g, '\n' ) !== expected ) {
+
+			fail( [
+				'dérive détectée dans la documentation ou un contrat surveillé.',
+				'Relire les changements, mettre la documentation à jour, puis lancer npm run docs:sync.',
+			] );
+
+		} else console.log( `docs-sync: manifeste valide (${ files.length } documents).` );
+
+	}
+
+}

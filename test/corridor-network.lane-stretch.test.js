@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { TEXEL } from '../src/config.js';
+import { MAX_NEST_DEPTH, MIN_NEST_DEPTH, TEXEL } from '../src/config.js';
 import { buildNest } from '../src/nest.js';
 import {
 	buildCorridorNetwork,
-	sampleCorridor,
+	CORRIDOR_SURFACE_TRACKS,
+	sampleCorridorSurface,
 } from '../src/navigation/corridor-network.js';
 
 function distance3D( a, b, texel ) {
@@ -18,17 +19,17 @@ function distance3D( a, b, texel ) {
 
 }
 
-test( 'maxLaneStretch bounds every dense maximum-lane advance', () => {
+test( 'maxLaneStretch bounds every dense surface-track advance', () => {
 
 	const activeChambers = 24;
 	const tunnelWidth = 12;
 	const samples = 64;
-	const denseSegments = 4096;
+	const denseSegments = 512;
 
-	for ( const depth of [ 10, 18, 200 ] ) {
+	for ( const depth of [ MIN_NEST_DEPTH, 20, MAX_NEST_DEPTH ] ) {
 
-		// Le préfixe actif et son graphe sont identiques avec carve=false ; le
-		// heightfield, inutilisé par le corridor network, n'est pas alloué.
+		// The active prefix and its graph are identical with carve=false; the
+		// heightfield, unused by the corridor network, is not allocated.
 		const nest = buildNest( activeChambers, depth, tunnelWidth, false );
 		const network = buildCorridorNetwork( nest, {
 			samples,
@@ -47,32 +48,34 @@ test( 'maxLaneStretch bounds every dense maximum-lane advance', () => {
 			assert.ok( Number.isFinite( corridor.maxLaneStretch ) );
 			assert.ok( corridor.maxLaneStretch >= 1 );
 			assert.ok( corridor.maxLaneStretch <= network.maxLaneStretch );
-			assert.ok( corridor.safeLane > 0, `depth ${ depth }, edge ${ edgeId } has no testable lane` );
+			assert.equal( corridor.surfaceLengths.length, CORRIDOR_SURFACE_TRACKS );
 
-			let previousCenter = sampleCorridor( network, edgeId, 0, 0, 1 );
-			let previousLane = sampleCorridor( network, edgeId, 0, corridor.safeLane, 1 );
+			for ( let track = 0; track < CORRIDOR_SURFACE_TRACKS; track ++ ) {
 
-			for ( let i = 1; i <= denseSegments; i ++ ) {
+				const angle = track / CORRIDOR_SURFACE_TRACKS * Math.PI * 2;
+				const nominalAdvance = corridor.surfaceLengths[ track ] / denseSegments;
+				let previous = sampleCorridorSurface( network, edgeId, 0, angle, 1 );
 
-				const t = i / denseSegments;
-				const center = sampleCorridor( network, edgeId, t, 0, 1 );
-				const lane = sampleCorridor( network, edgeId, t, corridor.safeLane, 1 );
-				const centerAdvance = distance3D( previousCenter, center, network.texel );
-				const actualAdvance = distance3D( previousLane, lane, network.texel );
-				const ratio = actualAdvance / centerAdvance;
+				assert.ok( Number.isFinite( nominalAdvance ) && nominalAdvance > 0 );
 
-				assert.ok( Number.isFinite( centerAdvance ) && centerAdvance > 0 );
-				assert.ok( Number.isFinite( actualAdvance ) );
-				assert.ok( Number.isFinite( ratio ) );
-				assert.ok(
-					ratio <= corridor.maxLaneStretch,
-					`depth ${ depth }, edge ${ edgeId }, step ${ i }: ` +
-						`ratio ${ ratio } > corridor bound ${ corridor.maxLaneStretch }`,
-				);
-				assert.ok( corridor.maxLaneStretch <= network.maxLaneStretch );
+				for ( let i = 1; i <= denseSegments; i ++ ) {
 
-				previousCenter = center;
-				previousLane = lane;
+					const t = i / denseSegments;
+					const current = sampleCorridorSurface( network, edgeId, t, angle, 1 );
+					const actualAdvance = distance3D( previous, current, network.texel );
+					const ratio = actualAdvance / nominalAdvance;
+
+					assert.ok( Number.isFinite( actualAdvance ) && actualAdvance > 0 );
+					assert.ok( Number.isFinite( ratio ) );
+					assert.ok(
+						ratio <= corridor.maxLaneStretch + 1e-5,
+						`depth ${ depth }, edge ${ edgeId }, track ${ track }, step ${ i }: ` +
+							`ratio ${ ratio } > corridor bound ${ corridor.maxLaneStretch }`,
+					);
+					assert.ok( corridor.maxLaneStretch <= network.maxLaneStretch );
+					previous = current;
+
+				}
 
 			}
 

@@ -10,10 +10,10 @@
 //    peut donc traverser le solarium, un grenier, la crèche et la chambre
 //    royale, empilés.
 //
-//    La navigation 2D, elle, ne change pas : une fourmi suit son graphe arête
-//    par arête et sa nappe ne sert qu'à savoir à quelle HAUTEUR la dessiner.
-//    Deux chambres qui se recouvrent en (x, y) ne peuvent pas se gêner
-//    puisqu'elles ne sont jamais au même niveau.
+//    La topologie reste un graphe d'arêtes, mais chaque arête est désormais une
+//    courbe 3D munie de pistes de contact. La nappe identifie l'étage logique ;
+//    la position et l'orientation physiques viennent de la surface compilée. Deux
+//    chambres superposées en (x, y) restent donc distinctes par leur profondeur.
 //
 // 2. LA CROISSANCE. Le nid doit grandir avec la colonie sans jamais déplacer ce
 //    qui existe — sinon un coup de curseur téléporte toutes les fourmis dans la
@@ -30,7 +30,9 @@
 //
 // Module PUR : aucune dépendance à three, testable en node.
 
-import { GRID, TEXEL, NEST, params } from './config.js';
+import {
+	GRID, TEXEL, NEST, params, MIN_NEST_DEPTH, MAX_NEST_DEPTH,
+} from './config.js';
 
 // nombre de nappes = nombre de niveaux de chambres (une par canal RGBA)
 export const LAYERS = 4;
@@ -38,11 +40,31 @@ export const K_MAX = 96;                 // loges candidates (registre complet)
 // Rayon visuel = largeur * TEXEL * 0,85. 5,5 garantit l'enveloppe de la
 // plus grosse caste (soldate) + 5 cm de marge, même voie latérale incluse.
 export const MIN_TUNNEL_WIDTH = 5.5;
-export const DEPTH_SIZE = 384;           // côté de la carte de profondeur (texels)
+export const DEPTH_SIZE = 640;           // côté de la carte de profondeur (texels)
 
 // angle d'or : deux loges consécutives ne sont jamais alignées, la couverture
 // angulaire reste bonne pour N'IMPORTE QUEL préfixe
 const GOLD = 2.399963229728653;
+const SERIES_CORE_WORLD = 3;
+const SERIES_PITCH_WORLD = 7.5;
+const LAYER_HALF_STEP_WORLD = 6.25;
+const LAYOUT_ROTATION = 3.427;
+const BRANCH_TARGET_WORLD = 12.5;
+const BRANCH_MAX_WORLD = BRANCH_TARGET_WORLD * 1.5;
+export const ENTRANCE_PORTAL_OFFSET_WORLD = 11;
+export const ENTRANCE_PORTAL_ANGLE_RAD = 230 * Math.PI / 180;
+export const ENTRANCE_CONNECTOR_BULGE_WORLD = 3;
+const CORRIDOR_BULGE_OVERRIDE_WORLD = new Map( [
+	[ 21, - 1 ],
+	[ 41, 2.5 ],
+] );
+const BRANCH_PARENT_OVERRIDE = new Map( [
+	[ 12, 4 ],
+	[ 20, 0 ],
+	[ 32, 20 ],
+	[ 52, 32 ],
+	[ 72, 20 ],
+] );
 
 // ---------------------------------------------------------------------------
 // NIVEAUX — profondeur, taille des chambres, vocation.
@@ -72,16 +94,6 @@ const LEVEL = [
 	{ zf: 0.71, rw: 3.30, rh: 1.06, spread: 14.5, rooms: [ ROOM.CRECHE, ROOM.NURSERIE, ROOM.COMPOST ] },
 	{ zf: 1.00, rw: 2.90, rh: 0.98, spread: 12.5, rooms: [ ROOM.ROYALE, ROOM.COUVEUSE, ROOM.DORTOIR ] },
 ];
-
-// pente maximale d'un tunnel (dz / distance horizontale). 0,42 ~ 23 degres :
-// au-dela, une descente se lit comme une falaise et non comme un couloir.
-const MAX_SLOPE = 0.50;
-
-// rayon de l'hélice de la série centrale (unités monde). Un puits PARFAITEMENT
-// vertical est impossible dans une carte de hauteurs — et les vrais nids n'en
-// ont pas non plus : leurs descentes sont hélicoïdales.
-const HELIX_R = 4.5;
-const HELIX_TURN = 1.9;                  // radians gagnés par niveau
 
 // profondeur nominale d'une nappe (unites monde, negative) — le rendu s'en sert
 // pour plaquer les sommets SANS cavite au niveau de leur propre etage au lieu
@@ -143,65 +155,90 @@ export function nestUnit( k, depthMax ) {
 	const g = 0.78 + 0.44 * vdc( k + 1, 5 );
 	const rwx = L.rw * g * ( 0.85 + 0.30 * vdc( k + 1, 11 ) );
 	const rwz = L.rw * g * ( 0.85 + 0.30 * vdc( k + 2, 11 ) );
+	const rh = L.rh * g;
 	const R = ( ( rwx + rwz ) * 0.5 ) / TEXEL;      // rayon equivalent, en texels
 
-	// PLACEMENT ETALE. Les loges etaient auparavant empilees en colonnes quasi
-	// verticales : leurs tunnels n'avaient alors aucune distance horizontale a
-	// jouer, d'ou des rampes a 50 degres. Elles sont maintenant dispersees a
-	// TOUS les niveaux, sur un disque a peine plus etroit en profondeur. Un
-	// tunnel dispose ainsi d'une dizaine d'unites d'elan pour descendre de cinq,
-	// ce qui donne des pentes douces — et un nid plus large que profond, comme
-	// une vraie coupe.
-	// L'angle est tire de k (et non de q) : la couverture angulaire reste bonne
-	// pour n'importe quel prefixe du registre.
-	const r = ( L.spread / TEXEL ) * ( 0.30 + 0.70 * vdc( k + 1, 3 ) );
-	const th = GOLD * ( k + 1 ) + 0.7 * ( vdc( k + 1, 2 ) - 0.5 );
+	// IMPLANTATION APPEND-ONLY EN BRANCHES. Chaque serie q occupe une cellule
+	// phyllotaxique, puis ses quatre niveaux dessinent un carre de 12,5 unites.
+	// Deux benefices sont structurels : les chambres ne se recouvrent plus et
+	// chaque descente dispose d'assez de longueur horizontale pour rester douce.
+	// Le rayon sqrt(q) fait grandir naturellement l'emprise avec la colonie sans
+	// jamais deplacer un prefixe deja construit.
+	const seriesRadius = Math.sqrt(
+		SERIES_CORE_WORLD * SERIES_CORE_WORLD
+		+ SERIES_PITCH_WORLD * SERIES_PITCH_WORLD * q );
+	const seriesAngle = GOLD * q;
+	const cell = [
+		[ - LAYER_HALF_STEP_WORLD, - LAYER_HALF_STEP_WORLD ],
+		[ LAYER_HALF_STEP_WORLD, - LAYER_HALF_STEP_WORLD ],
+		[ LAYER_HALF_STEP_WORLD, LAYER_HALF_STEP_WORLD ],
+		[ - LAYER_HALF_STEP_WORLD, LAYER_HALF_STEP_WORLD ],
+	][ s ];
+	const localX = Math.cos( seriesAngle ) * seriesRadius + cell[ 0 ];
+	const localY = Math.sin( seriesAngle ) * seriesRadius + cell[ 1 ];
+	const worldX = Math.cos( LAYOUT_ROTATION ) * localX - Math.sin( LAYOUT_ROTATION ) * localY;
+	const worldY = Math.sin( LAYOUT_ROTATION ) * localX + Math.cos( LAYOUT_ROTATION ) * localY;
 
-	// profondeur : le niveau donne la strate, un léger décalage par loge évite
-	// que tout un étage soit rigoureusement plan
-	const depth = - depthMax * L.zf * ( 0.94 + 0.12 * vdc( k + 1, 7 ) );
-
+	// `depth` est desormais le PLANCHER physique, pas le centre de la cavite.
+	// La premiere strate est abaissee si necessaire pour que son plafond reste
+	// sous la surface.
+	const stratifiedDepth = - depthMax * L.zf * ( 0.94 + 0.12 * vdc( k + 1, 7 ) );
+	const depth = Math.min( stratifiedDepth, - ( rh * 2 + 0.65 ) );
 	return {
 		k, q, level: s, layer: s,
 		R,                                          // rayon equivalent (texels)
-		rwx, rwz, rh: L.rh * g,                     // demi-axes de la lentille (monde)
-		x: NEST.x + Math.cos( th ) * r,
-		y: NEST.y + Math.sin( th ) * r,
+		rwx, rwz, rh,                               // demi-axes de la lentille (monde)
+		x: NEST.x + worldX / TEXEL,
+		y: NEST.y + worldY / TEXEL,
 		depth,
 		type: L.rooms[ q % L.rooms.length ],
 	};
 
 }
 
-// parent : le niveau du dessus DE LA MÊME SÉRIE ; pour une tête de série, la
-// loge de niveau 0 déjà émise la plus proche. Ne regarde JAMAIS que j < k, ce
-// qui rend la structure append-only.
-// PARENT : la loge du niveau juste au-dessus dont la distance horizontale est
-// la plus PROCHE DE L'IDEAL — pas la plus proche tout court. L'ideal est la
-// distance qu'il faut pour descendre le denivele a MAX_SLOPE. Choisir le voisin
-// le plus proche donnerait systematiquement les tunnels les plus raides ;
-// choisir a la bonne distance donne des couloirs qui descendent en pente douce.
-// Ne regarde JAMAIS que j < k : la structure reste append-only.
+// PARENTAGE APPEND-ONLY. Les niveaux 1..3 descendent dans leur propre serie :
+// leur parent est donc exactement k - 1. Une nouvelle tete de serie (niveau 0)
+// rejoint une tete plus ancienne, jamais un noeud futur. Les candidats trop
+// lointains sont exclus, les branches trop courtes sont penalisees deux fois
+// plus que les legeres surlongueurs, puis l'indice tranche toute egalite.
+// Les cinq substitutions du registre sont les premiers parents valides trouves
+// par l'oracle conservateur chambre/capsules sur les 96 loges finales.
 export function parentOf( k, U ) {
 
-	const c = U[ k ];
-	if ( c.level === 0 ) return - 1;              // -1 = rattache au puits d'entree
+	const child = U[ k ];
+	if ( child.level > 0 ) return k - 1;
+	if ( child.q === 0 ) return - 1;
 
-	const dz = Math.abs( c.depth );
-	let best = - 1, bs = Infinity;
+	// Le reseau de service peu profond relie chaque nouvelle tete de branche a
+	// une tete plus ancienne situee pres du pas geometrique de 12,5 unites. Le
+	// choix ne consulte que j < k : la croissance reste strictement append-only.
+	const override = BRANCH_PARENT_OVERRIDE.get( k );
+	if ( override !== undefined ) return override;
 
+	const candidates = [];
 	for ( let j = 0; j < k; j ++ ) {
 
-		if ( U[ j ].level !== c.level - 1 ) continue;
-		const d = Math.hypot( U[ j ].x - c.x, U[ j ].y - c.y );
-		const ideal = Math.abs( c.depth - U[ j ].depth ) / ( MAX_SLOPE * TEXEL );
-		// on penalise surtout le TROP COURT (pente raide) ; trop long est benin
-		const score = d < ideal ? ( ideal - d ) * 2 : ( d - ideal );
-		if ( score < bs ) { bs = score; best = j; }
+		if ( U[ j ].level !== 0 ) continue;
+		const distanceWorld = Math.hypot(
+			U[ j ].x - child.x, U[ j ].y - child.y ) * TEXEL;
+		if ( distanceWorld > BRANCH_MAX_WORLD ) continue;
+		const shortfall = Math.max( 0, BRANCH_TARGET_WORLD - distanceWorld );
+		const overshoot = Math.max( 0, distanceWorld - BRANCH_TARGET_WORLD );
+		candidates.push( {
+			j,
+			distanceDelta: Math.abs( distanceWorld - BRANCH_TARGET_WORLD ),
+			score: shortfall * 2 + overshoot,
+		} );
 
 	}
 
-	return best;
+	candidates.sort( ( a, b ) =>
+		a.score - b.score
+		|| a.distanceDelta - b.distanceDelta
+		|| a.j - b.j );
+	if ( candidates.length === 0 )
+		throw new Error( `No append-only branch parent within ${ BRANCH_MAX_WORLD } world units for chamber ${ k }` );
+	return candidates[ 0 ].j;
 
 }
 
@@ -223,114 +260,95 @@ export function parentOf( k, U ) {
 // converge ; vingt-deux tours, une fois par tunnel et par reconstruction.
 export function tunnelPath( a, b, seed, steps = 10 ) {
 
-	const dx = b.x - a.x, dy = b.y - a.y;
-	const chord = Math.hypot( dx, dy ) || 1e-3;
-	const dz = b.depth - a.depth;
-	const nx = - dy / chord, ny = dx / chord;
-	const mx = ( a.x + b.x ) / 2, my = ( a.y + b.y ) / 2;
+	if ( ! a || ! b ) throw new Error( 'tunnelPath expects two endpoints' );
+	if ( ! Number.isInteger( steps ) || steps < 2 )
+		throw new Error( 'tunnelPath steps must be an integer >= 2' );
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	const chord = Math.hypot( dx, dy );
+	const nx = chord > 1e-9 ? - dy / chord : 0;
+	const ny = chord > 1e-9 ? dx / chord : 0;
+	// Sinuosite volontairement BORNEE en unites monde. L'ancien Bezier pouvait
+	// reboucler deux branches issues du meme noeud; cette enveloppe inferieure a
+	// 0,28 u preserve plus d'une unite de sol dans le pire cas du registre final.
+	const amplitude = ( 0.18 + 0.10 * vdc( seed + 1, 7 ) ) / TEXEL;
+	const collisionAvoidance = ( CORRIDOR_BULGE_OVERRIDE_WORLD.get( seed ) ?? 0 ) / TEXEL;
+	const phase = GOLD * ( seed + 1 );
+	const points = [];
 
-	// PROFIL DE DESCENTE, PARAMETRE PAR LA LONGUEUR D'ARC.
-	// Le parametrer par t etait une impasse : la vitesse horizontale d'une
-	// Bezier quadratique en son milieu vaut EXACTEMENT la corde, quel que soit
-	// le bombement (B'(1/2) = B - A). Bomber n'y ralentit donc jamais la
-	// descente — et c'est precisement la que le profil en S plongeait le plus.
-	// La dichotomie ne pouvait pas converger : elle saturait son plafond en
-	// laissant la moitie des tunnels a 40 degres. Repartie sur la longueur
-	// reelle, la pente devient quasi constante et le bombement la reduit
-	// effectivement.
-	// L'assouplissement final ne pese plus que 1,125 au milieu (contre 1,25),
-	// assez pour deboucher a plat dans les chambres sans creuser d'a-pic.
-	const ease = ( u ) => 0.75 * u + 0.25 * u * u * ( 3 - 2 * u );
+	for ( let index = 0; index <= steps; index ++ ) {
 
-	const at = ( bulge, t ) => {
-
-		const u = 1 - t;
-		const px = mx + nx * bulge, py = my + ny * bulge;
-		return {
-			x: u * u * a.x + 2 * u * t * px + t * t * b.x,
-			y: u * u * a.y + 2 * u * t * py + t * t * b.y,
-		};
-
-	};
-
-	const NS = 48;
-
-	const arcTable = ( bulge ) => {
-
-		const q = [], cum = [ 0 ];
-		for ( let i = 0; i <= NS; i ++ ) q.push( at( bulge, i / NS ) );
-		for ( let i = 1; i <= NS; i ++ )
-			cum.push( cum[ i - 1 ] + Math.hypot( q[ i ].x - q[ i - 1 ].x, q[ i ].y - q[ i - 1 ].y ) );
-		return { cum, L: Math.max( cum[ NS ], 1e-6 ) };
-
-	};
-
-	const worstSlope = ( bulge ) => {
-
-		const { cum, L } = arcTable( bulge );
-		let w = 0;
-		for ( let i = 1; i <= NS; i ++ ) {
-
-			const h = ( cum[ i ] - cum[ i - 1 ] ) * TEXEL;
-			const dd = Math.abs( dz ) * ( ease( cum[ i ] / L ) - ease( cum[ i - 1 ] / L ) );
-			w = Math.max( w, dd / Math.max( h, 1e-6 ) );
-
-		}
-		return w;
-
-	};
-
-	let bulge = 0;
-
-	if ( worstSlope( 0 ) > MAX_SLOPE ) {
-
-		// Le bombement reste PLAFONNE. Sans plafond la dichotomie trouve toujours
-		// une solution, au prix de tunnels qui s'echappent a deux fois le rayon du
-		// nid (mesure : 42 unites pour un nid de 20).
-		let lo = 0, hi = chord * 1.25;
-		if ( worstSlope( hi ) <= MAX_SLOPE ) {
-
-			for ( let i = 0; i < 22; i ++ ) {
-
-				const m = ( lo + hi ) / 2;
-				if ( worstSlope( m ) > MAX_SLOPE ) lo = m; else hi = m;
-
-			}
-
-		}
-		bulge = hi;
+		const t = index / steps;
+		const envelope = Math.sin( Math.PI * t ) ** 2;
+		const wiggle = amplitude * envelope * (
+			0.72 * Math.sin( Math.PI * 2 * t + phase )
+			+ 0.28 * Math.sin( Math.PI * 4 * t - phase * 0.37 ) )
+			+ collisionAvoidance * envelope;
+		const eased = t * t * t * ( t * ( t * 6 - 15 ) + 10 );
+		points.push( {
+			x: a.x + dx * t + nx * wiggle,
+			y: a.y + dy * t + ny * wiggle,
+			depth: a.depth + ( b.depth - a.depth ) * eased,
+		} );
 
 	}
+	points[ 0 ] = { x: a.x, y: a.y, depth: a.depth };
+	points[ points.length - 1 ] = { x: b.x, y: b.y, depth: b.depth };
+	return points;
 
-	// le cote du bombement alterne : deux tunnels partant du meme puits ne se
-	// superposent pas, et le nid prend son allure de colimacon
-	bulge *= vdc( seed + 1, 2 ) < 0.5 ? 1 : - 1;
+}
+// Raccord d'entrée commun au creusage, au SDF et à la navigation. La première
+// portion descend à la verticale : le tube coupe donc le sol suivant une vraie
+// bouche, avant de rejoindre progressivement le puits tortueux.
+export function entrancePath( a, b, seed, steps = 10 ) {
 
-	// sinuosite residuelle. Le facteur sin(pi t) l'ANNULE aux deux bouts : sans
-	// lui le chemin arrivait jusqu'a huit texels a cote de sa chambre.
-	const wig = 0.10 + 0.10 * vdc( seed + 1, 7 );
-	const { cum, L } = arcTable( bulge );
-	const pts = [];
+	if ( Math.hypot( b.x - a.x, b.y - a.y ) <= 1e-6 ) {
 
-	for ( let i = 0; i <= steps; i ++ ) {
-
-		const t = i / steps;
-		const q = at( bulge, t );
-
-		// abscisse curviligne au parametre t, lue dans la table cumulative
-		const f = t * NS, j = Math.min( NS - 1, Math.floor( f ) );
-		const sigma = ( cum[ j ] + ( cum[ j + 1 ] - cum[ j ] ) * ( f - j ) ) / L;
-
-		const w = Math.sin( t * Math.PI * 3 + seed ) * chord * wig * 0.12 * Math.sin( t * Math.PI );
-		pts.push( { x: q.x + nx * w, y: q.y + ny * w, depth: a.depth + dz * ease( sigma ) } );
+		return Array.from( { length: steps + 1 }, ( _, i ) => ( {
+			x: a.x,
+			y: a.y,
+			depth: a.depth + ( b.depth - a.depth ) * i / steps,
+		} ) );
 
 	}
-
-	return pts;
+	const delta = b.depth - a.depth;
+	const fraction = Math.min( 0.45, 1.2 / Math.max( Math.abs( delta ), 1e-6 ) );
+	const collar = { ...a, depth: a.depth + delta * fraction };
+	const verticalSteps = Math.max( 2, Math.round( steps * 0.24 ) );
+	const vertical = Array.from( { length: verticalSteps + 1 }, ( _, i ) => ( {
+		x: a.x,
+		y: a.y,
+		depth: a.depth + ( collar.depth - a.depth ) * i / verticalSteps,
+	} ) );
+	const tail = tunnelPath( collar, b, seed, Math.max( 4, steps - verticalSteps ) );
+	return [ ...vertical, ...tail.slice( 1 ) ];
 
 }
 
+// Peripheral entrance connector shared by carving and rendered navigation.
+// Its fixed bulge clears the complete K96 registry without runtime search.
+export function entranceConnectorPath( a, b, steps = 10 ) {
 
+	const points = tunnelPath( a, b, 0, steps );
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	const chord = Math.hypot( dx, dy );
+	if ( chord <= 1e-9 ) return points;
+	const nx = - dy / chord;
+	const ny = dx / chord;
+	const amplitude = ENTRANCE_CONNECTOR_BULGE_WORLD / TEXEL;
+
+	for ( let index = 1; index < points.length - 1; index ++ ) {
+
+		const t = index / ( points.length - 1 );
+		const offset = amplitude * Math.sin( Math.PI * t ) ** 2;
+		points[ index ].x += nx * offset;
+		points[ index ].y += ny * offset;
+
+	}
+	return points;
+
+}
 // ---------------------------------------------------------------------------
 // CREUSAGE
 // ---------------------------------------------------------------------------
@@ -477,6 +495,8 @@ export const GOAL = { NONE: 0, GRANARY: 1, QUEEN: 2, BROOD: 3, EXIT: 4 };
 // `carve = false` : on ne veut que le graphe (cas de la croissance, ou le
 // creusage a deja ete fait de maniere incrementale dans le champ existant).
 export function buildNest( K, depthMax, tunnelW, carve = true ) {
+	if ( ! Number.isFinite( depthMax ) || depthMax < MIN_NEST_DEPTH || depthMax > MAX_NEST_DEPTH )
+		throw new RangeError( `Nest depth must be between ${ MIN_NEST_DEPTH } and ${ MAX_NEST_DEPTH } world units` );
 	tunnelW = Math.max( MIN_TUNNEL_WIDTH, tunnelW );
 
 	const ox = Math.round( NEST.x - DEPTH_SIZE / 2 );
@@ -488,26 +508,32 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 	const PAR = [];
 	for ( let k = 0; k < K_MAX; k ++ ) PAR.push( parentOf( k, U ) );
 
-	// pied du puits : juste sous l'entrée, à la profondeur du premier niveau
-	const shaftAngle = HELIX_TURN * 0.5;
+	// Portail peripherique deterministe : le puits descend verticalement jusqu'au
+	// plancher de la salle de garde, hors de toutes les cavites du registre K96.
+	const guardRoom = U[ 0 ];
 	const shaft = {
-		x: NEST.x + Math.cos( shaftAngle ) * HELIX_R / TEXEL,
-		y: NEST.y + Math.sin( shaftAngle ) * HELIX_R / TEXEL,
-		depth: - depthMax * LEVEL[ 0 ].zf * 0.45,
+		x: guardRoom.x + Math.cos( ENTRANCE_PORTAL_ANGLE_RAD )
+			* ENTRANCE_PORTAL_OFFSET_WORLD / TEXEL,
+		y: guardRoom.y + Math.sin( ENTRANCE_PORTAL_ANGLE_RAD )
+			* ENTRANCE_PORTAL_OFFSET_WORLD / TEXEL,
+		depth: guardRoom.depth,
 		layer: 0,
 	};
-	const entry = { x: NEST.x, y: NEST.y, depth: - 0.04, layer: 0 };
+	const entry = { x: shaft.x, y: shaft.y, depth: 0, layer: 0 };
 
 	// --- creusage du préfixe actif ---
 	if ( carve ) {
 
-		carvePath( field, ox, oy, tunnelPath( entry, shaft, K_MAX + 0x51 ), tunnelW * 1.15, 0 );
+		carvePath( field, ox, oy, entrancePath( entry, shaft, K_MAX + 0x51 ), tunnelW * 1.15, 0 );
 
 		for ( let k = 0; k < K; k ++ ) {
 
 			const c = U[ k ];
 			const p = PAR[ k ] < 0 ? shaft : U[ PAR[ k ] ];
-			carvePath( field, ox, oy, tunnelPath( p, c, k ), tunnelW, c.layer );
+			const path = k === 0
+				? entranceConnectorPath( p, c )
+				: tunnelPath( p, c, k );
+			carvePath( field, ox, oy, path, tunnelW, c.layer );
 			carveDisc( field, ox, oy, c.x, c.y, c.R, c.depth, c.layer );
 
 		}
@@ -533,7 +559,9 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 		// terre pleine. Un point suffit : la sagitta de chaque demi-arc reste
 		// sous la demi-largeur du tunnel.
 		const par = PAR[ k ] < 0 ? shaft : U[ PAR[ k ] ];
-		const path = tunnelPath( par, c, k );
+		const path = k === 0
+			? entranceConnectorPath( par, c )
+			: tunnelPath( par, c, k );
 		const mid = path[ Math.floor( path.length / 2 ) ];
 
 		nodes.push( {
@@ -627,6 +655,7 @@ export function buildNest( K, depthMax, tunnelW, carve = true ) {
 		radiusTexels: radius,
 		radiusWorld: radius * TEXEL,
 		shaft, entry,
+		peripheralEntrance: true,
 	};
 
 }
@@ -642,7 +671,10 @@ export function growNest( nest, Knew, tunnelW ) {
 
 		const c = U[ k ];
 		const p = PAR[ k ] < 0 ? nest.shaft : U[ PAR[ k ] ];
-		carvePath( field, ox, oy, tunnelPath( p, c, k ), tunnelW, c.layer );
+		const path = k === 0
+			? entranceConnectorPath( p, c )
+			: tunnelPath( p, c, k );
+		carvePath( field, ox, oy, path, tunnelW, c.layer );
 		carveDisc( field, ox, oy, c.x, c.y, c.R, c.depth, c.layer );
 
 	}

@@ -36,6 +36,20 @@ test( 'meaningful movement resets the immobility clock', () => {
 
 } );
 
+test( 'global pause time is excluded from immobility duration', () => {
+
+	const tracker = createAntMotionTracker( { movingSpeed: 0.08 } );
+	tracker.sample( { id: 10, timeMs: 0, position: point( 0 ) } );
+	tracker.sample( { id: 10, timeMs: 1000, position: point( 0 ) } );
+	const paused = tracker.sample( { id: 10, timeMs: 6000, position: point( 0 ), paused: true } );
+	tracker.sample( { id: 10, timeMs: 8000, position: point( 0 ), paused: true } );
+	const resumed = tracker.sample( { id: 10, timeMs: 9000, position: point( 0 ) } );
+
+	assert.equal( paused.stationarySeconds, 1 );
+	assert.equal( resumed.stationarySeconds, 2 );
+
+} );
+
 test( 'changing the selected ant cannot inherit another ant immobility', () => {
 
 	const tracker = createAntMotionTracker();

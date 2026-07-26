@@ -5,7 +5,24 @@ import {
 	ANT_CASTE,
 	ANT_GOAL,
 	classifyAntObservation,
+	isSimulationTimePaused,
+	navigationGridDistanceToWorld,
 } from '../src/ant-observer.js';
+
+test( 'OBS-DIST-001: la distance de route est convertie en unites monde', () => {
+
+	assert.equal( navigationGridDistanceToWorld( 64, 0.15625 ), 10 );
+	assert.equal( navigationGridDistanceToWorld( - 4, 0.15625 ), 0 );
+
+} );
+
+test( 'OBS-PAUSE-001: vitesse x0 et pause explicite suspendent le diagnostic', () => {
+
+	assert.equal( isSimulationTimePaused( { paused: false, simSpeed: 0 } ), true );
+	assert.equal( isSimulationTimePaused( { paused: true, simSpeed: 1 } ), true );
+	assert.equal( isSimulationTimePaused( { paused: false, simSpeed: 0.1 } ), false );
+
+} );
 
 function observation( overrides = {} ) {
 
@@ -53,6 +70,41 @@ test( 'an underground route reports its actual destination', () => {
 	assert.equal( result.intentCode, 'travel-to-brood' );
 	assert.equal( result.goalLabel, 'Couvain' );
 	assert.equal( result.stopExpected, false );
+	assert.equal( result.stateLabel, 'Navigation souterraine' );
+
+} );
+
+test( 'OBS-START-001 a staggered colony activation is an explicit expected stop', () => {
+
+	const result = classifyAntObservation( observation( {
+		under: true,
+		goal: ANT_GOAL.EXIT,
+		activationRemaining: 3.75,
+		stationarySeconds: 4,
+		measuredSpeed: 0,
+	} ) );
+
+	assert.equal( result.intentCode, 'startup-activation' );
+	assert.equal( result.stopExpected, true );
+	assert.equal( result.motionCode, 'expected-stop' );
+	assert.match( result.reason, /3[,.]8 s/ );
+	assert.equal( result.stateLabel, 'Activation initiale' );
+
+} );
+test( 'a global pause is an explicit expected stop', () => {
+
+	const result = classifyAntObservation( observation( {
+		paused: true,
+		under: true,
+		goal: ANT_GOAL.EXIT,
+		stationarySeconds: 30,
+		measuredSpeed: 0,
+	} ) );
+
+	assert.equal( result.intentCode, 'simulation-paused' );
+	assert.equal( result.stopExpected, true );
+	assert.equal( result.motionCode, 'expected-stop' );
+	assert.equal( result.stateLabel, 'Simulation en pause' );
 
 } );
 
@@ -71,6 +123,7 @@ test( 'scheduled rest is an explicit expected stop with a wake-up time', () => {
 	assert.equal( result.stopExpected, true );
 	assert.equal( result.motionCode, 'expected-stop' );
 	assert.match( result.reason, /4[,.]3 s/ );
+	assert.equal( result.stateLabel, 'Repos' );
 
 } );
 
@@ -137,6 +190,7 @@ test( 'the queen exposes feeding and laying cycles', () => {
 	assert.equal( laying.intentCode, 'queen-laying-cycle' );
 	assert.match( laying.reason, /2[,.]0 s/ );
 	assert.equal( laying.goalLabel, 'Ponte' );
+	assert.equal( laying.stateLabel, 'Cycle royal' );
 
 } );
 

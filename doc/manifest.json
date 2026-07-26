@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 2,
+  "algorithm": "sha256",
+  "generator": {
+    "path": "scripts/docs-sync.mjs",
+    "hash": "sha256:adf50c928787bffaaf2bf1aa6c2aea1e02e84d7a14b1b4efc9abc7a18eb3e977"
+  },
+  "contracts": {
+    "COL-ECO": {
+      "document": "doc/fonctionnel/colonie.md",
+      "guides": [
+        "doc/guide/colonie.md",
+        "doc/guide/cycle-vie-ressources.md",
+        "doc/guide/attentes-menaces-limites.md"
+      ],
+      "sources": [
+        "src/config.js",
+        "src/colony.js",
+        "src/colony-layout.js",
+        "src/guide.js",
+        "src/guide.css",
+        "src/ragdoll.js",
+        "src/simulation.js",
+        "src/spiders.js"
+      ],
+      "tests": [
+        "test/colony-layout.test.js"
+      ],
+      "runtimeTests": [
+        "src/tests.js"
+      ],
+      "evidence": [
+        "T2 ponte (reine nourrie)",
+        "T3 éclosions → croissance",
+        "T5 aller-retour bouche + livraison au grenier",
+        "T6 famine sans nourriture",
+        "T9 échantillon araignées",
+        "COLONY-TROUGH-001",
+        "COLONY-TROUGH-002",
+        "COLONY-BROOD-001"
+      ]
+    },
+    "COL-START": {
+      "document": "doc/fonctionnel/demarrage-naturel.md",
+      "guides": [
+        "doc/guide/demarrage-naturel.md"
+      ],
+      "sources": [
+        "src/colony-startup.js",
+        "src/colony.js",
+        "src/simulation.js"
+      ],
+      "tests": [
+        "test/colony-startup.test.js"
+      ],
+      "runtimeTests": [
+        "src/tests.js"
+      ],
+      "evidence": [
+        "COL-START-001",
+        "COL-START-002",
+        "COL-START-003",
+        "COL-START-004",
+        "T1 démarrage naturel",
+        "T10 toggle colonie ON→OFF→ON atomique"
+      ]
+    },
+    "NAV-SURFACE": {
+      "document": "doc/technique/navigation-contact-3d.md",
+      "guides": [
+        "doc/guide/navigation-3d.md"
+      ],
+      "sources": [
+        "src/ants.js",
+        "src/colony.js",
+        "src/config.js",
+        "src/main.js",
+        "src/nest-mutation-ui.js",
+        "src/navigation/corridor-network.js",
+        "src/navigation/corridor-sampling-tsl.js",
+        "src/navigation/corridor-surface-parallel.js",
+        "src/navigation/corridor-surface-partition.js",
+        "src/navigation/corridor-surface.worker.js",
+        "src/navigation/nest-mutation-transaction.js",
+        "src/navigation/nest-volume-probe.js",
+        "src/navigation/support-geometry.js",
+        "src/nest.js",
+        "src/nestvolume.js",
+        "src/pose.js",
+        "src/simulation.js",
+        "src/ui.js",
+        "src/underground.js"
+      ],
+      "tests": [
+        "test/corridor-network.surface-contact.test.js",
+        "test/colony-runtime-oracles.test.js",
+        "test/chamber-surface.test.js",
+        "test/corridor-network.complexity.test.js",
+        "test/corridor-network.continuity.test.js",
+        "test/corridor-network.invariants.test.js",
+        "test/corridor-network.lane-stretch.test.js",
+        "test/corridor-network.regression.test.js",
+        "test/corridor-network.routes.test.js",
+        "test/corridor-network.sample-boundary.test.js",
+        "test/corridor-network.vertical-shaft.test.js",
+        "test/corridor-surface-parallel.test.js",
+        "test/helpers/corridor-fixtures.js",
+        "test/nest-layout-async.integration.test.js",
+        "test/nest-mutation-transaction.test.js",
+        "test/nest-mutation-ui.test.js",
+        "test/nest-volume-probe.test.js",
+        "test/warden-verdict.test.js",
+        "test/support-geometry.spatial-hash.test.js",
+        "test/nest.phyllotactic-layout.test.js",
+        "test/nest.depth-resolution.test.js"
+      ],
+      "runtimeTests": [
+        "src/tests.js",
+        "src/warden.js"
+      ],
+      "evidence": [
+        "NAV-SURFACE-001",
+        "NAV-SURFACE-002",
+        "NAV-SURFACE-003",
+        "NAV-SURFACE-004",
+        "NAV-SURFACE-005",
+        "NAV-SURFACE-006",
+        "NAV-SURFACE-007",
+        "NAV-SURFACE-008",
+        "NAV-SURFACE-PERF-001",
+        "NAV-SURFACE-PAR-001",
+        "NAV-SURFACE-PAR-002",
+        "NAV-SURFACE-PAR-003",
+        "NAV-SURFACE-PAR-004",
+        "NAV-NEST-TXN-001",
+        "NAV-NEST-TXN-002",
+        "NAV-NEST-TXN-003",
+        "NAV-NEST-TXN-004",
+        "NAV-NEST-PAUSE-001",
+        "NAV-NEST-PAUSE-002",
+        "NEST-LAYOUT-001",
+        "NEST-LAYOUT-002",
+        "NEST-LAYOUT-003",
+        "NEST-LAYOUT-004",
+        "NAV-VOLUME-001",
+        "NAV-VOLUME-002",
+        "NAV-VOLUME-GPU-001",
+        "NAV-VOLUME-GPU-002",
+        "NAV-VOLUME-GPU-003",
+        "NAV-VOLUME-GPU-004",
+        "NAV-VOLUME-GPU-005",
+        "NAV-VOLUME-GPU-006",
+        "NAV-VOLUME-GPU-007",
+        "COL-CONFINEMENT-001",
+        "COL-CONFINEMENT-002",
+        "COL-CONFINEMENT-003",
+        "posesNonFinies",
+        "pivotsHorsSupport",
+        "orientationsHorsRepere"
+      ]
+    },
+    "NAV-ENTRANCE": {
+      "document": "doc/technique/navigation-contact-3d.md",
+      "guides": [
+        "doc/guide/navigation-3d.md"
+      ],
+      "sources": [
+        "src/environment.js",
+        "src/graphics/grass.js",
+        "src/navigation/corridor-network.js",
+        "src/navigation/entrance-geometry.js",
+        "src/nest.js",
+        "src/nestvolume.js",
+        "src/simulation.js"
+      ],
+      "tests": [
+        "test/corridor-network.surface-contact.test.js",
+        "test/entrance-geometry.test.js",
+        "test/warden-verdict.test.js"
+      ],
+      "runtimeTests": [
+        "src/warden.js"
+      ],
+      "evidence": [
+        "NAV-ENTRANCE-001",
+        "NAV-ENTRANCE-002",
+        "NAV-ENTRANCE-003",
+        "NAV-ENTRANCE-004",
+        "NAV-ENTRANCE-005",
+        "NAV-ENTRANCE-006",
+        "NAV-ENTRANCE-007",
+        "NAV-ENTRANCE-008",
+        "NAV-ENTRANCE-009",
+        "NAV-ENTRANCE-010",
+        "NAV-ENTRANCE-RUNTIME-001"
+      ]
+    },
+    "OBS": {
+      "document": "doc/fonctionnel/intentions-et-arrets.md",
+      "guides": [
+        "doc/guide/inspecteur.md",
+        "doc/guide/attentes-menaces-limites.md"
+      ],
+      "sources": [
+        "src/ant-observer.js",
+        "src/antfollow.js"
+      ],
+      "tests": [
+        "test/ant-observer.intent.test.js",
+        "test/ant-observer.motion.test.js"
+      ],
+      "runtimeTests": [],
+      "evidence": [
+        "OBS-START-001",
+        "OBS-PAUSE-001",
+        "OBS-DIST-001"
+      ]
+    }
+  },
+  "hashes": {
+    "documents": {
+      "doc/fonctionnel/colonie.md": "sha256:2164adc76a81d33fc5a809fa5ed2c47ce690461941f0ef3c625b0282cd959c1f",
+      "doc/fonctionnel/demarrage-naturel.md": "sha256:f13108ebbd1b1c135b6ae2acfe151d06b963452967047a5660b62147b8736112",
+      "doc/fonctionnel/intentions-et-arrets.md": "sha256:f30571cbe9e34f23a7c02ffd26d3933cb3f44bf5e2f366780129adddced382e3",
+      "doc/guide/attentes-menaces-limites.md": "sha256:06b75cf509e4a508148bb356bfc768a079e9e3cf01f06a724f28b4ecb70cd375",
+      "doc/guide/colonie.md": "sha256:d7930249aa0d02eb8c9f3d98e2c7edee462c6ec9a4fb8c070a8577dcd33c456a",
+      "doc/guide/cycle-vie-ressources.md": "sha256:45261b955fcc7a80e860d704321b88623fceb560f90e0830a759e6e59a6a1fc3",
+      "doc/guide/demarrage-naturel.md": "sha256:8b5365f9a69fbe47daaac12b1b252fe97b890862e5a6d0d1bd39ce43f3be2fe6",
+      "doc/guide/inspecteur.md": "sha256:73eac7ead532ed5584f4c780865abc7d3c93878f709a540acc0195858e2783f6",
+      "doc/guide/navigation-3d.md": "sha256:21b53f4cc79f1aff601451cfbd563d8b92e19f87ecae9e71131d6b6a86955928",
+      "doc/index.md": "sha256:23c625f30ebb6ed8aa28ba73d946ddb1b10af9e65068b69c88e86663bda21f2c",
+      "doc/qualite/matrice-contrats.md": "sha256:4b1b1ccfb05691ae1a9322922248a93b3e67d9d232e3ab495954b0f046989f97",
+      "doc/qualite/strategie-tests.md": "sha256:45c43cc950d87a4263d1304445d4a40570f398e863b4dde03175fb73551c68f0",
+      "doc/technique/architecture.md": "sha256:dc157b347d1c76894e13b345c8fd01d5aa8b33344f7e5530956f8ca7500b1e19",
+      "doc/technique/navigation-contact-3d.md": "sha256:bf458e174af80626cf981706e554c75bd26b6a608977a010aa624ca624c46ce0",
+      "doc/technique/performance.md": "sha256:c7e7f29d4bc938ed42c69492f5b3d46796ef6d7d383146567b4f36e1bec9b68d"
+    },
+    "watched": {
+      "src/ant-observer.js": "sha256:e423f384b5f2fe32bbb585188682f02d9c5f495f3d6d33802302e40970bdb994",
+      "src/antfollow.js": "sha256:1aa01a50c61359f54f848ae3235163c82caeec099ba4aa7a1fbc139fe0d0d177",
+      "src/ants.js": "sha256:11765dc5e4fdb7abf5f3b26e3a346b452ac4d757b275518e3a39c667ec504dd5",
+      "src/colony-layout.js": "sha256:021624af7c1430e126d549e65ca5b901834926a96df1df24d57a9fcf864295ee",
+      "src/colony-startup.js": "sha256:aefad301a35fc341b6464e67bc4996da3818617dd30b22db1f4adf94e2c8ddf0",
+      "src/colony.js": "sha256:0aaaacbf00a03c48061ba4701acde55e2ae1b439ee39ae99c30088028de7e812",
+      "src/config.js": "sha256:7b56d31de56eb76ac1af1e2d4f30819b9c9264a4d48a00c8bcdf133bae09f001",
+      "src/environment.js": "sha256:88fd594cc38c03efaab8d162a2e79511535863c06f581bd9f300ef32862c0253",
+      "src/graphics/grass.js": "sha256:ee93d0570e8aceb71b9d116513f8065fc59d78f3ba0f1858ab14416c3f27d28d",
+      "src/guide.css": "sha256:51c057c6059b1f8e0676023f760451a587a9f6133a36634cc8df99adec4aabe6",
+      "src/guide.js": "sha256:61b3baa76661b80f50734781ee0337ceb5a192f3700cc534125655b15bdba3bb",
+      "src/main.js": "sha256:e4fc3f17f4d4f6658d823f920977eda30e200e43ee94535d2d8d9a1edd6ec61e",
+      "src/navigation/corridor-network.js": "sha256:773c11cb4f9c5faae765e538d3e5117be132c8d27f6b9faebe0a033d8bacbefb",
+      "src/navigation/corridor-sampling-tsl.js": "sha256:817f172702f9425240141d54ceef2529b4d4bb7516eaacd3c71d82e270bcd193",
+      "src/navigation/corridor-surface-parallel.js": "sha256:b7237ac9db089c9009961e5a1bf3641f2a47890191e0464176f31d863a16797a",
+      "src/navigation/corridor-surface-partition.js": "sha256:c43ac62c44a16a4ceedfa23912befe76f5f1cf33474d6c22d8ea46272ab439a4",
+      "src/navigation/corridor-surface.worker.js": "sha256:efa59f227564d7190b50acf6a36f24ebd5cfb74294694403cb9e1005fa80cede",
+      "src/navigation/entrance-geometry.js": "sha256:7f8c4e0f573d8c852a1236a1e34116a729c3802473808cc76c3b6ae2f572c2bf",
+      "src/navigation/nest-mutation-transaction.js": "sha256:b9568049d8fbd4a44decc17d7fa9d8c4379984126736b250231c02f410959a06",
+      "src/navigation/nest-volume-probe.js": "sha256:15be8a92646ddd5c505eab1b39598afe3e2c19266cee89279c6fb4bea5831aa2",
+      "src/navigation/support-geometry.js": "sha256:8197b0b1e853343bb90c978c7c999c38472810487f193ef9779a7669e11a8c89",
+      "src/nest-mutation-ui.js": "sha256:dc7164274b8c4c22dc874530e494e99d603c22b321f734088579b47f5bb942cf",
+      "src/nest.js": "sha256:4f04b05af52024a13b2d0eff5609f673a933ed8de71c0e771db64da7ce3c792e",
+      "src/nestvolume.js": "sha256:b81bedc4378fd5bd540ae507875001795ea33a8fd638fe70eb48e6a9603e65a7",
+      "src/pose.js": "sha256:d8bb13b4b6eb0388abfb8121aead3b2174f855e0ce68245bdf9e3e157eeccad7",
+      "src/ragdoll.js": "sha256:f0e24c0ac1cc6a1de704c446d4f7e28e2d23463c75b706265bd2d5b9fd72654f",
+      "src/simulation.js": "sha256:2bc75e180e7c163936f17fe67be51471bca91e5580d28ddba3a99f5b6255d73e",
+      "src/spiders.js": "sha256:07d0bff7ea83f2e73c34df16e9544cb82b18c6c41969a7709fb71b601e0ebc23",
+      "src/tests.js": "sha256:d5f9aafa4a3633e52fe497c4264114706be23c7fbe4a9fbd650a2a124fd28f98",
+      "src/ui.js": "sha256:6d2008177b0704a23ecbdbe4571f59d93681dae708457e16401ce87e4280d8a7",
+      "src/underground.js": "sha256:4701bb269ac5ae523cb433743dcb364880c59ba112ba4a0ac558886b4b6c21b6",
+      "src/warden.js": "sha256:7fb8ddbf6edaa0e5c32495fc126a57d713a1d7645920a9ef8862c707df80a8f6",
+      "test/ant-observer.intent.test.js": "sha256:f98fa26bbcfa050458b8664e10a4887314328a12413053e40ec55018a2c5de82",
+      "test/ant-observer.motion.test.js": "sha256:d60b906a9623a39aaf5cf6235d9570d2b55b89fc0cb9dbcc8b5c86ef99eefd72",
+      "test/chamber-surface.test.js": "sha256:8699c42cee9b6d967af781cd166bf187c4f2f7f18c67c1c3d9ac771818ab2f3a",
+      "test/colony-layout.test.js": "sha256:17b6a0d6f2191b4c28526ac561d9635a778dc444af23d83340064845d58848c4",
+      "test/colony-runtime-oracles.test.js": "sha256:e718d450a698a8a39326a1aba0bd98fefd95fcf3b48fbc7e22b1a4c99f221276",
+      "test/colony-startup.test.js": "sha256:cbbf13a7d9caa292c3e331d3388f4d05e94a814154c53d9608c1716296af5177",
+      "test/corridor-network.complexity.test.js": "sha256:68b2f328f7c233f08b2893cde40dd4eca447b1832dc95d269784b49f8bf9196c",
+      "test/corridor-network.continuity.test.js": "sha256:6507c3f784cd4f3e456ebee38a6451b2c9190a3d3cfdf413b74eafd3cf229046",
+      "test/corridor-network.invariants.test.js": "sha256:7a1fe7f3c480465c05d07ac56ed1f325994f4d5af2813297ac6745dc88d6a76a",
+      "test/corridor-network.lane-stretch.test.js": "sha256:636009b770ce9e3cd2e37be2dc0c5dde4b89c43c0e2920875b05ccb00465fc3a",
+      "test/corridor-network.regression.test.js": "sha256:732888bad429c0ef27a80179255fb3928e93a477c443bc3c5731959ce7f520bc",
+      "test/corridor-network.routes.test.js": "sha256:1007626547593fd78a52843afa1b62b02b69cb02d9365eb6a33afa2a3c02937d",
+      "test/corridor-network.sample-boundary.test.js": "sha256:ab4a8263b2bdb8af900724b16a72bde3d29205f22b8dd11446cb694c4b89dcf8",
+      "test/corridor-network.surface-contact.test.js": "sha256:b8f7d25d10b2310548087cb196fa8c0bef009c897c5945a81d0a39ede8241c5a",
+      "test/corridor-network.vertical-shaft.test.js": "sha256:fe72455c9b10ae052f0c6583001b79f091546630c316512c9fa5da0669989cdd",
+      "test/corridor-surface-parallel.test.js": "sha256:6fb8f74243eaa384ee7e0024c5d45f81610d8356d14c1da27854a4aaabc7e220",
+      "test/entrance-geometry.test.js": "sha256:15ab33894151f713e298609243ce93cbc3ba103dfd71b66f2fbe4d68cc568d2f",
+      "test/helpers/corridor-fixtures.js": "sha256:f903e0435547d3d627019b1a84889e449c3191b25675cb9aee93999e20cb579c",
+      "test/nest-layout-async.integration.test.js": "sha256:6ab7f15a3b7c81ce832f2620128304ba04cb2522ada65cfe2135c6ac798f6cfd",
+      "test/nest-mutation-transaction.test.js": "sha256:b24f9822e1690283286a7963aa11ba827d89e222e80576bfe6d5a9e6f381031d",
+      "test/nest-mutation-ui.test.js": "sha256:989d09aa217c3be6aaf461e77cd92f5397acabc064e203b3395a160e6072b65e",
+      "test/nest-volume-probe.test.js": "sha256:912d8f340e4b87686e40f51d805e538c6f3e5d2d3419f57a6cfdaf449068fbde",
+      "test/nest.depth-resolution.test.js": "sha256:77b62e40cfe2367a5b23aee089486d072516d2d1ab5a0b6b8c31300142ca2831",
+      "test/nest.phyllotactic-layout.test.js": "sha256:5d9ccc252696afce0da46d84c10cbb044f6d41699406c05b3ea92f6870919a9f",
+      "test/support-geometry.spatial-hash.test.js": "sha256:3ee702a893c804863b56fae7e4fb97fef075bf289f5b5aa4b3818ea1988180fb",
+      "test/warden-verdict.test.js": "sha256:041d95ee3d34b629cebdb0a5be00d4ec13aeb96407afe26a4b85773bf14ed2cb"
+    }
+  }
+}

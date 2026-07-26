@@ -27,6 +27,18 @@ export const ANT_STATE = Object.freeze( {
 	DEVOURED: 3,
 } );
 
+export function navigationGridDistanceToWorld( distance, texel ) {
+
+	return Math.max( 0, Number( distance ) || 0 ) * Math.max( 0, Number( texel ) || 0 );
+
+}
+
+export function isSimulationTimePaused( params ) {
+
+	return Boolean( params?.paused ) || Number( params?.simSpeed ) <= 0;
+
+}
+
 export const CASTE_LABELS = Object.freeze( [
 	'Ouvrière',
 	'Soldate',
@@ -80,7 +92,7 @@ export function classifyAntObservation( observation ) {
 	const stationarySeconds = Math.max( 0, o.stationarySeconds || 0 );
 	const suspiciousAfter = Math.max( 0.25, o.suspiciousAfter ?? 2 );
 	const movingSpeed = Math.max( 0.001, o.movingSpeed ?? 0.08 );
-	const moving = ( o.measuredSpeed || 0 ) >= movingSpeed;
+	const moving = ! o.paused && ( o.measuredSpeed || 0 ) >= movingSpeed;
 
 	let intentCode = 'surface-search';
 	let intentLabel = caste === ANT_CASTE.SOLDIER ? 'Patrouille la surface' : 'Cherche de la nourriture';
@@ -97,6 +109,20 @@ export function classifyAntObservation( observation ) {
 		goalLabel = '—';
 		stopExpected = true;
 
+	} else if ( o.paused ) {
+
+		intentCode = 'simulation-paused';
+		intentLabel = 'Simulation en pause';
+		reason = 'Le temps de la simulation est suspendu par l’utilisateur ; aucune reprise automatique n’est attendue avant de relancer.';
+		stopExpected = true;
+
+	} else if ( ( o.activationRemaining || 0 ) > 0 ) {
+
+		intentCode = 'startup-activation';
+		intentLabel = 'Se prépare dans le nid';
+		reason = `Reprise naturelle de son activité dans ${ seconds( o.activationRemaining ) }.`;
+		goalLabel = 'Activation de la colonie';
+		stopExpected = true;
 	} else if ( o.resting && caste !== ANT_CASTE.QUEEN ) {
 
 		intentCode = 'scheduled-rest';
@@ -212,6 +238,15 @@ export function classifyAntObservation( observation ) {
 
 	}
 
+	let stateLabel;
+	if ( state >= ANT_STATE.DEAD ) stateLabel = STATE_LABELS[ state ] || `État ${ state }`;
+	else if ( o.paused ) stateLabel = 'Simulation en pause';
+	else if ( ( o.activationRemaining || 0 ) > 0 ) stateLabel = 'Activation initiale';
+	else if ( o.resting && caste !== ANT_CASTE.QUEEN ) stateLabel = 'Repos';
+	else if ( caste === ANT_CASTE.QUEEN ) stateLabel = 'Cycle royal';
+	else if ( state === ANT_STATE.CARRYING ) stateLabel = 'Transport';
+	else stateLabel = o.under ? 'Navigation souterraine' : 'Exploration';
+
 	return {
 		intentCode,
 		intentLabel,
@@ -222,7 +257,7 @@ export function classifyAntObservation( observation ) {
 		tone,
 		goalLabel,
 		casteLabel: CASTE_LABELS[ caste ] || `Caste ${ caste }`,
-		stateLabel: STATE_LABELS[ state ] || `État ${ state }`,
+		stateLabel,
 	};
 
 }
@@ -246,7 +281,7 @@ export function createAntMotionTracker( options = {} ) {
 
 	}
 
-	function sample( { id, timeMs, position } ) {
+	function sample( { id, timeMs, position, paused = false } ) {
 
 		if ( id !== antId || lastPosition === null ) {
 
@@ -260,6 +295,18 @@ export function createAntMotionTracker( options = {} ) {
 		}
 
 		if ( ! Number.isFinite( timeMs ) || timeMs <= lastTimeMs ) return { ...latest };
+
+		if ( paused ) {
+
+			// Le temps mural continue pendant une pause, pas le temps simulé. On
+			// décale l’origine de l’immobilité pour exclure exactement cet intervalle.
+			stationarySinceMs += timeMs - lastTimeMs;
+			lastTimeMs = timeMs;
+			lastPosition = { x: position.x, y: position.y, z: position.z };
+			latest = { ...latest, moving: false, measuredSpeed: 0 };
+			return { ...latest };
+
+		}
 
 		const dt = ( timeMs - lastTimeMs ) / 1000;
 		const dx = position.x - lastPosition.x;

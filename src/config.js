@@ -25,6 +25,11 @@ const saved = loadSaved();
 export const GRID = 1024;              // résolution de la grille (texels)
 export const WORLD = ( saved && saved.gfx && saved.gfx.mapSize ) || 160; // unités monde (au rechargement)
 export const TEXEL = WORLD / GRID;
+export const MIN_NEST_DEPTH = 19;
+// 64 tranches verticales gardent au moins trois voxels dans le diametre du
+// tunnel minimal jusqu'a 24 u. Au-dela, un volume monolithique ne peut plus
+// representer une galerie continue sans augmenter fortement son cout.
+export const MAX_NEST_DEPTH = 24;
 export const MAX_ANTS = 65536;
 export const MAX_SPIDERS = 1024;       // prédateurs simultanés (VAT instancié)
 export const MAX_BROOD = 4096;         // œufs/larves/nymphes simultanés (kernel couvain)
@@ -106,7 +111,7 @@ export const params = {
 	// assumee realiste : un vrai nid est bien plus profond que large.
 	// ------------------------------------------------------------------
 	nestScale: 1.0,                    // multiplie le nombre de loges (x la loi biologique)
-	nestDepth: 18,                     // profondeur totale du nid (unites monde)
+	nestDepth: 19,                     // profondeur totale, bornee par geometrie et resolution
 	nestTunnelW: 6,                    // demi-largeur des tunnels (texels) : >= 3 corps de fourmi
 	nestGrow: true,                    // le nid pousse avec la colonie
 
@@ -212,7 +217,7 @@ export const gfx = {
 	pupaColor: '#8f6f45',              // nymphes (brun clair)
 	spiderColor: '#39302a',            // corps de l'araignée (VAT sans matériau GLB)
 	spiderAccent: '#17110c',           // pattes / détail
-	anthillColor: '#7a5230',           // marron terre
+	entranceColor: '#6a472f',          // paroi de la bouche souterraine
 	foodColor: '#ff9d3a',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
@@ -311,6 +316,11 @@ if ( saved ) {
 	params.foodAmount = 1;
 
 }
+
+// Les anciennes sauvegardes pouvaient demander jusqu'a 200 u, alors que le
+// volume 128x64x128 ne conservait meme plus un voxel dans le diametre d'un
+// tunnel. La migration garde toutes les sauvegardes chargeables et physiques.
+params.nestDepth = Math.min( MAX_NEST_DEPTH, Math.max( MIN_NEST_DEPTH, params.nestDepth ) );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau

@@ -1,5 +1,8 @@
-const DEFAULT_ENTRY = { x: 0, y: 0, depth: - 0.25, layer: 0, r: 3 };
-const DEFAULT_SHAFT = { x: 2, y: 0, depth: - 2, layer: 0, r: 3 };
+// Test geometry uses grid coordinates for X/Z but world units for depth and
+// chamber half-axes. Keep enough room for the physical entrance throat and its
+// curvature-safe elbow at the default TEXEL/tunnel widths.
+const DEFAULT_ENTRY = { x: - 8, y: 0, depth: - 0.1, layer: 0, r: 3 };
+const DEFAULT_SHAFT = { x: 0, y: 0, depth: - 3.25, layer: 0, r: 3 };
 
 function parentNode( chamberIndex, parents ) {
 
@@ -80,9 +83,9 @@ function normalizeUnit( unit, index ) {
 		layer: unit.layer ?? Math.min( 3, index % 4 ),
 		R: unit.R ?? unit.r ?? 4,
 		r: unit.r ?? unit.R ?? 4,
-		rwx: unit.rwx ?? 4,
-		rwz: unit.rwz ?? 4,
-		rh: unit.rh ?? 1,
+		rwx: unit.rwx ?? 1.2,
+		rwz: unit.rwz ?? 1.05,
+		rh: unit.rh ?? 0.45,
 		type: unit.type ?? 0,
 	};
 
@@ -164,8 +167,8 @@ export function makeLinearNest( chamberCount = 5 ) {
 export function makeIrregularNest() {
 
 	return makeNest( {
-		entry: { x: - 2, y: 1, depth: - 0.2, layer: 0, r: 3 },
-		shaft: { x: 0, y: 0, depth: - 2.5, layer: 0, r: 3 },
+		entry: { x: - 10, y: 1, depth: - 0.15, layer: 0, r: 3 },
+		shaft: { x: 0, y: 0, depth: - 3.25, layer: 0, r: 3 },
 		units: [
 			{ x: 13, y: 7, depth: - 4.2, layer: 0, R: 5.5 },
 			{ x: 21, y: - 9, depth: - 8.8, layer: 1, R: 4.7 },

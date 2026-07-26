@@ -11,10 +11,13 @@
 //     majorée par l'étirement géométrique mesuré des voies.
 //   3 WARP XZ — aucun saut planaire inexpliqué par la progression de route.
 //   4 TOUPIE / BLOCAGE — fenêtre de 8 s hors repos et destination atteinte ;
-//     une transition surface/sous-sol ouvre toujours une nouvelle fenêtre.
+//     une transition surface/sous-sol est d'abord validée au contact exact de
+//     la bouche, puis ouvre une nouvelle fenêtre.
 //   5 BORNES DU VOLUME — aucune souterraine hors du volume réellement compilé,
 //     y compris avec le jitter des chambres profondes.
 //   6 MORT EN TOUPIE — corrélation entre anomalie et mort ultérieure.
+//   7 POSE/SUPPORT 3D — après kPose : données finies, pivot sur la normale du
+//     contact, quaternion unitaire et axes du corps cohérents avec le repère.
 //
 // Un échantillon CPU conserve chemins, états, énergie et traces intrinsèques.
 // Les verdicts n'acceptent aucune anomalie structurelle ; les indicateurs
@@ -25,14 +28,99 @@
 
 import {
 	Fn, If, instanceIndex, uniform, instancedArray, textureLoad,
-	uint, int, float, vec2, vec4, ivec2,
-	abs, min, max, clamp, floor, mix, sqrt, length, select, PI2, atomicAdd, atomicStore, atomicLoad,
+	uint, int, float, vec2, vec3, vec4, ivec2,
+	abs, min, max, sqrt, length, dot, cross, cos, sin, atan, select, PI2, atomicAdd, atomicStore, atomicLoad,
 	hash,
 } from 'three/tsl';
 
-import { params, gfx, TEXEL, MAX_ANTS } from './config.js';
+import { params, gfx, WORLD, TEXEL, MAX_ANTS, MIN_NEST_DEPTH, MAX_NEST_DEPTH } from './config.js';
 import { nestUnit, buildNest, K_MAX, MIN_TUNNEL_WIDTH } from './nest.js';
+import {
+	corridorSurfaceLengthTSL,
+	sampleCorridorSurfaceTSL,
+} from './navigation/corridor-sampling-tsl.js';
+import { NEST_VOLUME_GPU_PROBE_ID } from './navigation/nest-volume-probe.js';
 
+export { NEST_VOLUME_GPU_PROBE_ID };
+export const WARDEN_ENTRANCE_PROOF_ID = 'NAV-ENTRANCE-RUNTIME-001';
+export const WARDEN_VOLUME_PROOF_CASES = Object.freeze( [
+	'initial-current',
+	'depth-min',
+	'depth-max',
+	'tunnel-min',
+	'tunnel-wide',
+	'growth',
+	'restored-current',
+] );
+
+export function isFreshNestVolumeProof( proof ) {
+
+	return proof?.pass === true
+		&& proof.fresh === true
+		&& proof.stale !== true
+		&& proof.freshness?.pass === true
+		&& Number.isInteger( proof.bakeRevision ) && proof.bakeRevision > 0
+		&& Number.isInteger( proof.layoutRevision ) && proof.layoutRevision >= 0
+		&& typeof proof.layoutSignature === 'string'
+		&& proof.layoutSignature.length > 0;
+
+}
+
+export function buildVolumeGpuProofVerdict(
+	proofs, requiredCases = WARDEN_VOLUME_PROOF_CASES ) {
+
+	const source = Array.isArray( proofs ) ? proofs : [];
+	const checks = {};
+	for ( const caseId of requiredCases ) {
+
+		const matching = source.filter( ( proof ) => proof?.caseId === caseId );
+		checks[ caseId ] = matching.length === 1
+			&& isFreshNestVolumeProof( matching[ 0 ] );
+
+	}
+	const passed = Object.values( checks ).filter( Boolean ).length;
+	const coverage = Object.keys( checks ).length === requiredCases.length
+		&& source.every( ( proof ) => requiredCases.includes( proof?.caseId ) )
+		&& requiredCases.every( ( caseId ) =>
+			source.filter( ( proof ) => proof?.caseId === caseId ).length === 1 );
+	return {
+		id: NEST_VOLUME_GPU_PROBE_ID,
+		pass: coverage && passed === requiredCases.length,
+		fresh: coverage && passed === requiredCases.length,
+		stale: source.some( ( proof ) => proof?.stale === true ),
+		coverage,
+		counts: { passed, total: requiredCases.length },
+		requiredCases: [ ... requiredCases ],
+		checks,
+		cases: source,
+	};
+
+}
+
+export function buildWardenVerdict( unit, scenarios, transitionCoverage, volumeGpuProbe ) {
+
+	const unitPass = unit.length > 0 && unit.every( ( result ) => result.pass );
+	const scenariosPass = scenarios.length > 0 && scenarios.every( ( result ) => result.pass );
+	const transitionPass = transitionCoverage?.allerRetourObserve === true;
+	const volumeGpuPass = volumeGpuProbe?.pass === true;
+	const passed = unit.filter( ( result ) => result.pass ).length
+		+ scenarios.filter( ( result ) => result.pass ).length
+		+ ( transitionPass ? 1 : 0 )
+		+ ( volumeGpuPass ? 1 : 0 );
+	const total = Math.max( unit.length, 1 ) + Math.max( scenarios.length, 1 ) + 2;
+
+	return {
+		pass: unitPass && scenariosPass && transitionPass && volumeGpuPass,
+		score: `${ passed }/${ total }`,
+		checks: {
+			unitaires: unitPass,
+			scenarios: scenariosPass,
+			[ WARDEN_ENTRANCE_PROOF_ID ]: transitionPass,
+			[ NEST_VOLUME_GPU_PROBE_ID ]: volumeGpuPass,
+		},
+	};
+
+}
 const N_EVENTS = 256;         // anneau d'événements d'anomalies relus par le CPU
 const SPIN_T = 8.0;           // fenêtre toupie/blocage (s sim)
 const DY_TELEPORT = 1.0;      // saut vertical suspect (u monde)
@@ -42,16 +130,37 @@ const SPIN_ROT = 2 * Math.PI; // rotation cumulée de toupie sur la fenêtre (ra
                               // mais anormal pour une fourmi en déplacement
 const SPIN_MOVE = 3.0;        // … avec moins de ça de déplacement (texels)
 const STUCK_MOVE = 0.5;       // déplacement de blocage sur la fenêtre (texels)
+const POSE_LATERAL_EPS = 0.006; // erreur monde orthogonale à la normale
+const POSE_HEIGHT_EPS = 0.012;  // tolérance sur pivot + semelle + rebond
+const POSE_SCALE_EPS = 0.002;
+const POSE_QNORM_EPS = 0.02;
+// Les coups/venin ajoutent volontairement jusqu'à ~1 rad de roulis. Ces seuils
+// détectent une pose « lacet seul » sur mur/plafond sans condamner ce titubement.
+const POSE_UP_DOT_MIN = 0.25;
+const POSE_FORWARD_DOT_MIN = 0.70;
 
 // types d'événements (colonne « type » du rapport)
-const EV = { TELEPORT: 1, WARP: 2, NAPPE: 3, TOUPIE: 4, BLOQUE: 5, HORS_NID: 6, SURFACE: 7, MORT_TOUPIE: 8 };
-const EV_NOMS = [ '', 'dépassement cinématique 3D', 'warp XZ', 'hors corridor', 'toupie', 'bloquée', 'sous le nid', 'en surface', 'mort en toupie' ];
+const EV = {
+	TELEPORT: 1, WARP: 2, NAPPE: 3, TOUPIE: 4, BLOQUE: 5, HORS_NID: 6,
+	SURFACE: 7, MORT_TOUPIE: 8, POSE_NAN: 9, POSE_SUPPORT: 10,
+	POSE_ORIENTATION: 11, ENTREE_DISCONTINUE: 12,
+};
+const EV_NOMS = [
+	'', 'dépassement cinématique 3D', 'warp XZ', 'hors corridor', 'toupie',
+	'bloquée', 'sous le nid', 'en surface', 'mort en toupie',
+	'pose non finie', 'pivot hors support', 'orientation hors repère',
+	'transition bouche discontinue',
+];
 
-export function createWarden( { sim, colony, ants, cones, renderer } ) {
+const rotateByQuaternion = ( q, v ) =>
+	v.add( cross( q.xyz, cross( q.xyz, v ).add( v.mul( q.w ) ) ).mul( 2 ) );
+const finiteScalar = ( v ) => v.equal( v ).and( abs( v ).lessThan( 1e6 ) );
+const finiteVec3 = ( v ) => finiteScalar( v.x ).and( finiteScalar( v.y ) ).and( finiteScalar( v.z ) );
+const finiteVec4 = ( v ) => finiteVec3( v.xyz ).and( finiteScalar( v.w ) );
+
+export function createWarden( { sim, colony, ants, cones, renderer, nestVolume } ) {
 
 	const layout = sim.layout;
-	const depthSize = layout.depthTexture.image.width;
-	const origin = vec2( layout.origin.x, layout.origin.y );
 
 	// ------------------------------------------------------------------
 	// Tampons dédiés (jamais lus par le jeu normal)
@@ -71,8 +180,62 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 	const uDt = uniform( 1 / 60 );
 	const uSimTime = uniform( 0 );
-	const uDepthMax = uniform( 18 );
+	const uDepthMax = uniform( MIN_NEST_DEPTH );
 	const uLaneStretch = uniform( layout.navigation?.maxLaneStretch || 1 );
+
+	// NAV-ENTRANCE-RUNTIME-001 — preuve courte, déterministe et sans dépendance
+	// aux décisions stochastiques : #1 est placée à 0,05 texel de la sortie et
+	// #2 à 0,05 texel devant sa bouche de piste, porteuse et orientée vers elle.
+	// Le premier pas surveillé doit donc exercer les deux changements de monde.
+	const kEntranceProofSetup = Fn( () => {
+
+		If( instanceIndex.equal( uint( 1 ) ), () => {
+
+			const edge = int( 1 );
+			const meta = textureLoad( layout.corridorMetaTexture, ivec2( edge, int( 0 ) ) );
+			const from = meta.x.add( 0.5 ).toInt();
+			const to = meta.y.add( 0.5 ).toInt();
+			const rootAtStart = from.equal( int( 0 ) );
+			const other = select( rootAtStart, to, from );
+			const direction = select( rootAtStart, float( - 1 ), float( 1 ) );
+			const trackLength = corridorSurfaceLengthTSL( layout, edge, instanceIndex );
+			const deltaT = min( float( 0.05 ).div( max( trackLength, 1e-5 ) ), 0.01 );
+			const progress = select( rootAtStart, deltaT, float( 1 ).sub( deltaT ) );
+			const support = sampleCorridorSurfaceTSL(
+				layout, edge, progress, direction, instanceIndex );
+			const layer = textureLoad( layout.nodeTexture, ivec2( other, int( 0 ) ) )
+				.w.add( 0.5 ).toUint();
+
+			sim.antData.element( instanceIndex ).assign( vec4(
+				support.position, atan( support.tangent.y, support.tangent.x ), 0 ) );
+			sim.antState.element( instanceIndex ).assign(
+				uint( 8 ).bitOr( uint( 4 ).shiftLeft( uint( 4 ) ) )
+					.bitOr( other.toUint().shiftLeft( uint( 7 ) ) )
+					.bitOr( layer.shiftLeft( uint( 14 ) ) ) );
+			sim.antVital.element( instanceIndex ).assign( vec4( 0, 0, 0.1, 0 ) );
+			sim.antDyn.element( instanceIndex ).assign( vec4(
+				float( 1 ), progress, support.depth, float( 0 ) ) );
+
+		} ).ElseIf( instanceIndex.equal( uint( 2 ) ), () => {
+
+			const mouth = sampleCorridorSurfaceTSL(
+				layout, int( 1 ), float( 0 ), float( 1 ), instanceIndex );
+			const radialRaw = mouth.position.sub( sim.u.nest );
+			const radial = radialRaw.div( max( length( radialRaw ), 1e-5 ) );
+			const inward = radial.negate();
+			const start = mouth.position.add( radial.mul( 0.05 ) );
+
+			sim.antData.element( instanceIndex ).assign( vec4(
+				start, atan( inward.y, inward.x ), 0 ) );
+			// état 1 = porteuse : candidate inconditionnelle à la descente.
+			sim.antState.element( instanceIndex ).assign( uint( 1 ) );
+			sim.antVital.element( instanceIndex ).assign( vec4( 0, 0, 1, 0 ) );
+			sim.antDyn.element( instanceIndex ).assign( vec4(
+				inward.mul( sim.u.moveSpeed ), 0, 0 ) );
+
+		} );
+
+	} )().compute( 3 );
 
 	const kWatch = Fn( () => {
 
@@ -100,15 +263,6 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			// souterraine — un passage surface→nid ne peut pas être pris pour
 			// une téléportation (pas de plancher de référence)
 			const floorNow = float( - 999 ).toVar();
-			// Une transition surface/sous-sol change le sens de prev.z. Elle ouvre
-			// toujours une nouvelle fenêtre pour éviter tout mélange distance/cap.
-			If( prevOk.and( sameMode.not() ), () => {
-
-				acc.x.assign( 0 ); acc.y.assign( 0 ); acc.z.assign( 0 );
-				fl.assign( fl.bitAnd( uint( 0xFFFFFFFC ) ) );
-
-			} );
-
 
 			function emitEvent( type, magnitude ) {
 
@@ -121,6 +275,65 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 							sim.antDyn.element( instanceIndex ).y.mul( 0.001 ) ), layerE ) ) );
 
 			}
+
+			// A mode change is not exempt from kinematics. Reconstruct the exact
+			// track-specific mouth and require both frame endpoints, as well as the
+			// complete 3D displacement, to fit in one legal movement budget.
+			If( prevOk.and( sameMode.not() ), () => {
+
+				const mouth = sampleCorridorSurfaceTSL(
+					layout, int( 1 ), float( 0 ), float( 1 ), instanceIndex );
+				const dynNow = sim.antDyn.element( instanceIndex );
+				// Underground stores depth; surface stores height above y=0 plus a
+				// tiny positive mode marker. Preserve both in the 3D transition check.
+				const previousDepth = select( prevUnder, prev.w,
+					max( prev.w.sub( 1e-6 ), 0 ) );
+				const currentDepth = dynNow.z;
+				const horizontal = length( pos.sub( prev.xy ) ).mul( TEXEL );
+				const vertical = currentDepth.sub( previousDepth );
+				const displacement3d = sqrt(
+					horizontal.mul( horizontal ).add( vertical.mul( vertical ) ) );
+				const previousMouthXZ = length( prev.xy.sub( mouth.position ) ).mul( TEXEL );
+				const previousMouthY = previousDepth.sub( mouth.depth );
+				const previousToMouth = sqrt( previousMouthXZ.mul( previousMouthXZ )
+					.add( previousMouthY.mul( previousMouthY ) ) );
+				const currentMouthXZ = length( pos.sub( mouth.position ) ).mul( TEXEL );
+				const currentMouthY = currentDepth.sub( mouth.depth );
+				const currentToMouth = sqrt( currentMouthXZ.mul( currentMouthXZ )
+					.add( currentMouthY.mul( currentMouthY ) ) );
+				const casteSpeedMax = max(
+					max( sim.u.scoutSpeed, sim.u.soldierSpeed ), float( 1 ) );
+				const movementBudget = sim.u.moveSpeed.mul( uDt )
+					.mul( casteSpeedMax ).mul( 1.45 )
+					.mul( uLaneStretch ).mul( TEXEL ).add( 0.003 );
+				const transitionError = max( displacement3d,
+					max( previousToMouth, currentToMouth ) );
+				const surfaceHeight = select( prevUnder,
+					max( currentDepth, 0 ), max( previousDepth, 0 ) );
+
+				If( transitionError.greaterThan( movementBudget )
+					.or( surfaceHeight.greaterThan( 1e-4 ) ), () => {
+
+					atomicAdd( counters.element( 11 ), uint( 1 ) );
+					emitEvent( EV.ENTREE_DISCONTINUE, max( transitionError, surfaceHeight ) );
+
+				} );
+				If( prevUnder, () => {
+
+					atomicAdd( counters.element( 13 ), uint( 1 ) );
+
+				} ).Else( () => {
+
+					atomicAdd( counters.element( 12 ), uint( 1 ) );
+
+				} );
+
+				// Distance de route et cap n'ont pas la même sémantique de part et
+				// d'autre de la bouche : la fenêtre suivante repart proprement.
+				acc.x.assign( 0 ); acc.y.assign( 0 ); acc.z.assign( 0 );
+				fl.assign( fl.bitAnd( uint( 0xFFFFFFFC ) ) );
+
+			} );
 
 			If( alive.and( under ), () => {
 
@@ -145,38 +358,11 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 						const validT = dyn.y.greaterThanEqual( - 1e-5 ).and( dyn.y.lessThanEqual( 1.00001 ) );
 						const direction = select( from.equal( nodeI ), float( 1 ), float( - 1 ) );
 
-						const f = clamp( dyn.y, 0, 1 ).mul( layout.CORRIDOR_SAMPLES - 1 );
-						const i0 = clamp( floor( f ).toInt(), int( 0 ), int( layout.CORRIDOR_SAMPLES - 2 ) );
-						const p0 = textureLoad( layout.corridorTexture, ivec2( i0, edge ) );
-						const p1 = textureLoad( layout.corridorTexture, ivec2( i0.add( int( 1 ) ), edge ) );
-						const pBefore = textureLoad( layout.corridorTexture,
-							ivec2( max( i0.sub( int( 1 ) ), int( 0 ) ), edge ) );
-						const pAfter = textureLoad( layout.corridorTexture,
-							ivec2( min( i0.add( int( 2 ) ), int( layout.CORRIDOR_SAMPLES - 1 ) ), edge ) );
-						const center = mix( p0.xyz, p1.xyz, f.sub( i0.toFloat() ) ).toVar();
-						const segment = p1.xy.sub( p0.xy );
-						const fallback = select( length( segment ).greaterThan( 1e-5 ),
-							segment.div( max( length( segment ), 1e-5 ) ), vec2( 1, 0 ) );
-						const tangent0Raw = p1.xy.sub( pBefore.xy );
-						const tangent1Raw = pAfter.xy.sub( p0.xy );
-						const tangent0 = select( length( tangent0Raw ).greaterThan( 1e-5 ),
-							tangent0Raw.div( max( length( tangent0Raw ), 1e-5 ) ), fallback );
-						const tangent1 = select( length( tangent1Raw ).greaterThan( 1e-5 ),
-							tangent1Raw.div( max( length( tangent1Raw ), 1e-5 ) ), fallback );
-						const tangentRaw = mix( tangent0, tangent1, f.sub( i0.toFloat() ) );
-						const tangent = select( length( tangentRaw ).greaterThan( 1e-5 ),
-							tangentRaw.div( max( length( tangentRaw ), 1e-5 ) ), fallback ).toVar();
-
-						const q0 = clamp( dyn.y.div( 0.12 ), 0, 1 );
-						const q1 = clamp( float( 1 ).sub( dyn.y ).div( 0.12 ), 0, 1 );
-						const fade0 = q0.mul( q0 ).mul( float( 3 ).sub( q0.mul( 2 ) ) );
-						const fade1 = q1.mul( q1 ).mul( float( 3 ).sub( q1.mul( 2 ) ) );
-						const lane = min( hash( instanceIndex.add( uint( 0x1A4E ) ) )
-							.mul( sim.u.laneOffset ), meta.w ).mul( direction ).mul( fade0 ).mul( fade1 );
-						const expected = center.xy.add( vec2( tangent.y.negate(), tangent.x ).mul( lane ) );
-						const horizontalError = length( pos.sub( expected ) ).mul( TEXEL );
+						const expected = sampleCorridorSurfaceTSL(
+							layout, edge, dyn.y, direction, instanceIndex );
+						const horizontalError = length( pos.sub( expected.position.xy ) ).mul( TEXEL );
 						const error3d = sqrt( horizontalError.mul( horizontalError )
-							.add( dyn.z.sub( center.z ).mul( dyn.z.sub( center.z ) ) ) );
+							.add( dyn.z.sub( expected.depth ).mul( dyn.z.sub( expected.depth ) ) ) );
 						corridorError.assign( error3d );
 						If( incident.not().or( validT.not() ).or( error3d.greaterThan( 0.002 ) ), () => {
 
@@ -263,75 +449,102 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 				} );
 
-				// Le code 2.5D reste sous ce point uniquement le temps de la migration ;
-				// ce retour JS empêche sa construction dans le graphe TSL.
-				return;
+				// --- 7 · POSE/SUPPORT 3D -----------------------------------------
+				// kWatch lit ici le buffer produit par kPose juste avant lui. L'oracle
+				// reconstruit le contact et le repère depuis l'état intrinsèque ; il ne
+				// relit donc ni la matrice de rendu ni un résultat intermédiaire de pose.
+				If( a.w.greaterThanEqual( 0 ), () => {
 
-				const layer = st.shiftRight( uint( 14 ) ).bitAnd( uint( 3 ) );
-				// plancher résolu à la colonne (texels) sur SA nappe — MÊME
-				// logique que pose.js : nappe propre vide → rabat sur la plus haute
-				const lc = clamp( ivec2( pos.sub( origin ) ), ivec2( 0 ), ivec2( depthSize - 1 ) );
-				const t = textureLoad( layout.depthTexture, lc );
-				const own = select( layer.equal( uint( 0 ) ), t.x,
-					select( layer.equal( uint( 1 ) ), t.y,
-						select( layer.equal( uint( 2 ) ), t.z, t.w ) ) ).toVar();
-				const any = min( min( t.x, t.y ), min( t.z, t.w ) ).toVar();
-				floorNow.assign( select( own.lessThan( - 1e-4 ), own, any ) );
-				const legacyDyn = sim.antDyn.element( instanceIndex );
+					const poseBase = instanceIndex.mul( uint( 3 ) );
+					const posePosition = ants.pose.antPose.element( poseBase );
+					const poseQuaternion = ants.pose.antPose.element( poseBase.add( uint( 1 ) ) );
+					const poseMetadata = ants.pose.antPose.element( poseBase.add( uint( 2 ) ) );
+					const expectedContact = vec3(
+						a.x.mul( TEXEL ).sub( WORLD / 2 ), dyn.z,
+						a.y.mul( TEXEL ).sub( WORLD / 2 ),
+					).toVar();
+					const expectedSupport = vec3( 0, 1, 0 ).toVar();
+					const expectedForward = vec3( cos( a.z ), 0, sin( a.z ) ).toVar();
 
-				// --- 2 · NAPPE EMPRUNTÉE : la colonne n'a pas de cavité sur SA
-				// nappe, mais une autre en a une → le rendu la rabat verticalement
-				If( own.greaterThanEqual( - 1e-4 ).and( any.lessThan( - 1e-4 ) ), () => {
+					If( edge.greaterThan( int( 0 ) ).and( edge.lessThan( int( layout.MAX_NODES ) ) ), () => {
 
-					atomicAdd( counters.element( 2 ), uint( 1 ) );
-					If( fl.bitAnd( uint( 8 ) ).equal( uint( 0 ) ), () => {
-
-						fl.assign( fl.bitOr( uint( 8 ) ) );
-						emitEvent( EV.NAPPE, any );
-
-					} );
-
-				} ).Else( () => {
-
-					fl.assign( fl.bitAnd( uint( 0xFFFFFFF7 ) ) );
-
-				} );
-
-				If( prevOk, () => {
-
-					// --- 1 · TÉLÉPORTATION Y : le plancher a changé d'un coup
-					// sans vol balistique (dyn.z ≈ 0)
-					const dy = abs( floorNow.sub( prev.w ) ).toVar();
-					If( dy.greaterThan( float( DY_TELEPORT ) ).and( legacyDyn.z.lessThan( 0.05 ) ), () => {
-
-						atomicAdd( counters.element( 0 ), uint( 1 ) );
-						emitEvent( EV.TELEPORT, dy );
+						const poseMeta = textureLoad(
+							layout.corridorMetaTexture, ivec2( edge, int( 0 ) ) );
+						const poseDirection = select(
+							poseMeta.x.add( 0.5 ).toInt().equal( nodeE.add( 0.5 ).toInt() ),
+							float( 1 ), float( - 1 ),
+						);
+						const surface = sampleCorridorSurfaceTSL(
+							layout, edge, dyn.y, poseDirection, instanceIndex );
+						expectedContact.assign( vec3(
+							surface.position.x.mul( TEXEL ).sub( WORLD / 2 ),
+							surface.depth,
+							surface.position.y.mul( TEXEL ).sub( WORLD / 2 ),
+						) );
+						expectedSupport.assign( surface.support );
+						expectedForward.assign( surface.forward );
 
 					} );
 
-					// --- 3 · WARP XZ ---
-					const dxz = length( pos.sub( prev.xy ) );
-					If( dxz.greaterThan( float( DXZ_WARP ) ), () => {
+					const poseFinite = finiteVec4( posePosition )
+						.and( finiteVec4( poseQuaternion ) )
+						.and( finiteVec4( poseMetadata ) )
+						.and( finiteVec3( expectedContact ) )
+						.and( finiteVec3( expectedSupport ) )
+						.and( finiteVec3( expectedForward ) );
 
-						atomicAdd( counters.element( 1 ), uint( 1 ) );
-						emitEvent( EV.WARP, dxz );
+					If( poseFinite.not(), () => {
+
+						atomicAdd( counters.element( 8 ), uint( 1 ) );
+						emitEvent( EV.POSE_NAN, 1 );
+
+					} ).Else( () => {
+
+						const expectedScale = select( caste.isSoldier, float( 1.45 ),
+							select( caste.isNurse, float( 0.85 ),
+								select( caste.isScout, float( 0.92 ), float( 1 ) ) ) );
+						const expectedPivot = select( caste.isSoldier,
+							ants.pose.u.soldierPivotY, ants.pose.u.pivotY );
+						const offset = posePosition.xyz.sub( expectedContact );
+						const supportHeight = dot( offset, expectedSupport );
+						const lateralError = length( offset.sub(
+							expectedSupport.mul( supportHeight ) ) );
+						const baseHeight = expectedPivot.mul( expectedScale ).add( 0.018 );
+						const maxHeight = baseHeight.add(
+							abs( ants.pose.u.bobAmp ).mul( expectedScale ) );
+						const heightError = max( max(
+							baseHeight.sub( supportHeight ), supportHeight.sub( maxHeight ) ), 0 );
+						const scaleError = abs( posePosition.w.sub( expectedScale ) );
+						const supportError = max( lateralError, max( heightError, scaleError ) );
+
+						If( lateralError.greaterThan( POSE_LATERAL_EPS )
+							.or( heightError.greaterThan( POSE_HEIGHT_EPS ) )
+							.or( scaleError.greaterThan( POSE_SCALE_EPS ) ), () => {
+
+							atomicAdd( counters.element( 9 ), uint( 1 ) );
+							emitEvent( EV.POSE_SUPPORT, supportError );
+
+						} );
+
+						const quaternionNorm = dot( poseQuaternion, poseQuaternion );
+						const bodyUp = rotateByQuaternion( poseQuaternion, vec3( 0, 1, 0 ) );
+						const bodyForward = rotateByQuaternion( poseQuaternion, vec3( 0, 0, 1 ) );
+						const upDot = dot( bodyUp, expectedSupport );
+						const forwardDot = dot( bodyForward, expectedForward );
+						const orientationError = max( abs( quaternionNorm.sub( 1 ) ), max(
+							max( float( POSE_UP_DOT_MIN ).sub( upDot ), 0 ),
+							max( float( POSE_FORWARD_DOT_MIN ).sub( forwardDot ), 0 ) ) );
+
+						If( abs( quaternionNorm.sub( 1 ) ).greaterThan( POSE_QNORM_EPS )
+							.or( upDot.lessThan( POSE_UP_DOT_MIN ) )
+							.or( forwardDot.lessThan( POSE_FORWARD_DOT_MIN ) ), () => {
+
+							atomicAdd( counters.element( 10 ), uint( 1 ) );
+							emitEvent( EV.POSE_ORIENTATION, orientationError );
+
+						} );
 
 					} );
-
-				} );
-
-				// --- 6 · BORNES PHYSIQUES : une souterraine ne peut être ni au-
-				// dessus du sol ni sous la fourmilière
-				If( floorNow.greaterThan( - 0.05 ), () => {
-
-					atomicAdd( counters.element( 6 ), uint( 1 ) );
-					emitEvent( EV.SURFACE, floorNow );
-
-				} );
-				If( floorNow.lessThan( uDepthMax.negate().sub( 3 ) ), () => {
-
-					atomicAdd( counters.element( 5 ), uint( 1 ) );
-					emitEvent( EV.HORS_NID, floorNow );
 
 				} );
 
@@ -357,7 +570,9 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			const travelRequired = under.not().or( sim.antDyn.element( instanceIndex ).x.greaterThan( 0.5 ) )
 				.or( abs( nodeE.sub( routeGoalNode ) ).greaterThan( 0.5 ) );
 
-			If( alive.and( resting.not() ).and( travelRequired ), () => {
+			const awaitingActivation = sim.antData.element( instanceIndex ).w.lessThan( 0 );
+
+			If( alive.and( resting.not() ).and( awaitingActivation.not() ).and( travelRequired ), () => {
 
 				If( sameMode, () => {
 
@@ -422,7 +637,10 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			acc.w.assign( fl.toFloat() );
 			prevData.element( instanceIndex ).assign(
 				vec4( pos.x, pos.y, select( under, sim.antDyn.element( instanceIndex ).w, yaw ),
-					select( under, floorNow, float( 1 ) ) ) );
+					// y=0 is a valid underground contact. Keep underground strictly
+					// negative; on surface retain physical height plus a positive marker.
+					select( under, min( floorNow, float( - 1e-6 ) ),
+						max( sim.antDyn.element( instanceIndex ).z, 0 ).add( 1e-6 ) ) ) );
 			spinAcc.element( instanceIndex ).assign( acc );
 
 		} );
@@ -460,9 +678,18 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		if ( ! preserveClock ) simClock = 0;
 		const deepest = Math.min( 0,
 			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ) );
-		uDepthMax.value = Math.max( layout.depthMax || 18, - deepest );
+		uDepthMax.value = Math.max( layout.depthMax || MIN_NEST_DEPTH, - deepest );
 
 		uLaneStretch.value = layout.navigation?.maxLaneStretch || 1;
+	}
+
+	function primeWatch() {
+
+		// Capture la pose initiale avant le premier pas : une transition forcée au
+		// pas 1 reste ainsi observable et soumise à l'oracle cinématique complet.
+		renderer.compute( ants.pose.kPose );
+		renderer.compute( kWatch );
+
 	}
 
 	// pas manuels surveillés : sim → colonie → veille (les readbacks async
@@ -477,6 +704,9 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			if ( withColony ) colony.step( 1 / 60 );
 			simClock += 1 / 60;
 			uSimTime.value = simClock;
+			// Le contrôle de pose doit lire exactement la transformation destinée
+			// au rendu pour ce pas, jamais le buffer de la frame précédente.
+			renderer.compute( ants.pose.kPose );
 			renderer.compute( kWatch );
 			if ( i % 240 === 239 ) await sim.readStatsDirect();   // synchro + yield
 
@@ -648,7 +878,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		// déterminisme du registre : même k → même loge, quel que soit l'ordre
 		{
 
-			const a = nestUnit( 7, 18 ), b = nestUnit( 7, 18 );
+			const a = nestUnit( 7, MIN_NEST_DEPTH ), b = nestUnit( 7, MIN_NEST_DEPTH );
 			ok( 'nestUnit déterministe',
 				a.x === b.x && a.y === b.y && a.depth === b.depth && a.rwx === b.rwx,
 				`loge 7 : (${ a.x.toFixed( 1 ) }, ${ a.y.toFixed( 1 ) }, prof ${ a.depth.toFixed( 1 ) })` );
@@ -657,8 +887,8 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		// append-only : agrandir ne déplace JAMAIS une loge existante
 		{
 
-			const n10 = buildNest( 10, 18, 6 );
-			const n20 = buildNest( 20, 18, 6 );
+			const n10 = buildNest( 10, MIN_NEST_DEPTH, 6 );
+			const n20 = buildNest( 20, MIN_NEST_DEPTH, 6 );
 			let moved = 0;
 
 			for ( let k = 0; k < 10; k ++ ) {
@@ -677,11 +907,11 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		{
 
 			let badDepth = 0, badLayer = 0, badParent = 0;
-			const nAll = buildNest( K_MAX, 18, 6 );
+			const nAll = buildNest( K_MAX, MIN_NEST_DEPTH, 6 );
 
 			for ( const uN of nAll.units ) {
 
-				if ( uN.depth > 0.01 || uN.depth < - 18 * 1.06 - 0.01 ) badDepth ++;
+				if ( uN.depth > 0.01 || uN.depth < - MIN_NEST_DEPTH * 1.06 - 0.01 ) badDepth ++;
 				if ( uN.layer < 0 || uN.layer > 3 ) badLayer ++;
 
 			}
@@ -689,13 +919,13 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			for ( let k = 0; k < K_MAX; k ++ ) if ( nAll.parents[ k ] >= k || nAll.parents[ k ] < - 1 ) badParent ++;
 			ok( 'bornes du registre (profondeur, nappe, parent)',
 				badDepth === 0 && badLayer === 0 && badParent === 0,
-				`profondeur hors [−19,1,0]=${ badDepth }, nappe hors 0..3=${ badLayer }, parents invalides=${ badParent }` );
+				`profondeur hors [-${ ( MIN_NEST_DEPTH * 1.06 ).toFixed( 1 ) }, 0]=${ badDepth }, nappe hors 0..3=${ badLayer }, parents invalides=${ badParent }` );
 
 		}
 		// connexité : chaque nœud retombe sur la racine (parent −1 = puits)
 		{
 
-			const nAll = buildNest( K_MAX, 18, 6 );
+			const nAll = buildNest( K_MAX, MIN_NEST_DEPTH, 6 );
 			let orphans = 0;
 
 			for ( let k = 1; k < K_MAX; k ++ ) {
@@ -712,7 +942,7 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		// chaque loge active a bien une cavité dans la carte (sur SA nappe)
 		{
 
-			const nAll = buildNest( 24, 18, 6 );
+			const nAll = buildNest( 24, MIN_NEST_DEPTH, 6 );
 			let missing = 0;
 
 			for ( let k = 0; k < 24; k ++ ) {
@@ -734,6 +964,54 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 	// ------------------------------------------------------------------
 	// SCÉNARIOS DE LA CAMPAGNE
 	// ------------------------------------------------------------------
+	async function captureVolumeGpuProof( caseId ) {
+
+		if ( ! nestVolume ) return {
+			id: NEST_VOLUME_GPU_PROBE_ID,
+			caseId,
+			pass: false,
+			fresh: false,
+			stale: true,
+			error: 'nestVolume unavailable',
+		};
+		try {
+
+			const bake = nestVolume.rebuild();
+			const proof = await nestVolume.probeCleanSurface();
+			const bindingMatches = proof.bakeRevision === bake.bakeRevision
+				&& proof.layoutRevision === bake.layoutRevision
+				&& proof.layoutSignature === bake.layoutSignature;
+			const captured = {
+				... proof,
+				caseId,
+				pass: proof.pass === true && bindingMatches,
+				fresh: proof.fresh === true && bindingMatches,
+				stale: proof.stale === true || ! bindingMatches,
+				captureBinding: {
+					pass: bindingMatches,
+					expectedBakeRevision: bake.bakeRevision,
+					expectedLayoutRevision: bake.layoutRevision,
+					expectedLayoutSignature: bake.layoutSignature,
+				},
+			};
+			console.log( `[${ NEST_VOLUME_GPU_PROBE_ID }:${ caseId }] ${ captured.pass ? 'PASS' : 'FAIL' }` );
+			return captured;
+
+		} catch ( error ) {
+
+			return {
+				id: NEST_VOLUME_GPU_PROBE_ID,
+				caseId,
+				pass: false,
+				fresh: false,
+				stale: true,
+				error: error instanceof Error ? error.message : String( error ),
+			};
+
+		}
+
+	}
+
 	async function runScenario( sc ) {
 
 		console.log( `🛡 Scénario « ${ sc.name } » (${ sc.seconds } s sim, ${ sc.ants } fourmis)…` );
@@ -744,9 +1022,19 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		cones.setCount( sc.ants );
 		if ( sc.configure ) sc.configure();
 		sim.applyLayout();
+		const volumeGpuProofs = [];
+		if ( sc.volumeProofCase )
+			volumeGpuProofs.push( await captureVolumeGpuProof( sc.volumeProofCase ) );
 		await sim.reset();
 		await colony.reset();
+		if ( sc.setup ) {
+
+			await sc.setup();
+			await sim.synchronize();
+
+		}
 		resetWatch();
+		primeWatch();
 
 		const life = makeLifeTracker( 48 );
 		let lastStats = null;
@@ -759,7 +1047,16 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			if ( sc.during && c + 1 === Math.ceil( chunks / 2 ) ) {
 
 				watchSegments.push( await readWatch() );
-				await sc.during();
+				const mutationApplied = await sc.during();
+				if ( sc.volumeProofAfterMutation ) volumeGpuProofs.push(
+					mutationApplied === false
+						? {
+							id: NEST_VOLUME_GPU_PROBE_ID,
+							caseId: sc.volumeProofAfterMutation,
+							pass: false, fresh: false, stale: true,
+							error: 'Expected geometry mutation was not applied',
+						}
+						: await captureVolumeGpuProof( sc.volumeProofAfterMutation ) );
 				// Nouvelle fenêtre de vitesse : le commit lui-même est couvert par la
 				// validation immuable du préfixe ; les pas suivants repartent d'une pose connue.
 				resetWatch( true );
@@ -799,20 +1096,51 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 				sousLeNid: watch.counters[ 5 ],
 				enSurface: watch.counters[ 6 ],
 				mortsEnToupie: watch.counters[ 7 ],
+				posesNonFinies: watch.counters[ 8 ],
+				pivotsHorsSupport: watch.counters[ 9 ],
+				orientationsHorsRepere: watch.counters[ 10 ],
+				transitionsBoucheDiscontinues: watch.counters[ 11 ],
+			},
+			transitionsObservees: {
+				surfaceVersNid: watch.counters[ 12 ],
+				nidVersSurface: watch.counters[ 13 ],
 			},
 			events: watch.events.slice( 0, 40 ),
 			eventsOverflow: watch.overflow,
 			cycleDeVie: lifeRep,
+			volumeGpuProofs,
 
 		};
 
-		// Un seul écart structurel suffit à faire échouer la campagne.
-		const ok = watch.counters.slice( 0, 8 ).every( ( value ) => value === 0 );
+		// Un seul écart structurel suffit à faire échouer la campagne. Le scénario
+		// de preuve bouche ajoute en plus une exigence positive dans les deux sens.
+		const structuralPass = watch.counters.slice( 0, 12 ).every( ( value ) => value === 0 );
+		const requiredTransitions = sc.requiredTransitions ?? {};
+		const transitionPass = rep.transitionsObservees.surfaceVersNid
+			>= ( requiredTransitions.surfaceVersNid ?? 0 )
+			&& rep.transitionsObservees.nidVersSurface
+			>= ( requiredTransitions.nidVersSurface ?? 0 );
+		const volumeGpuPass = volumeGpuProofs.every( isFreshNestVolumeProof )
+			&& ( ! sc.volumeProofCase || volumeGpuProofs.some(
+				( proof ) => proof.caseId === sc.volumeProofCase ) )
+			&& ( ! sc.volumeProofAfterMutation || volumeGpuProofs.some(
+				( proof ) => proof.caseId === sc.volumeProofAfterMutation ) );
+		const ok = structuralPass && transitionPass && volumeGpuPass;
 
+		if ( sc.proofId ) rep.preuveRuntime = {
+			id: sc.proofId,
+			pass: ok,
+			surfaceVersNid: rep.transitionsObservees.surfaceVersNid,
+			nidVersSurface: rep.transitionsObservees.nidVersSurface,
+		};
 		rep.pass = ok;
 		console.log( `${ ok ? '✅' : '❌' } « ${ sc.name } » — cinématique3D=${ rep.anomalies.depassementsCinematiques3D }`
 			+ ` horsCorridor=${ rep.anomalies.horsCorridor }, toupies=${ rep.anomalies.toupies }`
 			+ ` bloquées=${ rep.anomalies.bloquées } mortsEnToupie=${ rep.anomalies.mortsEnToupie }`
+			+ ` poseNaN=${ rep.anomalies.posesNonFinies } support=${ rep.anomalies.pivotsHorsSupport }`
+			+ ` orientation=${ rep.anomalies.orientationsHorsRepere }`
+			+ ` transition=${ rep.anomalies.transitionsBoucheDiscontinues }`
+			+ ` entrée/sortie=${ rep.transitionsObservees.surfaceVersNid }/${ rep.transitionsObservees.nidVersSurface }`
 			+ ` cycle=${ rep.cycleDeVie.healthy }/${ rep.cycleDeVie.total } saines` );
 		if ( ! ok && rep.events.length ) {
 
@@ -835,9 +1163,15 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 		params.paused = true;
 		colony._dbg.setManualTick( true );
 
-		const report = { unit: [], scenarios: [], startedAt: new Date().toISOString() };
+		const report = {
+			unit: [], scenarios: [], volumeGpuProofs: [], volumeGpuProbe: null,
+			startedAt: new Date().toISOString(),
+		};
 
 		try {
+
+			report.volumeGpuProofs.push(
+				await captureVolumeGpuProof( 'initial-current' ) );
 
 			// --- tests unitaires (instantanés) ---
 			report.unit = unitTests();
@@ -850,15 +1184,29 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 			// --- scénarios d'intégration ---
 			const scenarios = [
+				{
+					name: `preuve bouche déterministe [${ WARDEN_ENTRANCE_PROOF_ID }]`,
+					ants: 8,
+					seconds: 0.5,
+					setup: () => renderer.compute( kEntranceProofSetup ),
+					requiredTransitions: { surfaceVersNid: 1, nidVersSurface: 1 },
+					proofId: WARDEN_ENTRANCE_PROOF_ID,
+				},
 				{ name: 'référence', ants: 869, seconds },
 				{ name: 'colonie dense', ants: 2048, seconds },
 				{ name: 'capacité maximale', ants: MAX_ANTS, seconds: Math.min( seconds, 5 ) },
+				{ name: 'profondeur minimale', ants: 869, seconds: Math.min( seconds, 10 ),
+					configure: () => { params.nestDepth = MIN_NEST_DEPTH; sim.layout.rebuild(); },
+					volumeProofCase: 'depth-min' },
 				{ name: 'profondeur extrême', ants: 869, seconds: Math.min( seconds, 10 ),
-					configure: () => { params.nestDepth = 200; sim.layout.rebuild(); } },
+					configure: () => { params.nestDepth = MAX_NEST_DEPTH; sim.layout.rebuild(); },
+					volumeProofCase: 'depth-max' },
 				{ name: 'tunnels étroits', ants: 869, seconds,
-					configure: () => { params.nestTunnelW = MIN_TUNNEL_WIDTH; sim.layout.rebuild(); } },
+					configure: () => { params.nestTunnelW = MIN_TUNNEL_WIDTH; sim.layout.rebuild(); },
+					volumeProofCase: 'tunnel-min' },
 				{ name: 'tunnels larges', ants: 869, seconds,
-					configure: () => { params.nestTunnelW = 10; sim.layout.rebuild(); } },
+					configure: () => { params.nestTunnelW = 10; sim.layout.rebuild(); },
+					volumeProofCase: 'tunnel-wide' },
 				{ name: 'famine', ants: 869, seconds: Math.min( seconds, 150 ),
 					configure: () => {
 
@@ -867,16 +1215,22 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 					} },
 				{ name: 'croissance append-only en trajet', ants: 869, seconds: Math.min( seconds, 20 ),
+					configure: () => { params.nestScale = 1; sim.layout.rebuild(); },
 					during: async () => {
 						await sim.synchronize();
-						if ( sim.layout.growTo( Math.min( K_MAX, sim.layout.K + 4 ) ) ) sim.applyLayout();
+						const grew = sim.layout.growTo( Math.min( K_MAX, sim.layout.K + 4 ) );
+						if ( grew ) sim.applyLayout();
 						await sim.synchronize();
-					} },
+						return grew;
+					},
+					volumeProofAfterMutation: 'growth' },
 			];
 
 			for ( const sc of scenarios ) {
 
-				report.scenarios.push( await runScenario( sc ) );
+				const scenarioReport = await runScenario( sc );
+				report.scenarios.push( scenarioReport );
+				report.volumeGpuProofs.push( ... scenarioReport.volumeGpuProofs );
 				// remet les réglages du scénario précédent
 				Object.assign( params, saved.params );
 				sim.u.energyLife.value = params.energyLife;
@@ -894,6 +1248,9 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 			ants.setCount( savedPop );
 			cones.setCount( savedPop );
 			sim.layout.rebuild();
+			sim.applyLayout();
+			report.volumeGpuProofs.push(
+				await captureVolumeGpuProof( 'restored-current' ) );
 			await sim.reset();
 			await colony.reset();
 			sim.refreshDisplay();
@@ -903,13 +1260,55 @@ export function createWarden( { sim, colony, ants, cones, renderer } ) {
 
 		}
 
-		const passed = report.scenarios.filter( ( r ) => r.pass ).length
-			+ report.unit.filter( ( r ) => r.pass ).length;
-		const total = report.scenarios.length + report.unit.length;
-		report.score = `${ passed }/${ total }`;
-		console.log( `🛡 WARDEN — fin de campagne : ${ report.score }` );
+		report.volumeGpuProbe = buildVolumeGpuProofVerdict( report.volumeGpuProofs );
+		console.log( `[${ NEST_VOLUME_GPU_PROBE_ID }] matrice volume: `
+			+ `${ report.volumeGpuProbe.counts.passed }/${ report.volumeGpuProbe.counts.total } `
+			+ `${ report.volumeGpuProbe.pass ? 'PASS' : 'FAIL' }` );
 
+		const surfaceVersNid = report.scenarios.reduce( ( total, scenario ) =>
+			total + scenario.transitionsObservees.surfaceVersNid, 0 );
+		const nidVersSurface = report.scenarios.reduce( ( total, scenario ) =>
+			total + scenario.transitionsObservees.nidVersSurface, 0 );
+		report.couvertureTransitions = {
+			surfaceVersNid,
+			nidVersSurface,
+			allerRetourObserve: surfaceVersNid > 0 && nidVersSurface > 0,
+		};
+		if ( ! report.couvertureTransitions.allerRetourObserve )
+			console.warn( `WARDEN — ${ WARDEN_ENTRANCE_PROOF_ID } FAIL : aucune preuve aller-retour complète.` );
+
+		const verdict = buildWardenVerdict(
+			report.unit, report.scenarios, report.couvertureTransitions,
+			report.volumeGpuProbe );
+		report.pass = verdict.pass;
+		report.score = verdict.score;
+		report.verdicts = verdict.checks;
+		const entranceProof = report.scenarios.find(
+			( scenario ) => scenario.preuveRuntime?.id === WARDEN_ENTRANCE_PROOF_ID );
+		const restoredVolumeProof = report.volumeGpuProofs.find(
+			( proof ) => proof.caseId === 'restored-current' );
+		report.preuvesRuntime = {
+			[ WARDEN_ENTRANCE_PROOF_ID ]: {
+				pass: entranceProof?.pass === true,
+				surfaceVersNid,
+				nidVersSurface,
+			},
+			[ NEST_VOLUME_GPU_PROBE_ID ]: {
+				pass: report.volumeGpuProbe?.pass === true,
+				counts: report.volumeGpuProbe?.counts ?? null,
+				checks: report.volumeGpuProbe?.checks ?? null,
+				bakeRevision: restoredVolumeProof?.bakeRevision ?? null,
+				layoutRevision: restoredVolumeProof?.layoutRevision ?? null,
+				layoutSignature: restoredVolumeProof?.layoutSignature ?? null,
+			},
+		};
+		console.log( `${ report.pass ? '✅' : '❌' } WARDEN — fin de campagne : ${ report.score }`
+			+ ` · ${ WARDEN_ENTRANCE_PROOF_ID }=${ report.couvertureTransitions.allerRetourObserve ? 'PASS' : 'FAIL' }` );
 		window.__antwarden = report;
+		// Le navigateur de CI s'exécute dans un monde JS isolé ; le dataset est
+		// son contrat de lecture, tandis que __antwarden reste l'API de debug.
+		if ( typeof document !== 'undefined' )
+			document.documentElement.dataset.antWarden = JSON.stringify( report );
 		return report;
 
 	}

@@ -35,6 +35,8 @@ import {
 	ANT_CASTE,
 	classifyAntObservation,
 	createAntMotionTracker,
+	isSimulationTimePaused,
+	navigationGridDistanceToWorld,
 } from './ant-observer.js';
 
 const PICK_PX = 26;          // rayon de tolérance du clic (pixels CSS)
@@ -213,7 +215,7 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		speed: 0, measSpeed: 0, stationarySeconds: 0,
 		corridor: - 1, progress: 0, floorDepth: 0, distance: 0,
 		goal: 0, node: 0, resting: false, restRemaining: 0, hungry: false,
-		granaryStock: 0, queenStock: 0, broodStock: 0, layTimer: 0,
+		granaryStock: 0, queenStock: 0, broodStock: 0, rawTimer: 0, activationRemaining: 0, layTimer: 0,
 	};
 	let jumpCount = 0;
 	let lastJumpMag = 0;
@@ -229,12 +231,13 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		const atGoal = under && info.corridor < 0.5
 			&& Number.isFinite( goalNode ) && info.node === goalNode;
 		const diagnostic = classifyAntObservation( {
-			id: selected, state: info.state, caste, isQueen, under, carrying,
+			id: selected, state: info.state, caste, isQueen, under, carrying, paused: isSimulationTimePaused( params ),
 			attacking: Boolean( info.attacking ), goal: info.goal, node: info.node,
 			atGoal, resting: info.resting, restRemaining: info.restRemaining,
 			hungry: info.hungry, energy: info.energy, venom: info.venom,
 			granaryStock: info.granaryStock, queenStock: info.queenStock,
 			broodStock: info.broodStock, layTimer: info.layTimer,
+			activationRemaining: info.activationRemaining,
 			layInterval: params.queenLayInterval, layEnergyMin: params.queenLayMin,
 			stationarySeconds: info.stationarySeconds, measuredSpeed: info.measSpeed,
 			corridor: info.corridor, progress: info.progress,
@@ -247,7 +250,9 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		};
 
 		const place = under ? `SOUTERRAIN · NAPPE ${ info.layer }` : 'SURFACE';
-		const route = isQueen
+		const route = info.activationRemaining > 0
+			? `Activation dans ${ info.activationRemaining.toFixed( 1 ).replace( '.', ',' ) } s`
+			: isQueen
 			? `Chambre royale · ponte ${ info.layTimer.toFixed( 1 ) } / ${ params.queenLayInterval.toFixed( 1 ) } s`
 			: under
 				? ( info.corridor > 0
@@ -313,6 +318,7 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 		jumpCount = 0;
 		info.measSpeed = 0;
 		info.stationarySeconds = 0;
+		info.activationRemaining = 0;
 		lastJumpAt = - 1e9;
 		lastDiagnostic = null;
 		motionTracker.reset();
@@ -418,6 +424,8 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 				info.queenStock = Math.max( 0, Math.round( f[ 21 ] ) );
 				info.broodStock = Math.max( 0, Math.round( f[ 22 ] ) );
 				info.hungry = f[ 23 ] > 0.5;
+				info.rawTimer = f[ 24 ];
+				info.activationRemaining = Math.max( 0, - f[ 24 ] );
 				info.layTimer = Math.max( 0, f[ 24 ] );
 
 				const under = ( Math.floor( f[ 7 ] / 4 ) % 2 ) === 1;
@@ -428,7 +436,7 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 					info.corridor = Math.round( f[ 8 ] );
 					info.progress = f[ 9 ];
 					info.floorDepth = f[ 10 ];
-					info.distance = f[ 11 ];
+					info.distance = navigationGridDistanceToWorld( f[ 11 ], TEXEL );
 					info.speed = 0;
 
 				} else {
@@ -444,6 +452,7 @@ export function createAntFollow( { sim, pose, renderer, camera, controls } ) {
 					id: selected,
 					timeMs: now,
 					position,
+					paused: isSimulationTimePaused( params ),
 				} );
 				info.measSpeed = motion.measuredSpeed;
 				info.stationarySeconds = motion.stationarySeconds;

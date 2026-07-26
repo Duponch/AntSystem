@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 
 import {
 	buildCorridorNetwork,
+	CORRIDOR_SURFACE_TRACKS,
 	createRouteState,
 	stepRoute,
 	validateNetwork,
@@ -31,7 +32,7 @@ function collectionSizes( value, seen = new Set(), out = [] ) {
 
 describe( 'structural complexity guarantees', () => {
 
-	test( 'shared navigation storage is linear in nodes, goals and samples', () => {
+	test( 'shared navigation storage is linear in nodes, goals, samples and surface tracks', () => {
 
 		for ( const chamberCount of [ 8, 32, 96 ] ) {
 
@@ -45,14 +46,36 @@ describe( 'structural complexity guarantees', () => {
 				( total, edge ) => total + ( edge?.points.length ?? 0 ),
 				0,
 			);
+			const localContactScalars = network.corridors.reduce(
+				( total, edge ) => total + ( edge?.surfaceTracks.length ?? 0 ),
+				0,
+			);
+			const localSupportScalars = network.corridors.reduce(
+				( total, edge ) => total + ( edge?.surfaceSupports.length ?? 0 ),
+				0,
+			);
 
 			assert.equal( network.corridors.length, network.nodes.length );
+			assert.equal( network.surfaceTracks, CORRIDOR_SURFACE_TRACKS );
 			assert.equal( pointCount, edgeCount * samples );
 			assert.equal( network.nextHop.length, network.nodes.length * network.maxGoals );
 			assert.equal( network.goalDistance.length, network.nodes.length * network.maxGoals );
 			assert.equal( network.nodeData.length, network.maxNodes * 4 );
 			assert.equal( network.metaData.length, network.maxNodes * 4 );
 			assert.equal( network.sampleData.length, network.maxNodes * samples * 4 );
+			assert.equal(
+				network.surfaceData.length,
+				network.maxNodes * samples * CORRIDOR_SURFACE_TRACKS * 4,
+			);
+			assert.equal(
+				network.surfaceSupportData.length,
+				network.maxNodes * samples * CORRIDOR_SURFACE_TRACKS * 4,
+			);
+			assert.equal(
+				localContactScalars,
+				edgeCount * samples * CORRIDOR_SURFACE_TRACKS * 4,
+			);
+			assert.equal( localSupportScalars, localContactScalars );
 			assert.equal( validateNetwork( network ).ok, true );
 
 		}
@@ -64,7 +87,7 @@ describe( 'structural complexity guarantees', () => {
 		const expectedKeys = [
 			'arrived', 'direction', 'distance', 'edge',
 			'goal', 'node', 'position', 't',
-	];
+		];
 
 		for ( const chamberCount of [ 8, 32, 96 ] ) {
 
@@ -92,9 +115,22 @@ describe( 'structural complexity guarantees', () => {
 		const high = buildCorridorNetwork( nest, { samples: 32, texel: TEXEL } );
 
 		assert.equal( high.sampleData.length, low.sampleData.length * 4 );
+		assert.equal( high.surfaceData.length, low.surfaceData.length * 4 );
+		assert.equal(
+			high.surfaceSupportData.length,
+			low.surfaceSupportData.length * 4,
+		);
 		assert.equal(
 			high.corridors.reduce( ( n, edge ) => n + ( edge?.points.length ?? 0 ), 0 ),
 			low.corridors.reduce( ( n, edge ) => n + ( edge?.points.length ?? 0 ), 0 ) * 4,
+		);
+		assert.equal(
+			high.corridors.reduce( ( n, edge ) => n + ( edge?.surfaceTracks.length ?? 0 ), 0 ),
+			low.corridors.reduce( ( n, edge ) => n + ( edge?.surfaceTracks.length ?? 0 ), 0 ) * 4,
+		);
+		assert.equal(
+			high.corridors.reduce( ( n, edge ) => n + ( edge?.surfaceSupports.length ?? 0 ), 0 ),
+			low.corridors.reduce( ( n, edge ) => n + ( edge?.surfaceSupports.length ?? 0 ), 0 ) * 4,
 		);
 		assert.equal( high.nextHop.length, low.nextHop.length );
 		assert.equal( high.goalDistance.length, low.goalDistance.length );

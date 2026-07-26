@@ -19,11 +19,12 @@
 
 import {
 	Fn, If, instanceIndex, uniform, instancedArray,
-	float, uint, vec2, vec3, vec4, ivec2,
-	cos, sin, abs, exp, floor, min, select, clamp, cross, textureLoad, PI2,
+	float, int, uint, vec2, vec3, vec4, ivec2,
+	cos, sin, abs, exp, floor, min, max, select, clamp, cross, dot, length, normalize, atan, textureLoad, PI2,
 } from 'three/tsl';
 
 import { WORLD, TEXEL, MAX_ANTS, gfx } from './config.js';
+import { sampleCorridorSurfaceTSL } from './navigation/corridor-sampling-tsl.js';
 
 // ---------------------------------------------------------------------------
 // Algèbre des quaternions (le vertex shader n'utilise que `qrot`)
@@ -48,6 +49,26 @@ const qMul = ( a, b ) => vec4(
 const qYaw = ( a ) => { const h = a.mul( 0.5 ); return vec4( 0, sin( h ), 0, cos( h ) ); };
 const qPitch = ( a ) => { const h = a.mul( 0.5 ); return vec4( sin( h ), 0, 0, cos( h ) ); };
 const qRoll = ( a ) => { const h = a.mul( 0.5 ); return vec4( 0, 0, sin( h ), cos( h ) ); };
+const qAxis = ( axis, angle ) => {
+
+	const half = angle.mul( 0.5 );
+	return vec4( axis.mul( sin( half ) ), cos( half ) );
+
+};
+const qFromSupport = ( up, forward ) => {
+
+	// Rotation minimale +Y → up, puis lacet autour de ce nouvel axe pour
+	// envoyer +Z vers la tangente de marche. Le cas plafond (up≈-Y) possède un
+	// fallback déterministe à 180° autour de X.
+	const w = float( 1 ).add( up.y );
+	const regular = normalize( vec4( up.z, 0, up.x.negate(), max( w, 1e-6 ) ) );
+	const qUp = select( w.greaterThan( 1e-5 ), regular, vec4( 1, 0, 0, 0 ) );
+	const initialForward = qrot( qUp, vec3( 0, 0, 1 ) );
+	const turn = atan( dot( cross( initialForward, forward ), up ),
+		dot( initialForward, forward ) );
+	return qMul( qAxis( up, turn ), qUp );
+
+};
 
 // drapeaux publiés dans antPose[3i+2].w :
 // kind + 4·souterraine + 8·reine + 16·porteuse + 32·attaque
@@ -150,8 +171,25 @@ export function createPose( sim, vat ) {
 			const pivotY = select( isSoldier, u.soldierPivotY, u.pivotY );
 			const modelHeight = select( isSoldier, u.soldierHeight, u.workerHeight );
 
-			// Sous terre, antDyn.z est la profondeur continue de la courbe 3D.
-			const solY = select( under, dyn.z.add( 0.04 ), float( 0 ) ).toVar();
+			// Point de contact et base d'attitude. Dans une chambre, le support est le
+			// plancher horizontal. Dans un corridor, il vient du repère 360° partagé.
+			const solY = select( under, dyn.z, float( 0 ) ).toVar();
+			const support = vec3( 0, 1, 0 ).toVar();
+			const forward = vec3( cos( a.z ), 0, sin( a.z ) ).toVar();
+			const navEdge = dyn.x.add( 0.5 ).toInt();
+			const navNode = st.shiftRight( uint( 7 ) ).bitAnd( uint( 127 ) ).toInt();
+
+			If( under.and( navEdge.greaterThan( int( 0 ) ) ), () => {
+
+				const meta = textureLoad( layout.corridorMetaTexture, ivec2( navEdge, int( 0 ) ) );
+				const direction = select( meta.x.add( 0.5 ).toInt().equal( navNode ),
+					float( 1 ), float( - 1 ) );
+				const surface = sampleCorridorSurfaceTSL(
+					layout, navEdge, dyn.y, direction, instanceIndex );
+				support.assign( surface.support );
+				forward.assign( surface.forward );
+
+			} );
 
 			const yaw = float( Math.PI / 2 ).sub( a.z );
 			const pitch = float( 0 ).toVar();
@@ -245,13 +283,17 @@ export function createPose( sim, vat ) {
 
 			} );
 
-			const q = qMul( qMul( qYaw( yaw ), qPitch( pitch ) ), qRoll( roll ) );
+			const qBase = select( under, qFromSupport( support, forward ), qYaw( yaw ) );
+			const q = qMul( qMul( qBase, qPitch( pitch ) ), qRoll( roll ) );
 
-			const world = vec3(
+			const contact = vec3(
 				a.x.mul( TEXEL ).sub( WORLD / 2 ),
-				solY.add( pivotY.mul( scale ) ).add( lift ),
+				solY,
 				a.y.mul( TEXEL ).sub( WORLD / 2 ),
 			);
+			const soleInset = select( under, float( 0.018 ), float( 0 ) );
+			const world = contact.add( support.mul(
+				pivotY.mul( scale ).add( lift ).add( soleInset ) ) );
 
 			const ragdolled = antRagSlot.element( instanceIndex ).notEqual( uint( 0 ) );
 			const kind = select( ragdolled.and( dead ), float( POSE_RAGDOLL ),

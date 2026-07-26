@@ -19,9 +19,9 @@
 import * as THREE from 'three/webgpu';
 import {
 	Fn, If, uniform, uniformArray, instancedArray, instanceIndex, storage,
-	positionLocal, float, uint, vec2, vec3, vec4, ivec2,
-	cos, sin, length, min, max, clamp, pow, select, hash,
-	atomicAdd, atomicSub, textureLoad,
+	positionLocal, float, uint, vec2, vec3, vec4,
+	cos, sin, length, min, max, pow, select, hash,
+	atomicAdd, atomicSub,
 } from 'three/tsl';
 
 import { GRID, WORLD, NEST, MAX_BROOD, params, gfx } from './config.js';
@@ -30,7 +30,12 @@ import {
 	buildNest, growNest, nestParams,
 	LAYERS, K_MAX, DEPTH_SIZE as NEST_DEPTH_SIZE,
 } from './nest.js';
-import { buildCorridorNetwork, CORRIDOR_SAMPLES, validateNetwork } from './navigation/corridor-network.js';
+import {
+	buildCorridorNetwork, buildCorridorNetworkAsync,
+	CORRIDOR_SAMPLES, CORRIDOR_SURFACE_TRACKS, validateNetwork,
+} from './navigation/corridor-network.js';
+import { createNestMutationQueue } from './navigation/nest-mutation-transaction.js';
+import { colonyTroughSnapshot, troughRenderDepth } from './colony-layout.js';
 
 const TEXEL = WORLD / GRID;
 
@@ -55,10 +60,40 @@ export { LAYERS };
 const MAX_NODES = 128;                 // 7 bits dans antState
 const MAX_GOALS = 8;                   // 3 bits dans antState
 
-export function buildNestLayout() {
+const navigationOptions = ( source ) => ( {
+	samples: CORRIDOR_SAMPLES,
+	maxNodes: MAX_NODES,
+	tunnelWidth: source.tunnelW,
+	agentRadiusWorld: 0.45 * 1.45,
+	safetyWorld: 0.05,
+} );
 
-	const np = nestParams();
-	let nest = buildNest( np.K, np.depthMax, np.tunnelW );
+function surfaceWorkerOptions( options = {} ) {
+
+	return {
+		maxSurfaceWorkers: options.maxSurfaceWorkers,
+		surfaceWorkerTimeoutMs: options.surfaceWorkerTimeoutMs,
+		surfaceWorkerFactory: options.surfaceWorkerFactory,
+	};
+
+}
+
+function mutationCommitHook( options = {} ) {
+
+	const hook = typeof options === 'function' ? options : options.beforeCommit;
+	if ( hook !== undefined && typeof hook !== 'function' )
+		throw new TypeError( 'beforeCommit must be a function' );
+	return hook;
+
+}
+
+function createNestLayout(
+	initialNest, initialNavigation = null, asyncWorkerOptions = {},
+) {
+
+	let nest = initialNest;
+	const mutationQueue = createNestMutationQueue();
+	const workerOptions = surfaceWorkerOptions( asyncWorkerOptions );
 
 	// carte de profondeur : R,G,B,A = plancher des nappes 0..3 (0 = pas de cavite)
 	const depthTexture = new THREE.DataTexture(
@@ -90,15 +125,31 @@ export function buildNestLayout() {
 	// d'arc uniforme : (x grille, z grille, profondeur monde, marge de voie).
 	let navigation = null;
 	const corridorData = new Float32Array( MAX_NODES * CORRIDOR_SAMPLES * 4 );
+	const corridorFrameData = new Float32Array( MAX_NODES * CORRIDOR_SAMPLES * 4 );
+	const corridorSurfaceData = new Float32Array(
+		MAX_NODES * CORRIDOR_SAMPLES * CORRIDOR_SURFACE_TRACKS * 4 );
+	const corridorSurfaceSupportData = new Float32Array(
+		MAX_NODES * CORRIDOR_SAMPLES * CORRIDOR_SURFACE_TRACKS * 4 );
 	const corridorMetaData = new Float32Array( MAX_NODES * 4 );
 	const navNodeData = new Float32Array( MAX_NODES * 4 );
 	const corridorTexture = new THREE.DataTexture(
 		corridorData, CORRIDOR_SAMPLES, MAX_NODES, THREE.RGBAFormat, THREE.FloatType );
+	const corridorFrameTexture = new THREE.DataTexture(
+		corridorFrameData, CORRIDOR_SAMPLES, MAX_NODES, THREE.RGBAFormat, THREE.FloatType );
+	const corridorSurfaceTexture = new THREE.DataTexture(
+		corridorSurfaceData, CORRIDOR_SAMPLES * CORRIDOR_SURFACE_TRACKS,
+		MAX_NODES, THREE.RGBAFormat, THREE.FloatType );
+	const corridorSurfaceSupportTexture = new THREE.DataTexture(
+		corridorSurfaceSupportData, CORRIDOR_SAMPLES * CORRIDOR_SURFACE_TRACKS,
+		MAX_NODES, THREE.RGBAFormat, THREE.FloatType );
 	const corridorMetaTexture = new THREE.DataTexture(
 		corridorMetaData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
 	const navNodeTexture = new THREE.DataTexture(
 		navNodeData, MAX_NODES, 1, THREE.RGBAFormat, THREE.FloatType );
-	for ( const texture of [ corridorTexture, corridorMetaTexture, navNodeTexture ] ) {
+	for ( const texture of [
+		corridorTexture, corridorFrameTexture, corridorSurfaceTexture, corridorSurfaceSupportTexture,
+		corridorMetaTexture, navNodeTexture,
+	] ) {
 
 		texture.minFilter = texture.magFilter = THREE.NearestFilter;
 		texture.generateMipmaps = false;
@@ -111,23 +162,39 @@ export function buildNestLayout() {
 
 	const layout = {
 		depthTexture, navTexture, nodeTexture,
-		corridorTexture, corridorMetaTexture, navNodeTexture,
+		corridorTexture, corridorFrameTexture, corridorSurfaceTexture, corridorSurfaceSupportTexture,
+		corridorMetaTexture, navNodeTexture,
 		origin: nest.origin,
-		LAYERS, MAX_NODES, CORRIDOR_SAMPLES,
+		LAYERS, MAX_NODES, CORRIDOR_SAMPLES, CORRIDOR_SURFACE_TRACKS,
+	};
+	const publishListeners = new Set();
+	layout.onPublished = ( listener ) => {
+
+		if ( typeof listener !== 'function' )
+			throw new TypeError( 'Nest publish listener must be a function' );
+		publishListeners.add( listener );
+		return () => publishListeners.delete( listener );
+
 	};
 
-	const compileNavigation = ( source ) => buildCorridorNetwork( source, {
-		samples: CORRIDOR_SAMPLES,
-		maxNodes: MAX_NODES,
-		tunnelWidth: source.tunnelW,
-		agentRadiusWorld: 0.45 * 1.45,
-		safetyWorld: 0.05,
+	const compileNavigation = ( source ) => buildCorridorNetwork(
+		source, navigationOptions( source ) );
+	const compileNavigationAsync = ( source ) => buildCorridorNetworkAsync( source, {
+		...navigationOptions( source ),
+		...workerOptions,
 	} );
+
+	function assertValidNavigation( candidate ) {
+
+		const verdict = validateNetwork( candidate );
+		if ( ! verdict.ok )
+			throw new Error( `Invalid navigation candidate: ${ verdict.errors.join( '; ' ) }` );
+
+	}
 
 	function assertAppendOnlyNavigation( previous, candidate ) {
 
-		const verdict = validateNetwork( candidate );
-		if ( ! verdict.ok ) throw new Error( `Invalid navigation candidate: ${ verdict.errors.join( '; ' ) }` );
+		assertValidNavigation( candidate );
 		const fail = ( part, index ) => {
 
 			throw new Error( `Nest growth changed occupied navigation (${ part } ${ index })` );
@@ -149,8 +216,21 @@ export function buildNestLayout() {
 				fail( 'corridor', edge );
 			const start = edge * CORRIDOR_SAMPLES * 4;
 			const end = start + CORRIDOR_SAMPLES * 4;
-			for ( let i = start; i < end; i ++ ) if ( previous.sampleData[ i ] !== candidate.sampleData[ i ] )
-				fail( 'sample', i );
+			for ( let i = start; i < end; i ++ ) {
+
+				if ( previous.sampleData[ i ] !== candidate.sampleData[ i ] ) fail( 'sample', i );
+				if ( previous.frameData[ i ] !== candidate.frameData[ i ] ) fail( 'frame', i );
+
+			}
+			const surfaceStart = edge * CORRIDOR_SURFACE_TRACKS * CORRIDOR_SAMPLES * 4;
+			const surfaceEnd = surfaceStart + CORRIDOR_SURFACE_TRACKS * CORRIDOR_SAMPLES * 4;
+			for ( let i = surfaceStart; i < surfaceEnd; i ++ ) {
+
+				if ( previous.surfaceData[ i ] !== candidate.surfaceData[ i ] ) fail( 'surface', i );
+				if ( previous.surfaceSupportData[ i ] !== candidate.surfaceSupportData[ i ] )
+					fail( 'surface-support', i );
+
+			}
 
 		}
 		for ( let node = 0; node < oldNodes; node ++ ) for ( let goal = 0; goal < previous.maxGoals; goal ++ ) {
@@ -168,9 +248,15 @@ export function buildNestLayout() {
 		nodeData.fill( 0 );
 		navigation = compiled ?? compileNavigation( nest );
 		corridorData.set( navigation.sampleData );
+		corridorFrameData.set( navigation.frameData );
+		corridorSurfaceData.set( navigation.surfaceData );
+		corridorSurfaceSupportData.set( navigation.surfaceSupportData );
 		corridorMetaData.set( navigation.metaData );
 		navNodeData.set( navigation.nodeData );
 		corridorTexture.needsUpdate = true;
+		corridorFrameTexture.needsUpdate = true;
+		corridorSurfaceTexture.needsUpdate = true;
+		corridorSurfaceSupportTexture.needsUpdate = true;
 		corridorMetaTexture.needsUpdate = true;
 		navNodeTexture.needsUpdate = true;
 
@@ -232,48 +318,141 @@ export function buildNestLayout() {
 			x: u.x, y: u.y, R: u.R, depth: u.depth, layer: u.layer, type: u.type,
 		} ) );
 
+		for ( const listener of publishListeners ) try {
+
+			listener( layout );
+
+		} catch ( error ) {
+
+			console.error( 'Nest publish listener failed', error );
+
+		}
+
 	}
 
-	publish();
+	publish( initialNavigation );
 
-	// CROISSANCE : ajoute des loges sans jamais deplacer les anciennes.
-	// Renvoie true si quelque chose a change (l'appelant re-creuse et republie).
-	layout.growTo = function ( K ) {
+	function commitGrowth( rebuilt, target, candidateNavigation ) {
 
-		const target = Math.min( K_MAX, K );
-		if ( target <= nest.K ) return false;
-		// le graphe doit etre recalcule : on rebatit a l'identique (l'invariant
-		// garantit que les loges deja creusees retombent aux memes coordonnees)
-		// on ne recalcule QUE le graphe : le creusage vient d'etre fait de maniere
-		// incrementale ci-dessus, re-creuser tout serait du travail jete
-		const rebuilt = buildNest( target, nest.depthMax, nest.tunnelW, false );
-		const candidateNavigation = compileNavigation( rebuilt );
-		// Validation AVANT toute mutation : une croissance qui déplacerait le
-		// préfixe occupé échoue sans creuser un seul texel.
-		assertAppendOnlyNavigation( navigation, candidateNavigation );
+		// No shared field or public layout state changes before this short commit.
 		growNest( nest, target, nest.tunnelW );
 		nest.K = target;
-		rebuilt.field = nest.field;              // on garde le creusage cumule
+		rebuilt.field = nest.field;
 		rebuilt.depthAt = nest.depthAt;
 		nest = rebuilt;
 		publish( candidateNavigation );
+
+	}
+
+	function commitRebuild( fresh, candidateNavigation ) {
+
+		// Keep the DataTexture allocation stable while replacing all of its data.
+		nest.field.set( fresh.field );
+		fresh.field = nest.field;
+		nest = fresh;
+		publish( candidateNavigation );
+
+	}
+
+	// Synchronous variants remain explicit for deterministic Node tests and
+	// Warden. They refuse to race an in-flight UI transaction.
+	layout.growTo = function ( K ) {
+
+		mutationQueue.assertIdle( 'growTo' );
+		const target = Math.min( K_MAX, K );
+		if ( target <= nest.K ) return false;
+		const rebuilt = buildNest( target, nest.depthMax, nest.tunnelW, false );
+		const candidateNavigation = compileNavigation( rebuilt );
+		assertAppendOnlyNavigation( navigation, candidateNavigation );
+		commitGrowth( rebuilt, target, candidateNavigation );
 		return true;
 
 	};
 
-	// RECONSTRUCTION COMPLETE (profondeur ou largeur de tunnel changee, reset)
-	layout.rebuild = function () {
+	layout.growToAsync = function ( K, options = {} ) {
 
-		const p = nestParams();
-		const fresh = buildNest( p.K, p.depthMax, p.tunnelW );
-		nest.field.set( fresh.field );
-		fresh.field = nest.field;
-		nest = fresh;
-		publish();
+		const requestedTarget = Math.min( K_MAX, K );
+		const beforeCommit = mutationCommitHook( options );
+		return mutationQueue.run( async () => {
+
+			if ( requestedTarget <= nest.K ) return false;
+			const fromK = nest.K;
+			const rebuilt = buildNest(
+				requestedTarget, nest.depthMax, nest.tunnelW, false );
+			const candidateNavigation = await compileNavigationAsync( rebuilt );
+			// Validation happens after the worker result and before touching the
+			// cumulative field, textures, topology or public layout properties.
+			assertAppendOnlyNavigation( navigation, candidateNavigation );
+			if ( beforeCommit ) await beforeCommit( {
+				kind: 'growth', fromK, toK: requestedTarget,
+			} );
+			commitGrowth( rebuilt, requestedTarget, candidateNavigation );
+			return true;
+
+		} );
 
 	};
 
+	// RECONSTRUCTION COMPLETE (depth or tunnel width change, with reset).
+	layout.rebuild = function () {
+
+		mutationQueue.assertIdle( 'rebuild' );
+		const p = nestParams();
+		const fresh = buildNest( p.K, p.depthMax, p.tunnelW );
+		const candidateNavigation = compileNavigation( fresh );
+		assertValidNavigation( candidateNavigation );
+		commitRebuild( fresh, candidateNavigation );
+		return true;
+
+	};
+
+	layout.rebuildAsync = function ( options = {} ) {
+
+		// Snapshot settings at request time; FIFO serialization preserves order.
+		const p = nestParams();
+		const beforeCommit = mutationCommitHook( options );
+		return mutationQueue.run( async () => {
+
+			const fromK = nest.K;
+			const fresh = buildNest( p.K, p.depthMax, p.tunnelW );
+			const candidateNavigation = await compileNavigationAsync( fresh );
+			assertValidNavigation( candidateNavigation );
+			if ( beforeCommit ) await beforeCommit( {
+				kind: 'rebuild', fromK, toK: p.K,
+			} );
+			commitRebuild( fresh, candidateNavigation );
+			return true;
+
+		} );
+
+	};
+
+	Object.defineProperties( layout, {
+		nestMutationBusy: { enumerable: true, get: () => mutationQueue.busy },
+		nestMutationPending: { enumerable: true, get: () => mutationQueue.pending },
+	} );
+
 	return layout;
+
+}
+
+export function buildNestLayout() {
+
+	const np = nestParams();
+	return createNestLayout( buildNest( np.K, np.depthMax, np.tunnelW ) );
+
+}
+
+export async function buildNestLayoutAsync( workerOptions = {} ) {
+
+	const np = nestParams();
+	const nest = buildNest( np.K, np.depthMax, np.tunnelW );
+	const asyncOptions = surfaceWorkerOptions( workerOptions );
+	const navigation = await buildCorridorNetworkAsync( nest, {
+		...navigationOptions( nest ),
+		...asyncOptions,
+	} );
+	return createNestLayout( nest, navigation, asyncOptions );
 
 }
 
@@ -292,7 +471,12 @@ export function createColony( { scene, sim, renderer, layout } ) {
 		hatchBlocked: uniform( 0 ),          // population au plafond : les nymphes attendent
 		nursesExist: uniform( 1 ),           // ≥1 nourrice → les œufs sont transportés au couvain
 		broodTrough: uniform( layout.troughs.brood.cell ),
-		broodTroughPos: uniform( new THREE.Vector2( layout.troughs.brood.x, layout.troughs.brood.y ) ),
+		broodTroughPos: uniform( new THREE.Vector2(
+			layout.troughs.brood.x, layout.troughs.brood.y ) ),
+		queenTroughPos: uniform( new THREE.Vector2(
+			layout.troughs.queen.x, layout.troughs.queen.y ) ),
+		queenFloorDepth: uniform( troughRenderDepth( layout, layout.troughs.queen ) ),
+		broodFloorDepth: uniform( troughRenderDepth( layout, layout.troughs.brood ) ),
 		eggCount: uniform( 0 ),              // œufs à semer cette frame
 		eggRing: uniform( 0 ),               // tête de l'anneau d'allocation des slots
 	};
@@ -457,20 +641,15 @@ export function createColony( { scene, sim, renderer, layout } ) {
 
 	const broodMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.35, metalness: 0 } );
 
-	const depthOrigin = vec2( layout.origin.x, layout.origin.y );
-
-	// profondeur du plancher au point (texels) — même source que le plancher
+	// Eggs start in the royal chamber and are carried to the brood chamber.
+	// Both floors are explicit published anchors: overlapping deeper layers can
+	// never pull the render down. The closest anchor selects the current layer.
 	const floorY = ( pos ) => {
 
-		const c = clamp(
-			ivec2( pos.sub( depthOrigin ) ),
-			ivec2( 0 ), ivec2( DEPTH_SIZE - 1 ),
-		);
-		// couvain et tas de nourriture : ils vivent dans une chambre donnee, on
-		// prend donc la cavite la plus PROFONDE de la colonne (celle qui les
-		// porte) plutot que la nappe 0
-		const t = textureLoad( layout.depthTexture, c );
-		return min( min( t.x, t.y ), min( t.z, t.w ) );
+		const queenDistance = length( pos.sub( u.queenTroughPos ) );
+		const broodDistance = length( pos.sub( u.broodTroughPos ) );
+		return select( broodDistance.lessThanEqual( queenDistance ),
+			u.broodFloorDepth, u.queenFloorDepth );
 
 	};
 
@@ -538,17 +717,38 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	// ------------------------------------------------------------------
 	const foodRead = storage( sim.food.value, 'uint', GRID * GRID );
 
-	const troughList = [ layout.troughs.granary, layout.troughs.queen, layout.troughs.brood ];
-	const troughVecs = troughList.map( ( t ) => new THREE.Vector4(
-		t.x, t.y, layout.depthAt( t.x, t.y ), t.cell,
+	const initialTroughs = colonyTroughSnapshot( layout );
+	const troughVecs = initialTroughs.map( ( trough ) => new THREE.Vector4(
+		trough.x, trough.y, trough.depth, trough.cell,
 	) );
 	const uTroughs = uniformArray( troughVecs );
+
+	function refreshLayoutAnchors() {
+
+		const troughs = colonyTroughSnapshot( layout );
+		u.broodTrough.value = layout.troughs.brood.cell;
+		u.broodTroughPos.value.set(
+			layout.troughs.brood.x, layout.troughs.brood.y );
+		u.queenTroughPos.value.set(
+			layout.troughs.queen.x, layout.troughs.queen.y );
+		u.queenFloorDepth.value = troughs[ 1 ].depth;
+		u.broodFloorDepth.value = troughs[ 2 ].depth;
+		for ( let index = 0; index < troughs.length; index ++ ) {
+
+			const trough = troughs[ index ];
+			troughVecs[ index ].set(
+				trough.x, trough.y, trough.depth, trough.cell );
+
+		}
+
+	}
+	const stopLayoutRefresh = layout.onPublished?.( refreshLayoutAnchors );
 
 	const pileGeo = new THREE.InstancedBufferGeometry();
 	const hemi = new THREE.SphereGeometry( 1, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2 );
 	pileGeo.index = hemi.index;
 	pileGeo.attributes = hemi.attributes;
-	pileGeo.instanceCount = troughList.length;
+	pileGeo.instanceCount = troughVecs.length;
 
 	const pileMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.5, metalness: 0 } );
 	const uPileColor = uniform( new THREE.Color( gfx.foodColor ) );
@@ -735,7 +935,8 @@ export function createColony( { scene, sim, renderer, layout } ) {
 		uEggColor, uLarvaColor, uPupaColor,
 		uScanFx, uScanBroodColor, uScanFoodColor,
 		broodMesh, piles,
-		step, reset, onStats,
+		step, reset, onStats, refreshLayout: refreshLayoutAnchors,
+		disposeLayoutBinding: () => stopLayoutRefresh?.(),
 		setVisible( v ) {
 
 			broodMesh.visible = v;

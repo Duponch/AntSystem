@@ -9,6 +9,90 @@
 // sim étant stochastique, les assertions sont des BORNES, pas des exacts.
 
 import { params, gfx, NEST } from './config.js';
+import { STARTUP_DELAY } from './colony-startup.js';
+import {
+	CORRIDOR_SURFACE_TRACKS,
+	sampleCorridorSurface,
+} from './navigation/corridor-network.js';
+import { chamberPrimitive } from './navigation/support-geometry.js';
+
+const CONFINEMENT_EPSILON_WORLD = 0.005;
+
+// Oracle CPU du contrat NAV-SURFACE utilisé par T4. Une enceinte radiale ne
+// représente plus un nid adaptatif : une chambre légitime peut se trouver bien
+// au-delà de l'ancien rayon de 130 texels. L'état intrinsèque est l'autorité :
+// edge=0 doit rester dans le patch du nœud encodé ; edge>0 doit coïncider avec
+// l'une des pistes de contact réellement compilées.
+export function undergroundConfinementIssue( layout, antId, packedState, data, dyn ) {
+
+	const lifeState = packedState & 7;
+	if ( ( packedState & 8 ) === 0 || lifeState >= 2 ) return null;
+	const navigation = layout?.navigation;
+	const node = ( packedState >>> 7 ) & 127;
+	const navNode = navigation?.nodes?.[ node ];
+	if ( ! navNode ) return `nœud ${ node } invalide`;
+
+	const x = data[ 0 ], y = data[ 1 ];
+	const edge = Math.round( dyn[ 0 ] );
+	const progress = dyn[ 1 ];
+	const depth = dyn[ 2 ];
+	if ( ! [ x, y, edge, progress, depth ].every( Number.isFinite ) )
+		return 'état intrinsèque non fini';
+
+	if ( edge === 0 ) {
+
+		const unit = node >= 2 ? layout.units?.[ node - 2 ] : null;
+		if ( unit ) {
+
+			const chamber = chamberPrimitive( unit );
+			const dx = ( x - unit.x ) * navigation.texel;
+			const dz = ( y - unit.y ) * navigation.texel;
+			const dy = depth - ( unit.depth + unit.rh * 0.5 );
+			const ellipsoid = ( dx / chamber.radiusX ) ** 2
+				+ ( dy / chamber.radiusY ) ** 2
+				+ ( dz / chamber.radiusZ ) ** 2;
+			if ( depth < chamber.floorDepth - CONFINEMENT_EPSILON_WORLD
+				|| ellipsoid > 1 + CONFINEMENT_EPSILON_WORLD )
+				return `hors chambre du nœud ${ node }`;
+			return null;
+
+		}
+
+		// L'entrée et le vestibule n'ont pas de primitive de chambre : leur
+		// patch compact est l'enceinte physique qui relie les corridors.
+		const radius = Math.max( 0.1, navNode.radius * 0.5 + 0.1 );
+		if ( Math.hypot( x - navNode.x, y - navNode.y ) > radius )
+			return `hors patch du nœud ${ node }`;
+		if ( Math.abs( depth - navNode.depth ) > CONFINEMENT_EPSILON_WORLD )
+			return `profondeur hors nœud ${ node }`;
+		return null;
+
+	}
+
+	const corridor = navigation.corridors?.[ edge ];
+	if ( ! corridor ) return `arête ${ edge } invalide`;
+	if ( corridor.from !== node && corridor.to !== node )
+		return `arête ${ edge } non incidente au nœud ${ node }`;
+	if ( progress < - 1e-5 || progress > 1.00001 )
+		return `progression ${ progress } hors arête`;
+
+	let closest = Infinity;
+	for ( let track = 0; track < CORRIDOR_SURFACE_TRACKS; track ++ ) {
+
+		const angle = track / CORRIDOR_SURFACE_TRACKS * Math.PI * 2;
+		const expected = sampleCorridorSurface( navigation, edge, progress, angle, 1 );
+		closest = Math.min( closest, Math.hypot(
+			( x - expected.x ) * navigation.texel,
+			depth - expected.depth,
+			( y - expected.y ) * navigation.texel,
+		) );
+
+	}
+	return closest <= CONFINEMENT_EPSILON_WORLD
+		? null
+		: `hors piste ${ edge } (${ closest.toFixed( 4 ) } u)`;
+
+}
 
 export function createColonyTests( { sim, colony, spiders, ants, cones, renderer } ) {
 
@@ -42,7 +126,16 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 		const st = new Uint32Array( await renderer.getArrayBufferAsync( sim.antState.value, null, 0, n * 4 ) );
 		const d = new Float32Array( await renderer.getArrayBufferAsync( sim.antData.value, null, 0, n * 16 ) );
 		const v = new Float32Array( await renderer.getArrayBufferAsync( sim.antVital.value, null, 0, n * 16 ) );
-		return { st, d, v, n };
+		const dyn = new Float32Array( await renderer.getArrayBufferAsync( sim.antDyn.value, null, 0, n * 16 ) );
+		return { st, d, v, dyn, n };
+
+	}
+
+	async function readAntStates( n ) {
+
+		n = Math.min( n, params.antCount );
+		return new Uint32Array(
+			await renderer.getArrayBufferAsync( sim.antState.value, null, 0, n * 4 ) );
 
 	}
 
@@ -89,36 +182,81 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 
 		try {
 
-			// T1 — castes & spawn : reine en chambre royale, nourrices sous terre,
-			// énergie initiale randomisée non nulle
+			// T1 — COL-START : une colonie établie reprend depuis ses chambres.
+			// La reine est déjà active ; toutes les autres activités sont échelonnées.
 			{
 
 				params.antCount = 869;
 				sim.u.antCount.value = 869;
 				await sim.reset();
 				await colony.reset();
-				const { st, d, v, n } = await readAntSample( 869 );
+				const { st, d, v, dyn, n } = await readAntSample( 869 );
 				const queenUnder = ( st[ 0 ] & 8 ) !== 0;
 				const qx = d[ 0 ], qy = d[ 1 ];
 				const L = sim.layout;
 				const dQueen = Math.hypot( qx - L.troughs.queen.x, qy - L.troughs.queen.y );
-				let under = 0, badEnergy = 0;
+				const queenMission = ( ( st[ 0 ] >> 4 ) & 7 ) === 0
+					&& ( ( st[ 0 ] >> 7 ) & 127 ) === L.GOAL_NODE[ 2 ];
+				const homeAtEntrance = Math.hypot(
+					sim.u.nest.value.x - L.entry.x, sim.u.nest.value.y - L.entry.y,
+				) < 1e-6;
+				const exitNodes = new Set();
+				let under = 0, awaitingActivation = 0, nurseMissions = 0;
+				let badEnergy = 0, badDelay = 0, badMission = 0, badNode = 0;
+				let badContact = 0, badIntrinsicState = 0;
 
 				for ( let i = 0; i < n; i ++ ) {
 
 					if ( st[ i ] & 8 ) under ++;
+					if ( d[ i * 4 + 3 ] < 0 ) awaitingActivation ++;
 					if ( v[ i * 4 + 2 ] < 0.45 || v[ i * 4 + 2 ] > 1.001 ) badEnergy ++;
+					if ( i === 0 ) continue;
+
+					const goal = ( st[ i ] >> 4 ) & 7;
+					const node = ( st[ i ] >> 7 ) & 127;
+					const delay = - d[ i * 4 + 3 ];
+					if ( delay < STARTUP_DELAY.ESTABLISHED_MIN - 1e-4
+						|| delay > STARTUP_DELAY.ESTABLISHED_MAX + 1e-4 ) badDelay ++;
+					if ( node < 0 || node >= L.nodeCount ) { badNode ++; continue; }
+					if ( goal === 1 ) {
+
+						nurseMissions ++;
+						if ( node !== L.GOAL_NODE[ 3 ] ) badMission ++;
+
+					} else if ( goal === 4 ) {
+
+						if ( node < 2 ) badMission ++;
+						exitNodes.add( node );
+
+					} else badMission ++;
+
+					const navNode = L.navigation.nodes[ node ];
+					const scatter = Math.hypot( d[ i * 4 ] - navNode.x, d[ i * 4 + 1 ] - navNode.y );
+					const scatterMax = Math.min( params.seatScatter, navNode.radius * 0.35 ) + 0.05;
+					if ( scatter > scatterMax || Math.abs( dyn[ i * 4 + 2 ] - navNode.depth ) > 0.002 )
+						badContact ++;
+					if ( Math.abs( dyn[ i * 4 ] ) > 1e-5 || Math.abs( dyn[ i * 4 + 1 ] ) > 1e-5
+						|| Math.abs( dyn[ i * 4 + 3 ] ) > 1e-5 ) badIntrinsicState ++;
 
 				}
 
-				const expectedNurses = params.nurseRatio * n;
-				report( 'T1 castes & spawn', queenUnder && dQueen < 8 && under > expectedNurses * 0.5
-					&& under < expectedNurses * 2 + 10 && badEnergy === 0,
-				`reine sous terre=${queenUnder} à ${dQueen.toFixed( 1 )} texels de sa chambre ; ` +
-					`${under} sous terre (~${Math.round( expectedNurses )} attendues) ; énergies hors borne=${badEnergy}` );
+				const expectedNurses = sim.u.nurseRatio.value * ( n - 1 );
+				const nurseTolerance = Math.max( 12, 6 * Math.sqrt(
+					Math.max( 0, expectedNurses * ( 1 - sim.u.nurseRatio.value ) ),
+				) );
+				const nurseDistributionOk = Math.abs( nurseMissions - expectedNurses ) <= nurseTolerance;
+				const distributedHomes = exitNodes.size >= Math.min( 8, Math.max( 1, L.nodeCount - 2 ) );
+				const startupOk = queenUnder && queenMission && dQueen < 8 && under === n
+					&& awaitingActivation === n - 1 && badEnergy === 0 && badDelay === 0
+					&& badMission === 0 && badNode === 0 && badContact === 0
+					&& badIntrinsicState === 0 && nurseDistributionOk && distributedHomes && homeAtEntrance;
+				report( 'T1 démarrage naturel', startupOk,
+					`reine=${queenUnder}/${queenMission} ; ${under}/${n} sous terre ; ` +
+					`${awaitingActivation} activations ; nourrices=${nurseMissions}/${expectedNurses.toFixed( 1 )} ; ` +
+					`foyers=${exitNodes.size} ; délais=${badDelay}, missions=${badMission}, contacts=${badContact}, ` +
+					`intrinsèques=${badIntrinsicState}, énergies=${badEnergy}, bouche=${homeAtEntrance}` );
 
 			}
-
 			// T2 — ponte quand la reine est nourrie
 			{
 
@@ -161,19 +299,31 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 			// T4 — les souterraines restent dans l'enceinte de la fourmilière
 			{
 
-				const { st, d, n } = await readAntSample( 2048 );
+				const { st, d, dyn, n } = await readAntSample( 2048 );
 				let out = 0, under = 0;
+				const examples = [];
 
 				for ( let i = 0; i < n; i ++ ) {
 
 					if ( ( st[ i ] & 8 ) === 0 || ( st[ i ] & 7 ) >= 2 ) continue;
 					under ++;
-					if ( Math.hypot( d[ i * 4 ] - NEST.x, d[ i * 4 + 1 ] - NEST.y ) > 130 ) out ++;
+					const issue = undergroundConfinementIssue(
+						sim.layout, i, st[ i ],
+						d.subarray( i * 4, i * 4 + 4 ),
+						dyn.subarray( i * 4, i * 4 + 4 ),
+					);
+					if ( issue ) {
+
+						out ++;
+						if ( examples.length < 3 ) examples.push( `#${ i } ${ issue }` );
+
+					}
 
 				}
 
 				report( 'T4 souterraines confinées au nid', under > 0 && out === 0,
-					`${under} sous terre, ${out} hors de l'enceinte (>130 texels)` );
+					`${under} sous terre, ${out} hors du réseau intrinsèque`
+					+ ( examples.length ? ` (${ examples.join( ' ; ' ) })` : '' ) );
 
 			}
 
@@ -183,21 +333,54 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 				await sim.reset();
 				await colony.reset();
 				// gros gisement à 45 texels du nid : ramassage quasi immédiat
-				sim.queueBrush( NEST.x + 45, NEST.y, 0, 12, params.foodAmount );
+				sim.queueBrush( sim.layout.entry.x + 45, sim.layout.entry.y, 0, 12, params.foodAmount );
 				sim.drainBrush();
 
 				let delivered = 0;
+				let returnedCarriers = 0;
+				const trackedN = Math.min( 2048, params.antCount );
+				const initialStates = await readAntStates( trackedN );
+				const startedUnderground = Uint8Array.from(
+					initialStates, ( packed ) => ( packed & 8 ) !== 0 ? 1 : 0 );
+				const seenSurface = new Uint8Array( trackedN );
+				const seenCarryingOnSurface = new Uint8Array( trackedN );
+				const countedReturn = new Uint8Array( trackedN );
 
-				for ( let k = 0; k < 24 && delivered === 0; k ++ ) {
+				// Poll every 2 s: the food patch is far enough that a carrier cannot
+				// complete its whole surface leg between two observations. A counted
+				// ant is proven to have left, carried food on the surface, then crossed
+				// back underground through the entrance.
+				for ( let k = 0; k < 60 && ( delivered === 0 || returnedCarriers === 0 ); k ++ ) {
 
-					await steps( 5 );
+					await steps( 2 );
+					const states = await readAntStates( trackedN );
+					for ( let i = 0; i < trackedN; i ++ ) {
+
+						const lifeState = states[ i ] & 7;
+						if ( lifeState >= 2 ) continue;
+						const underground = ( states[ i ] & 8 ) !== 0;
+						if ( startedUnderground[ i ] && ! underground ) {
+
+							seenSurface[ i ] = 1;
+							if ( lifeState === 1 ) seenCarryingOnSurface[ i ] = 1;
+
+						} else if ( seenSurface[ i ] && seenCarryingOnSurface[ i ] && ! countedReturn[ i ] ) {
+
+							countedReturn[ i ] = 1;
+							returnedCarriers ++;
+
+						}
+
+					}
 					const st = await tick();
 					delivered = st.delivered;
 
 				}
 
-				report( 'T5 livraison au grenier', delivered > 0,
-					`${delivered} livraison(s) au grenier en ≤120 s (gisement à 45 texels)` );
+				report( 'T5 aller-retour bouche + livraison au grenier',
+					delivered > 0 && returnedCarriers > 0,
+					`${returnedCarriers} porteuse(s) suivie(s) surface→sous-sol ; ` +
+					`${delivered} livraison(s) en ≤120 s (gisement à 45 texels)` );
 
 			}
 
@@ -254,7 +437,7 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 				sim.u.colonyOn.value = 0;
 				await sim.reset();
 				await colony.reset();
-				sim.queueBrush( NEST.x + 45, NEST.y, 0, 12, params.foodAmount );
+				sim.queueBrush( sim.layout.entry.x + 45, sim.layout.entry.y, 0, 12, params.foodAmount );
 				sim.drainBrush();
 				await steps( 45, false );
 				const st = await sim.readStatsDirect();
@@ -272,7 +455,9 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 
 				await sim.reset();
 				await colony.reset();
-				await steps( 3 );
+				// COL-START garde initialement toute la colonie au nid : on laisse
+				// l'activation et le trajet vers la surface se terminer avant l'échantillon.
+				await steps( 45 );
 
 				if ( spiders && spiders._dbg ) {
 
@@ -293,6 +478,61 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 
 			}
 
+			// T10 — le toggle migre toute la population, jamais un état hybride.
+			{
+
+				params.colony = true;
+				sim.u.colonyOn.value = 1;
+				await sim.reset();
+				await colony.reset();
+				const before = await readAntStates( 512 );
+				let beforeUnder = 0;
+				for ( const packed of before ) if ( packed & 8 ) beforeUnder ++;
+
+				params.colony = false;
+				const migratedOff = await sim.setColonyEnabled( false );
+				await colony.reset();
+				const off = await readAntStates( 512 );
+				let offUnder = 0, offHybrid = 0;
+				for ( const packed of off ) {
+
+					if ( packed & 8 ) offUnder ++;
+					if ( packed & 0xFFFFF8 ) offHybrid ++;
+
+				}
+
+				params.colony = true;
+				const migratedOn = await sim.setColonyEnabled( true );
+				await colony.reset();
+				const on = await readAntSample( 512 );
+				let onUnder = 0, onAwaiting = 0;
+				for ( let i = 0; i < on.n; i ++ ) {
+
+					if ( on.st[ i ] & 8 ) onUnder ++;
+					if ( i > 0 && on.d[ i * 4 + 3 ] < 0 ) onAwaiting ++;
+
+				}
+
+				// Deux clics sans await doivent être sérialisés : le dernier mode gagne,
+				// sans deux resets GPU concurrents.
+				const queuedOff = sim.setColonyEnabled( false );
+				const queuedOn = sim.setColonyEnabled( true );
+				const queuedMigrations = await Promise.all( [ queuedOff, queuedOn ] );
+				await colony.reset();
+				const queuedFinal = await readAntStates( 512 );
+				let queuedUnder = 0;
+				for ( const packed of queuedFinal ) if ( packed & 8 ) queuedUnder ++;
+
+				const toggleOk = beforeUnder === before.length
+					&& migratedOff && offUnder === 0 && offHybrid === 0
+					&& migratedOn && onUnder === on.n && onAwaiting === on.n - 1
+					&& queuedMigrations.every( Boolean ) && queuedUnder === queuedFinal.length;
+				report( 'T10 toggle colonie ON→OFF→ON atomique', toggleOk,
+					`avant=${beforeUnder}/${before.length} sous terre ; OFF=${offUnder}, hybrides=${offHybrid} ; `
+					+ `ON=${onUnder}/${on.n}, activations=${onAwaiting}, migrations=${migratedOff}/${migratedOn}, `
+					+ `file=${queuedMigrations.join( '/' )}→${queuedUnder}/${queuedFinal.length}` );
+
+			}
 		} finally {
 
 			// restauration complète
@@ -315,7 +555,12 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 
 		const passed = results.filter( ( r ) => r.pass ).length;
 		console.log( `🧪 Tests colonie : ${passed}/${results.length} OK` );
-		return { passed, total: results.length, results: results.slice() };
+		const summary = { passed, total: results.length, results: results.slice() };
+		// Canal DOM stable pour les tests fonctionnels pilotés depuis un contexte
+		// navigateur isolé (sans exposer ni sérialiser les buffers GPU).
+		if ( typeof document !== 'undefined' )
+			document.documentElement.dataset.antTests = JSON.stringify( summary );
+		return summary;
 
 	}
 

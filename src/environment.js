@@ -1,5 +1,5 @@
 // Sol de la clairière : mousse nocturne avec taches organiques, visualisation
-// du champ de phéromones en émissif, murs/terre, fourmilière (GLB).
+// du champ de pheromones en emissif, murs/terre et entree procedurale.
 //
 // Les fonctions de couleur du sol sont PARTAGÉES avec l'herbe (grass.js) :
 // un brin affiche exactement l'albédo et l'émissif du sol à sa racine, avec
@@ -11,9 +11,10 @@ import {
 	Fn, texture, uniform, positionWorld, time, sin, Discard,
 	vec3, float, color, mix, clamp, smoothstep, length, pow, mx_noise_float,
 } from 'three/tsl';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
-import { WORLD, NEST, GRID, params, gfx } from './config.js';
+import { WORLD, params, gfx } from './config.js';
+import {
+	buildEntranceTubeGeometry, buildGroundWithEntrance, buildOpenTopBoxGeometry, entranceMouth,
+} from './navigation/entrance-geometry.js';
 
 // uniforms partagés sol/herbe (réglés par l'UI)
 export const uTrail = uniform( params.trailIntensity );
@@ -96,7 +97,7 @@ export async function createEnvironment( scene, sim ) {
 	// ------------------------------------------------------------------
 	// Sol
 	// ------------------------------------------------------------------
-	const groundGeo = new THREE.PlaneGeometry( WORLD, WORLD ).rotateX( - Math.PI / 2 );
+	const groundGeo = buildGroundWithEntrance( sim.layout, WORLD );
 	const groundMat = new THREE.MeshStandardNodeMaterial( { roughness: 0.95, metalness: 0 } );
 
 	const guv = positionWorld.xz.div( WORLD ).add( 0.5 );
@@ -122,7 +123,7 @@ export async function createEnvironment( scene, sim ) {
 
 	} )();
 
-	const soil = new THREE.Mesh( new THREE.BoxGeometry( WORLD, 1, WORLD ), soilMat );
+	const soil = new THREE.Mesh( buildOpenTopBoxGeometry( WORLD, 1, WORLD ), soilMat );
 	soil.scale.y = gfx.groundThickness;
 	soil.position.y = - gfx.groundThickness / 2 - 0.01;
 	soil.receiveShadow = true;
@@ -136,51 +137,37 @@ export async function createEnvironment( scene, sim ) {
 	}
 
 	// ------------------------------------------------------------------
-	// Fourmilière (GLB), pieds au sol, empreinte ≈ zone du nid
+	// Entrée procédurale : le même corridor fournit le trou du sol et la paroi
+	// intérieure. Aucun modèle décoratif ne masque plus la transition.
 	// ------------------------------------------------------------------
-	const nestWorldR = ( NEST.radius / GRID ) * WORLD;
-
-	const gltf = await new GLTFLoader().loadAsync( '/Anthill.glb' );
-	gltf.scene.updateMatrixWorld( true );
-
-	let anthillGeo = null;
-	gltf.scene.traverse( ( o ) => {
-
-		if ( o.isMesh && ! anthillGeo ) {
-
-			anthillGeo = o.geometry.clone();
-			anthillGeo.applyMatrix4( o.matrixWorld );
-
-		}
-
-	} );
-
-	anthillGeo.computeBoundingBox();
-	const bb = anthillGeo.boundingBox;
-	const size = new THREE.Vector3();
-	bb.getSize( size );
-
-	const s = 1 / Math.max( size.x, size.z );      // empreinte unité
-	anthillGeo.translate( - ( bb.min.x + bb.max.x ) / 2, - bb.min.y, - ( bb.min.z + bb.max.z ) / 2 );
-	anthillGeo.scale( s, s, s );
-
-	const anthillMat = new THREE.MeshStandardNodeMaterial( {
-		color: new THREE.Color( gfx.anthillColor ),
+	const entranceMat = new THREE.MeshStandardNodeMaterial( {
+		color: new THREE.Color( gfx.entranceColor ),
 		roughness: 1,
+		side: THREE.BackSide,
 	} );
-	const anthill = new THREE.Mesh( anthillGeo, anthillMat );
-	anthill.scale.setScalar( nestWorldR * 2.4 );
-	anthill.position.y = - nestWorldR * 0.08;      // base légèrement enterrée
-	anthill.castShadow = true;
-	anthill.receiveShadow = true;
-	anthill.userData.baseScale = nestWorldR * 2.4; // pour l'anim de retrait (vue souterraine)
-	scene.add( anthill );
+	const entrance = new THREE.Mesh( buildEntranceTubeGeometry( sim.layout ), entranceMat );
+	entrance.castShadow = true;
+	entrance.receiveShadow = true;
+	entrance.userData.kind = 'physical-nest-entrance';
+	scene.add( entrance );
 
+	function rebuildEntrance() {
+
+		const previousGround = ground.geometry;
+		const previousEntrance = entrance.geometry;
+		ground.geometry = buildGroundWithEntrance( sim.layout, WORLD );
+		entrance.geometry = buildEntranceTubeGeometry( sim.layout );
+		previousGround.dispose();
+		previousEntrance.dispose();
+
+	}
 	return {
 		ground,
 		uTrail,
-		anthillMat,
-		anthill,
+		entranceMat,
+		entrance,
+		get mouth() { return entranceMouth( sim.layout ); },
+		rebuildEntrance,
 		setThickness,
 	};
 

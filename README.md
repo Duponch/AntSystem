@@ -4,6 +4,8 @@ Simulation de colonie de fourmis **100 % GPU**, en [Three.js](https://threejs.or
 
 Inspirée de la vidéo [« J'ai simulé 869 fourmis pour mieux les comprendre »](https://www.youtube.com/watch?v=M9ydYnN9_uc), elle-même basée sur les travaux de [Sebastian Lague](https://github.com/SebLague/Ant-Simulation) (double carte de phéromones) et de [Pezzza's Work](https://github.com/johnBuffer/AntSimulator) (dépôt atténué par le temps de trajet).
 
+La documentation fonctionnelle et technique de référence se trouve dans [`doc/index.md`](doc/index.md).
+
 ## Lancer
 
 ```bash
@@ -49,7 +51,7 @@ Le dossier **🧪 Banc d'essai** (ou l'URL `?bench=5x90`, ou `__antsys.bench.run
 - **Tapis d'herbe 100 % GPU** : un brin = 2 triangles, position/lacet/taille/vent dérivés de `instanceIndex` par `hash()` dans le vertex shader (zéro donnée par brin côté CPU). Les brins forment un **disque continu qui suit la caméra** (pavage toroïdal : positions stables dans le monde, recyclage silencieux sur le bord fondu), rayon réglable, densité dégressive selon la hauteur caméra. Chaque brin affiche **l'albédo et l'émissif du sol à sa racine** avec une normale verticale : il est indiscernable du sol, sauf en silhouette au ras du sol.
 - **Ciel nocturne** : dôme en dégradé zénith/horizon, étoiles procédurales scintillantes, lune billboard TSL (disque + halo + cratères), brouillard exponentiel assorti à l'horizon.
 - **Clair de lune** : directionnelle bleutée avec ombres (y compris sur l'herbe) + ambiante nuit — palette portée du projet Simulation.
-- **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères. La fourmilière est un GLB dédié, et la nourriture rougeoie comme des lucioles posées dans l'herbe.
+- **Décor** : arbres low-poly en lisière, bûches/souche/rocher posés comme **obstacles physiques** (empreinte rasterisée dans la grille de murs — les fourmis les contournent), champignons, fougères. L’entrée de la fourmilière est procédurale : le trou du sol et le conduit souterrain forment une transition géométrique continue. La nourriture rougeoie comme des lucioles posées dans l'herbe.
 - Tout est réglable en direct dans le dossier **Graphismes** du panneau.
 
 ## Prédateurs & défense

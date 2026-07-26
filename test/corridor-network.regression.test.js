@@ -63,7 +63,7 @@ describe( 'irregular geometry and non-regression corpus', () => {
 
 		for ( let edgeId = 1; edgeId < network.corridors.length; edgeId ++ ) {
 
-			const points = network.corridors[ edgeId ].points;
+			const points = network.corridors[ edgeId ].axisPoints;
 			const lengths = [];
 
 			for ( let i = 1; i < points.length; i ++ )
@@ -135,6 +135,22 @@ describe( 'irregular geometry and non-regression corpus', () => {
 			assert.equal( before.to, after.to );
 			assert.equal( before.length, after.length );
 			assert.deepEqual( before.points, after.points );
+			assert.deepEqual( before.axisPoints, after.axisPoints );
+			assert.deepEqual( before.frames, after.frames );
+			assert.deepEqual( before.surfaceTracks, after.surfaceTracks );
+			assert.deepEqual( before.surfaceSupports, after.surfaceSupports );
+			assert.deepEqual( before.surfaceLengths, after.surfaceLengths );
+
+			const surfaceStart = edgeId * prefix.surfaceTracks * prefix.samples * 4;
+			const surfaceEnd = surfaceStart + prefix.surfaceTracks * prefix.samples * 4;
+			assert.deepEqual(
+				prefix.surfaceData.slice( surfaceStart, surfaceEnd ),
+				grown.surfaceData.slice( surfaceStart, surfaceEnd ),
+			);
+			assert.deepEqual(
+				prefix.surfaceSupportData.slice( surfaceStart, surfaceEnd ),
+				grown.surfaceSupportData.slice( surfaceStart, surfaceEnd ),
+			);
 
 		}
 

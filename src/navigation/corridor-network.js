@@ -7,16 +7,97 @@
 // terminal. Le coût d'un pas est donc O(1), quelle que soit la taille du nid.
 
 import { TEXEL } from '../config.js';
-import { K_MAX, NODE_CHAMBER0, tunnelPath } from '../nest.js';
+import {
+	K_MAX,
+	NODE_CHAMBER0,
+	entranceConnectorPath,
+	entrancePath,
+	tunnelPath,
+} from '../nest.js';
+import {
+	compileCorridorSurfaceTracks,
+	CORRIDOR_SURFACE_TRACKS,
+	SDF_SEGS_PER_CORRIDOR,
+	sampleCompiledSurfaceTrack,
+} from './support-geometry.js';
+import { compileCorridorSurfaceTracksParallel } from './corridor-surface-parallel.js';
 
-export const CORRIDOR_SAMPLES = 64;
+export { CORRIDOR_SURFACE_TRACKS };
+
+export const CORRIDOR_SAMPLES = 128;
 export const ENTRY_EDGE_SEED = K_MAX + 0x51;
-export const ENDPOINT_FADE = 0.12;
+export const ENDPOINT_FADE = 0.35;
+export const SDF_RADIUS_SCALE = 0.85;
 
 const EPS = 1e-9;
 
 const clamp01 = ( value ) => Math.max( 0, Math.min( 1, value ) );
 
+const vector = ( x = 0, y = 0, z = 0 ) => ( { x, y, z } );
+const add3 = ( a, b ) => vector( a.x + b.x, a.y + b.y, a.z + b.z );
+const sub3 = ( a, b ) => vector( a.x - b.x, a.y - b.y, a.z - b.z );
+const scale3 = ( v, s ) => vector( v.x * s, v.y * s, v.z * s );
+const dot3 = ( a, b ) => a.x * b.x + a.y * b.y + a.z * b.z;
+const cross3 = ( a, b ) => vector(
+	a.y * b.z - a.z * b.y,
+	a.z * b.x - a.x * b.z,
+	a.x * b.y - a.y * b.x,
+);
+const length3 = ( v ) => Math.hypot( v.x, v.y, v.z );
+const normalize3 = ( v, fallback = vector( 1, 0, 0 ) ) => {
+
+	const magnitude = length3( v );
+	return magnitude > EPS ? scale3( v, 1 / magnitude ) : { ...fallback };
+
+};
+const metricPoint = ( point, texel ) => vector( point.x, point.y, point.depth / texel );
+
+function tangentAt( points, index, texel ) {
+
+	const before = metricPoint( points[ Math.max( 0, index - 1 ) ], texel );
+	const after = metricPoint( points[ Math.min( points.length - 1, index + 1 ) ], texel );
+	return normalize3( sub3( after, before ) );
+
+}
+
+function projectedNormal( reference, tangent, fallback ) {
+
+	const projected = sub3( reference, scale3( tangent, dot3( reference, tangent ) ) );
+	return normalize3( projected, fallback );
+
+}
+
+function buildTransportFrames( points, texel ) {
+
+	const tangents = points.map( ( _, index ) => tangentAt( points, index, texel ) );
+	const frames = new Array( points.length );
+	const floor = vector( 0, 0, - 1 );
+	let normal = projectedNormal( floor, tangents[ 0 ],
+		projectedNormal( vector( 1, 0, 0 ), tangents[ 0 ], vector( 0, 1, 0 ) ) );
+
+	for ( let i = 0; i < points.length; i ++ ) {
+
+		const tangent = tangents[ i ];
+
+		if ( i > 0 ) {
+
+			const fallback = frames[ i - 1 ].binormal;
+			normal = projectedNormal( normal, tangent, fallback );
+			if ( dot3( normal, frames[ i - 1 ].normal ) < 0 ) normal = scale3( normal, - 1 );
+
+		}
+
+		let binormal = normalize3( cross3( tangent, normal ), vector( 0, 1, 0 ) );
+		normal = normalize3( cross3( binormal, tangent ), normal );
+		binormal = normalize3( cross3( tangent, normal ), binormal );
+		frames[ i ] = { tangent, normal, binormal };
+
+	}
+
+	return frames;
+
+
+}
 function pointDistance( a, b, texel ) {
 
 	return Math.hypot( b.x - a.x, b.y - a.y, ( b.depth - a.depth ) / texel );
@@ -97,16 +178,248 @@ function rawPathOf( nest, childNode, subdivisions ) {
 
 	};
 
-	if ( childNode === 1 ) return verticalPath( nest.entry, nest.shaft )
-		?? tunnelPath( nest.entry, nest.shaft, ENTRY_EDGE_SEED, subdivisions );
+	if ( childNode === 1 ) return entrancePath(
+		nest.entry, nest.shaft, ENTRY_EDGE_SEED, subdivisions );
 	const chamber = childNode - NODE_CHAMBER0;
 	const child = nest.units[ chamber ];
 	const parentIndex = nest.parents[ chamber ];
 	const parent = parentIndex < 0 ? nest.shaft : nest.units[ parentIndex ];
+	if ( chamber === 0 && nest.peripheralEntrance )
+		return entranceConnectorPath( parent, child, subdivisions );
 	return verticalPath( parent, child ) ?? tunnelPath( parent, child, chamber, subdivisions );
 
 }
 
+function stableClearanceIndex( points, texel, clearanceWorld, fromStart, metric = false ) {
+
+	const endpoint = points[ fromStart ? 0 : points.length - 1 ];
+	const distance = points.map( ( point ) => Math.hypot(
+		( point.x - endpoint.x ) * texel,
+		( point.y - endpoint.y ) * texel,
+		metric ? point.depth - endpoint.depth : 0,
+	) );
+
+	if ( fromStart ) {
+
+		const suffix = new Float64Array( points.length );
+		let minimum = Infinity;
+		for ( let index = points.length - 1; index >= 0; index -- ) {
+
+			minimum = Math.min( minimum, distance[ index ] );
+			suffix[ index ] = minimum;
+
+		}
+		for ( let index = 1; index < points.length - 1; index ++ )
+			if ( suffix[ index ] >= clearanceWorld ) return index;
+
+	} else {
+
+		const prefix = new Float64Array( points.length );
+		let minimum = Infinity;
+		for ( let index = 0; index < points.length; index ++ ) {
+
+			minimum = Math.min( minimum, distance[ index ] );
+			prefix[ index ] = minimum;
+
+		}
+		for ( let index = points.length - 2; index > 0; index -- )
+			if ( prefix[ index ] >= clearanceWorld ) return index;
+
+	}
+	return fromStart
+		? Math.max( 1, Math.floor( points.length * 0.18 ) )
+		: Math.min( points.length - 2, Math.ceil( points.length * 0.82 ) );
+
+}
+
+function buildAxisGeometry( floorPath, child, from, nest, axisLiftWorld, texel, samples ) {
+
+	const last = floorPath.length - 1;
+	const clearanceWorld = axisLiftWorld * 2 + 0.4;
+	let raw;
+
+	if ( child === 1 ) {
+
+		// Gorge verticale, puis coude circulaire de rayon strictement superieur
+		// au tube, puis sortie horizontale. Cette construction C1 possede un reach
+		// connu : aucune generatrice ne peut viser la suite du tunnel et perdre sa
+		// paroi locale comme avec l'ancien angle vif.
+		const entry = floorPath[ 0 ];
+		const exit = floorPath[ last ];
+		const dxWorld = ( exit.x - entry.x ) * texel;
+		const dyWorld = ( exit.y - entry.y ) * texel;
+		const horizontalWorld = Math.hypot( dxWorld, dyWorld );
+		const endAxisDepth = exit.depth + axisLiftWorld;
+		const dropWorld = entry.depth - endAxisDepth;
+
+		if ( horizontalWorld <= EPS ) {
+
+			raw = Array.from( { length: floorPath.length }, ( _, index ) => ( {
+				x: entry.x,
+				y: entry.y,
+				depth: entry.depth + ( endAxisDepth - entry.depth ) * index / last,
+			} ) );
+
+		} else {
+
+			if ( dropWorld <= EPS ) throw new Error( 'Entrance axis must descend below the surface' );
+			const ux = dxWorld / horizontalWorld;
+			const uy = dyWorld / horizontalWorld;
+			const nominalBend = Math.max( 1.0, axisLiftWorld * 1.5 );
+			const bendRadius = Math.max( axisLiftWorld * 1.05,
+				Math.min( nominalBend, horizontalWorld * 0.45, dropWorld * 0.55 ) );
+			if ( bendRadius >= horizontalWorld || bendRadius >= dropWorld )
+				throw new Error( 'Entrance is too short for its curvature-safe elbow' );
+			const collarLength = dropWorld - bendRadius;
+			const arcLength = bendRadius * Math.PI * 0.5;
+			const tailLength = horizontalWorld - bendRadius;
+			const totalLength = collarLength + arcLength + tailLength;
+			const arcDepth = entry.depth - collarLength;
+
+			raw = Array.from( { length: floorPath.length }, ( _, index ) => {
+
+				const distance = totalLength * index / last;
+				let horizontal = 0;
+				let depth = entry.depth;
+				if ( distance <= collarLength ) depth -= distance;
+				else if ( distance <= collarLength + arcLength ) {
+
+					const theta = ( distance - collarLength ) / bendRadius;
+					horizontal = bendRadius * ( 1 - Math.cos( theta ) );
+					depth = arcDepth - bendRadius * Math.sin( theta );
+
+				} else {
+
+					horizontal = bendRadius + distance - collarLength - arcLength;
+					depth = endAxisDepth;
+
+				}
+				return {
+					x: entry.x + ux * horizontal / texel,
+					y: entry.y + uy * horizontal / texel,
+					depth,
+				};
+
+			} );
+			raw[ 0 ] = { ...entry };
+			raw[ last ] = { ...exit, depth: endAxisDepth };
+
+		}
+
+	} else raw = floorPath.map( ( point ) => ( {
+		...point,
+		depth: point.depth + axisLiftWorld,
+	} ) );
+
+	// Chaque portail conserve un collier plat d'au moins deux rayons plus sa
+	// marge physique. La variation de profondeur utilise ensuite tout le trajet
+	// restant : cela borne la courbure sans imposer une longue corde cachee sous
+	// l'empreinte de la chambre.
+	const chamberBoundary = ( node, fromStart ) => {
+
+		if ( node < NODE_CHAMBER0 ) return fromStart ? 0 : last;
+		const unit = nest.units?.[ node - NODE_CHAMBER0 ];
+		if ( ! unit ) return fromStart ? 0 : last;
+		const insideFloor = ( point ) => {
+
+			const dx = ( point.x - unit.x ) * texel / Math.max( unit.rwx, EPS );
+			const dy = ( point.y - unit.y ) * texel / Math.max( unit.rwz, EPS );
+			return Math.hypot( dx, dy ) <= 1.02;
+
+		};
+		if ( fromStart ) {
+
+			let boundary = 0;
+			for ( let index = 0; index < raw.length; index ++ ) {
+
+				if ( ! insideFloor( raw[ index ] ) ) break;
+				boundary = index;
+
+			}
+			return boundary;
+
+		}
+		let boundary = last;
+		for ( let index = last; index >= 0; index -- ) {
+
+			if ( ! insideFloor( raw[ index ] ) ) break;
+			boundary = index;
+
+		}
+		return boundary;
+
+	};
+
+	let startIndex = stableClearanceIndex(
+		raw, texel, clearanceWorld, true, child === 1 );
+	let endIndex = stableClearanceIndex( raw, texel, clearanceWorld, false, false );
+	if ( child !== 1 ) startIndex = Math.max( startIndex, chamberBoundary( from, true ) );
+	endIndex = Math.min( endIndex, chamberBoundary( child, false ) );
+
+	if ( startIndex >= endIndex ) {
+
+		startIndex = Math.max( 1, Math.floor( last * 0.2 ) );
+		endIndex = Math.min( last - 1, Math.ceil( last * 0.8 ) );
+		if ( startIndex >= endIndex ) throw new Error( 'Corridor is too short for portal collars' );
+
+	}
+
+	if ( child !== 1 ) {
+
+		const startDepth = raw[ 0 ].depth;
+		const endDepth = raw[ last ].depth;
+		for ( let index = 0; index <= startIndex; index ++ ) raw[ index ].depth = startDepth;
+		for ( let index = startIndex + 1; index < endIndex; index ++ ) {
+
+			const u = ( index - startIndex ) / ( endIndex - startIndex );
+			const eased = u * u * u * ( u * ( u * 6 - 15 ) + 10 );
+			raw[ index ].depth = lerpPoint(
+				{ x: 0, y: 0, depth: startDepth },
+				{ x: 0, y: 0, depth: endDepth }, eased ).depth;
+
+		}
+
+	}
+	for ( let index = endIndex; index <= last; index ++ )
+		raw[ index ].depth = raw[ last ].depth;
+	// Le SDF doit discretiser le MEME axe complet que la navigation. Une capsule
+	// unique entre le portail et `startIndex` transformait toute l'approche
+	// courbe en une longue corde : l'axe sortait alors du tube et certains rayons
+	// de support accrochaient une paroi distante. Les ruptures de collier restent
+	// garanties par la profondeur plane de `raw`; la repartition uniforme borne
+	// en plus l'erreur de corde sur l'ensemble du corridor.
+	const capsulePoints = resampleByArcLength(
+		raw, SDF_SEGS_PER_CORRIDOR + 1, texel ).points;
+	const sampled = resampleByArcLength( raw, samples, texel );
+	return { raw, sampled, capsulePoints, startIndex, endIndex, clearanceWorld };
+
+}
+function corridorWallWeights( nest, corridor, texel ) {
+
+	const chamberWeight = ( node, point ) => {
+
+		if ( node < NODE_CHAMBER0 ) return null;
+		const unit = nest.units?.[ node - NODE_CHAMBER0 ];
+		if ( ! unit ) return null;
+		const dx = ( point.x - unit.x ) * texel / Math.max( unit.rwx, EPS );
+		const dy = ( point.y - unit.y ) * texel / Math.max( unit.rwz, EPS );
+		return smoothStep( 0.95, 2.4, Math.hypot( dx, dy ) );
+
+	};
+
+	return corridor.axisPoints.map( ( point, index, points ) => {
+
+		const t = index / Math.max( 1, points.length - 1 );
+		const startChamber = chamberWeight( corridor.from, point );
+		const endChamber = chamberWeight( corridor.to, point );
+		const start = corridor.id === 1 ? 1
+			: startChamber ?? smoothStep( 0, ENDPOINT_FADE, t );
+		const end = endChamber ?? smoothStep( 0, ENDPOINT_FADE, 1 - t );
+		return start * end;
+
+	} );
+
+}
 function routeEdgeKey( a, b ) {
 
 	return a < b ? `${ a }:${ b }` : `${ b }:${ a }`;
@@ -124,6 +437,9 @@ export function buildCorridorNetwork( nest, options = {} ) {
 	const tunnelWidth = options.tunnelWidth ?? nest.tunnelW ?? 6;
 	const agentRadiusWorld = options.agentRadiusWorld ?? TEXEL * 2.9;
 	const safetyWorld = options.safetyWorld ?? TEXEL * 0.4;
+	// Le point de contact est la surface géométrique elle-même. Le léger retrait
+	// anatomique nécessaire au rendu est appliqué au pivot, pas au rail.
+	const surfaceInsetWorld = options.surfaceInsetWorld ?? 0;
 	const subdivisions = Math.max( samples * 3, 96 );
 
 	if ( nest.nodes.length > maxNodes ) throw new Error( `Navigation node capacity exceeded (${ nest.nodes.length } > ${ maxNodes })` );
@@ -141,6 +457,7 @@ export function buildCorridorNetwork( nest, options = {} ) {
 	const corridors = new Array( nodes.length ).fill( null );
 	const edgeByPair = new Map();
 	const sampleData = new Float32Array( maxNodes * samples * 4 );
+	const frameData = new Float32Array( maxNodes * samples * 4 );
 	const metaData = new Float32Array( maxNodes * 4 );
 	const nodeData = new Float32Array( maxNodes * 4 );
 
@@ -157,18 +474,42 @@ export function buildCorridorNetwork( nest, options = {} ) {
 	for ( let child = 1; child < nodes.length; child ++ ) {
 
 		const from = parentNodeOf( nest, child );
-		const raw = rawPathOf( nest, child, subdivisions );
-		const sampled = resampleByArcLength( raw, samples, texel );
 		const radius = tunnelWidth;
-		const safeCoreRadiusWorld = radius * texel * 0.85;
+		const contactRadius = Math.max( 0.05,
+			radius * SDF_RADIUS_SCALE - surfaceInsetWorld / texel );
+		const axisLiftWorld = contactRadius * texel;
+		const floorPath = rawPathOf( nest, child, subdivisions );
+		const floorSampled = resampleByArcLength( floorPath, samples, texel );
+		// Chaque portail possede un vrai collier geometrique. Hors bouche, le
+		// premier et le dernier segment d'axe sont horizontaux sur plus d'un rayon;
+		// a la bouche, le premier segment reste vertical. La capsule suivante ne
+		// peut donc jamais recreuser sous le point de jonction.
+		const axis = buildAxisGeometry(
+			floorPath, child, from, nest, axisLiftWorld, texel, samples );
+		const sampled = axis.sampled;
+		const safeCoreRadiusWorld = radius * texel * SDF_RADIUS_SCALE;
 		const safeLane = Math.max( 0, ( safeCoreRadiusWorld - agentRadiusWorld - safetyWorld ) / texel );
+		const frames = buildTransportFrames( sampled.points, texel );
+		const wallWeights = corridorWallWeights( nest, {
+			id: child, from, to: child, axisPoints: sampled.points,
+		}, texel );
 		const corridor = {
 			id: child,
 			from,
 			to: child,
-			length: sampled.length,
-			points: sampled.points,
+			length: floorSampled.length,
+			axisLength: sampled.length,
+			points: floorSampled.points,
+			axisPoints: sampled.points,
+			capsulePoints: axis.capsulePoints,
+			portalStartIndex: axis.startIndex,
+			portalEndIndex: axis.endIndex,
+			portalClearanceWorld: axis.clearanceWorld,
+			frames,
+			wallWeights,
 			radius,
+			contactRadius,
+			axisLiftWorld,
 			safeLane,
 		};
 
@@ -177,49 +518,40 @@ export function buildCorridorNetwork( nest, options = {} ) {
 		const mb = child * 4;
 		metaData[ mb ] = from;
 		metaData[ mb + 1 ] = child;
-		metaData[ mb + 2 ] = sampled.length;
+		metaData[ mb + 2 ] = corridor.length;
 		metaData[ mb + 3 ] = safeLane;
 
 		for ( let i = 0; i < samples; i ++ ) {
 
-			const p = sampled.points[ i ];
+			const p = corridor.axisPoints[ i ];
 			const base = ( child * samples + i ) * 4;
 			sampleData[ base ] = p.x;
 			sampleData[ base + 1 ] = p.y;
 			sampleData[ base + 2 ] = p.depth;
 			sampleData[ base + 3 ] = safeLane;
+			const frame = frames[ i ];
+			frameData[ base ] = frame.normal.x;
+			frameData[ base + 1 ] = frame.normal.y;
+			frameData[ base + 2 ] = frame.normal.z;
+			frameData[ base + 3 ] = contactRadius;
 
 		}
 
 	}
 
-	// Borne géométrique partagée par l'oracle GPU : une voie latérale est plus
-	// longue que son axe, surtout pendant le fondu aux portails. Elle est mesurée
-	// une fois par corridor, puis majorée pour couvrir l'interpolation float GPU.
-	const samplingNetwork = { corridors };
-	let maxLaneStretch = 1;
-	for ( const corridor of corridors ) {
-
-		if ( ! corridor ) continue;
-		const segments = Math.max( 256, samples * 16 );
-		const centerAdvance = corridor.length / segments;
-		let previous = sampleCorridor( samplingNetwork, corridor.id, 0, corridor.safeLane, 1 );
-		let measured = 1;
-
-		for ( let i = 1; i <= segments; i ++ ) {
-
-			const current = sampleCorridor( samplingNetwork, corridor.id,
-				i / segments, corridor.safeLane, 1 );
-			measured = Math.max( measured,
-				pointDistance( previous, current, texel ) / centerAdvance );
-			previous = current;
-
-		}
-
-		corridor.maxLaneStretch = measured * 1.08;
-		maxLaneStretch = Math.max( maxLaneStretch, corridor.maxLaneStretch );
-
-	}
+	// Projection unique sur l'union propre réellement rendue. Cette table est
+	// partagée par toutes les fourmis et reste append-only lors de la croissance.
+	const surfaceCompilation = options.deferSurface === true ? null
+		: compileCorridorSurfaceTracks( {
+			nest,
+			corridors,
+			samples,
+			texel,
+			maxNodes,
+			tracks: CORRIDOR_SURFACE_TRACKS,
+			endpointFade: ENDPOINT_FADE,
+			tunnelRadiusScale: SDF_RADIUS_SCALE,
+		} );
 	const maxGoals = Math.floor( nest.nextHop.length / nodes.length );
 	const nextHop = new Int32Array( nest.nextHop );
 	const goalNodes = Int32Array.from( nest.GOAL_NODE.slice( 0, maxGoals ) );
@@ -250,13 +582,15 @@ export function buildCorridorNetwork( nest, options = {} ) {
 
 	}
 
-	return {
+	const network = {
 		samples,
 		texel,
 		agentRadiusWorld,
 		safetyWorld,
+		surfaceInsetWorld,
+		surfaceTracks: CORRIDOR_SURFACE_TRACKS,
 		maxNodes,
-		maxLaneStretch,
+		maxLaneStretch: 1,
 		maxGoals,
 		nodes,
 		corridors,
@@ -265,8 +599,125 @@ export function buildCorridorNetwork( nest, options = {} ) {
 		goalNodes,
 		goalDistance,
 		sampleData,
+		frameData,
+		surfaceData: null,
+		surfaceSupportData: null,
 		metaData,
 		nodeData,
+	};
+	return surfaceCompilation
+		? attachCorridorSurfaceCompilation( network, surfaceCompilation )
+		: network;
+
+}
+
+export function attachCorridorSurfaceCompilation( network, compilation ) {
+
+	const expectedLength = network.maxNodes * network.samples * network.surfaceTracks * 4;
+	if ( ! ( compilation?.positionData instanceof Float32Array )
+		|| compilation.positionData.length !== expectedLength
+		|| ! ( compilation.supportData instanceof Float32Array )
+		|| compilation.supportData.length !== expectedLength
+		|| ! Number.isFinite( compilation.maxSurfaceStretch ) )
+		throw new Error( 'Invalid corridor surface compilation' );
+	for ( const corridor of network.corridors ) {
+
+		if ( ! corridor ) continue;
+		if ( ! ( corridor.surfaceTracks instanceof Float32Array )
+			|| ! ( corridor.surfaceSupports instanceof Float32Array )
+			|| ! ( corridor.surfaceLengths instanceof Float32Array )
+			|| ! Number.isFinite( corridor.maxSurfaceStretch ) )
+			throw new Error( `Missing surface compilation for corridor ${ corridor.id }` );
+		corridor.maxLaneStretch = corridor.maxSurfaceStretch * 1.02;
+
+	}
+	network.surfaceData = compilation.positionData;
+	network.surfaceSupportData = compilation.supportData;
+	network.maxLaneStretch = compilation.maxSurfaceStretch * 1.02;
+	if ( compilation.bake ) network.surfaceBake = compilation.bake;
+	return network;
+
+}
+
+export async function buildCorridorNetworkAsync( nest, options = {} ) {
+
+	const {
+		maxSurfaceWorkers,
+		surfaceWorkerTimeoutMs,
+		surfaceWorkerFactory,
+		...networkOptions
+	} = options;
+	const network = buildCorridorNetwork( nest, {
+		...networkOptions,
+		deferSurface: true,
+	} );
+	const compilation = await compileCorridorSurfaceTracksParallel( {
+		nest,
+		corridors: network.corridors,
+		samples: network.samples,
+		texel: network.texel,
+		maxNodes: network.maxNodes,
+		tracks: network.surfaceTracks,
+		endpointFade: ENDPOINT_FADE,
+		tunnelRadiusScale: SDF_RADIUS_SCALE,
+	}, {
+		maxWorkers: maxSurfaceWorkers,
+		timeoutMs: surfaceWorkerTimeoutMs,
+		workerFactory: surfaceWorkerFactory,
+	} );
+	return attachCorridorSurfaceCompilation( network, compilation );
+
+}
+
+export function sampleCorridorSurface( network, edgeId, t, angle = 0, direction = 1 ) {
+
+	const corridor = network.corridors[ edgeId ];
+	if ( ! corridor ) throw new Error( `Unknown corridor ${ edgeId }` );
+	const compiled = sampleCompiledSurfaceTrack(
+		corridor, network.samples ?? corridor.points.length,
+		network.surfaceTracks ?? CORRIDOR_SURFACE_TRACKS, t, angle );
+	if ( ! compiled ) throw new Error( `Corridor ${ edgeId } has no compiled surface` );
+
+	const path = corridor.axisPoints ?? corridor.points;
+	const axisF = clamp01( compiled.axisT ) * ( path.length - 1 );
+	const axisI0 = Math.min( path.length - 2, Math.floor( axisF ) );
+	const axisI1 = axisI0 + 1;
+	const axisLocal = axisF - axisI0;
+	const center = lerpPoint( path[ axisI0 ], path[ axisI1 ], axisLocal );
+	const radial = normalize3( vector(
+		compiled.x - center.x,
+		compiled.y - center.y,
+		( compiled.depth - center.depth ) / network.texel,
+	), vector( 0, 0, - 1 ) );
+	const contactRadius = length3( vector(
+		compiled.x - center.x,
+		compiled.y - center.y,
+		( compiled.depth - center.depth ) / network.texel,
+	) );
+	const support = compiled.support;
+	const signedTangent = scale3( compiled.tangent, direction < 0 ? - 1 : 1 );
+	const tangentOnSurface = projectedNormal(
+		signedTangent, support, corridor.frames[ axisI0 ].binormal );
+	const startWeight = edgeId === 1 ? 1 : smoothStep( 0, ENDPOINT_FADE, compiled.axisT );
+	const endWeight = smoothStep( 0, ENDPOINT_FADE, 1 - compiled.axisT );
+
+	return {
+		x: compiled.x,
+		y: compiled.y,
+		depth: compiled.depth,
+		centerX: center.x,
+		centerY: center.y,
+		centerDepth: center.depth,
+		tangentX: tangentOnSurface.x,
+		tangentY: tangentOnSurface.y,
+		tangent3: tangentOnSurface,
+		support,
+		radial,
+		wallWeight: startWeight * endWeight,
+		contactRadius,
+		trackLength: compiled.length,
+		axisT: compiled.axisT,
+		clearance: corridor.radius - contactRadius,
 	};
 
 }
@@ -428,11 +879,28 @@ export function validateNetwork( network ) {
 		const last = corridor.points[ corridor.points.length - 1 ];
 		const from = network.nodes[ corridor.from ];
 		const to = network.nodes[ corridor.to ];
-		if ( pointDistance( first, from, network.texel ) > tolerance ) errors.push( `corridor ${ edge } start mismatch` );
-		if ( pointDistance( last, to, network.texel ) > tolerance ) errors.push( `corridor ${ edge } end mismatch` );
+		if ( pointDistance( first, from, network.texel ) > tolerance )
+			errors.push( `corridor ${ edge } start mismatch` );
+		if ( pointDistance( last, to, network.texel ) > tolerance )
+			errors.push( `corridor ${ edge } end mismatch` );
+		const firstAxis = corridor.axisPoints?.[ 0 ];
+		const lastAxis = corridor.axisPoints?.[ corridor.axisPoints.length - 1 ];
+		const startAxis = { ...from,
+			depth: from.depth + ( edge === 1 ? 0 : corridor.axisLiftWorld ) };
+		const endAxis = { ...to, depth: to.depth + corridor.axisLiftWorld };
+		if ( ! firstAxis || pointDistance( firstAxis, startAxis, network.texel ) > tolerance )
+			errors.push( `corridor ${ edge } start axis mismatch` );
+		if ( ! lastAxis || pointDistance( lastAxis, endAxis, network.texel ) > tolerance )
+			errors.push( `corridor ${ edge } end axis mismatch` );
 		if ( ! Number.isFinite( corridor.length ) || corridor.length <= 0 ) errors.push( `corridor ${ edge } invalid length` );
 		if ( ! Number.isFinite( corridor.maxLaneStretch ) || corridor.maxLaneStretch < 1 )
 			errors.push( `corridor ${ edge } invalid lane stretch bound` );
+		if ( ! Array.isArray( corridor.frames ) || corridor.frames.length !== corridor.axisPoints?.length )
+			errors.push( `corridor ${ edge } invalid transported frames` );
+		if ( corridor.surfaceTracks?.length !== network.samples * network.surfaceTracks * 4 )
+			errors.push( `corridor ${ edge } invalid projected surface tracks` );
+		if ( corridor.surfaceSupports?.length !== network.samples * network.surfaceTracks * 4 )
+			errors.push( `corridor ${ edge } invalid projected surface supports` );
 
 		const nominal = corridor.length / ( corridor.points.length - 1 );
 		for ( let i = 1; i < corridor.points.length; i ++ ) {
@@ -488,8 +956,17 @@ export function networkSignature( network, quantum = 1e-4 ) {
 	push( network.maxLaneStretch );
 	for ( const corridor of network.corridors ) if ( corridor ) {
 
-		push( corridor.from ); push( corridor.to ); push( corridor.length ); push( corridor.maxLaneStretch );
+		push( corridor.from ); push( corridor.to ); push( corridor.length ); push( corridor.axisLength );
+		push( corridor.maxLaneStretch );
 		for ( const point of corridor.points ) { push( point.x ); push( point.y ); push( point.depth ); }
+		for ( const point of corridor.axisPoints ) { push( point.x ); push( point.y ); push( point.depth ); }
+		for ( const value of corridor.surfaceTracks ) push( value );
+		for ( const value of corridor.surfaceSupports ) push( value );
+		for ( const frame of corridor.frames ) {
+
+			push( frame.normal.x ); push( frame.normal.y ); push( frame.normal.z );
+
+		}
 
 	}
 

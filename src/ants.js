@@ -191,11 +191,9 @@ export async function createAnts( sim ) {
 				// centre de la sphère de culling : on retire le pivot pour rester
 				// sur le même point qu'avant le passage par antPose (sinon les
 				// bascules de LOD se décalent d'une caste à l'autre)
-				const world = vec3(
-					P.world.x,
-					P.world.y.sub( model.pivot.mul( P.scale ) ).add( 0.3 ),
-					P.world.z,
-				);
+				const world = P.world.add( qrot( P.q, vec3(
+					0, model.pivot.mul( P.scale ).negate().add( 0.3 ), 0,
+				) ) );
 
 				// test de frustum en espace vue (marge = rayon d'une fourmi)
 				const v = u.view.mul( vec4( world, 1 ) );
@@ -290,6 +288,11 @@ export async function createAnts( sim ) {
 		const material = scanPass
 			? new THREE.MeshBasicNodeMaterial()
 			: new THREE.MeshStandardNodeMaterial( { roughness: 0.6, metalness: 0.0 } );
+
+		// positionNode tourne les sommets animés, mais aucun normalNode ne peut
+		// suivre le VAT. Les dérivées des triangles déjà posés donnent donc la
+		// normale correcte sur le sol, les murs et le plafond.
+		if ( ! scanPass ) material.flatShading = true;
 
 		if ( scanPass ) {
 
@@ -510,15 +513,15 @@ export async function createAnts( sim ) {
 		// masquée si la colonie est coupée (l'index 0 redevient une ouvrière) ;
 		// son pivot est relevé à SON échelle, pas à celle d'une ouvrière
 		const on = sim.u.colonyOn;
-		const world = vec3(
-			P.world.x,
-			P.world.y.sub( uPivot.mul( P.scale ) ).add( uPivot.mul( uQueenScale ) ),
-			P.world.z,
-		);
+		const world = P.world.add( qrot( P.q, vec3( 0,
+			uPivot.mul( uQueenScale.sub( P.scale ) ), 0 ) ) );
 
 		return qrot( P.q, local.mul( on ) ).add( world );
 
 	} )();
+
+	// Même reconstruction de normale après la pose 360 degrés de la reine.
+	queenMat.flatShading = true;
 
 	queenMat.colorNode = Fn( () => {
 
@@ -600,13 +603,9 @@ export async function createAnts( sim ) {
 		const localQ = local.sub( vec3( 0, uPivot, 0 ) ).mul( uQueenScale )
 			.mul( vec3( 1.05, 1.05, float( 1 ).add( stretch.mul( 0.5 ) ) ) );
 		const localW = local.sub( vec3( 0, clip.pivot, 0 ) ).mul( P.scale );
-		const world = vec3(
-			P.world.x,
-			P.world.y.sub( clip.pivot.mul( P.scale ) ).add(
-				select( P.isQueen, uPivot.mul( uQueenScale ), clip.pivot.mul( P.scale ) ),
-			),
-			P.world.z,
-		);
+		const pivotDelta = select( P.isQueen,
+			uPivot.mul( uQueenScale ).sub( clip.pivot.mul( P.scale ) ), float( 0 ) );
+		const world = P.world.add( qrot( P.q, vec3( 0, pivotDelta, 0 ) ) );
 
 		return qrot( P.q, select( P.isQueen, localQ, localW ).mul( vis ) ).add( world );
 

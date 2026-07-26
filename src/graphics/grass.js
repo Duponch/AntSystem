@@ -17,13 +17,15 @@ import {
 	float, uint, vec2, vec3, sin, cos, floor, length, smoothstep, mix, transformNormalToView,
 } from 'three/tsl';
 
-import { WORLD, gfx } from '../config.js';
+import { WORLD, TEXEL, gfx } from '../config.js';
+import { SDF_RADIUS_SCALE } from '../navigation/corridor-network.js';
 import { makeFieldSampler, groundAlbedo, groundEmissive } from '../environment.js';
 
 const MAX_BLADES = 2_000_000;
 
 export function createGrass( scene, sim ) {
 
+	const entrancePoint = sim.layout.navigation.corridors[ 1 ].axisPoints[ 0 ];
 	const u = {
 		height: uniform( gfx.grassHeight ),
 		width: uniform( gfx.grassWidth ),
@@ -34,10 +36,12 @@ export function createGrass( scene, sim ) {
 		windGust: uniform( 0 ),
 		cam: uniform( new THREE.Vector2() ),
 		chaos: uniform( gfx.grassChaos ),   // 0 = uniforme, 1 = delta maximal
-		// trou central (nid — et fosse souterraine quand la vue est ouverte) :
-		// fondu entre holeIn et holeOut autour de l'origine (underground.js)
-		holeIn: uniform( 3.6 ),
-		holeOut: uniform( 5.2 ),
+		// Bouche physique : centre et rayon viennent du corridor d'entree partage.
+		holeCenter: uniform( new THREE.Vector2(
+			entrancePoint.x * TEXEL - WORLD / 2, entrancePoint.y * TEXEL - WORLD / 2,
+		) ),
+		holeIn: uniform( sim.layout.navigation.corridors[ 1 ].radius * SDF_RADIUS_SCALE * TEXEL * 0.9 ),
+		holeOut: uniform( sim.layout.navigation.corridors[ 1 ].radius * SDF_RADIUS_SCALE * TEXEL + 0.65 ),
 	};
 
 	// --- géométrie d'un brin : quad effilé + penché (4 sommets, 2 triangles) ---
@@ -84,7 +88,7 @@ export function createGrass( scene, sim ) {
 		const mask = float( 1 ).sub( smoothstep( u.radius.mul( 0.86 ), u.radius, dCam ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bx.abs() ) ) )
 			.mul( float( 1 ).sub( smoothstep( WORLD / 2 - 0.6, WORLD / 2 - 0.15, bz.abs() ) ) )
-			.mul( smoothstep( u.holeIn, u.holeOut, length( root ) ) );
+			.mul( smoothstep( u.holeIn, u.holeOut, length( root.sub( u.holeCenter ) ) ) );
 
 		// irrégularité : le chaos élargit les écarts de taille et couche les
 		// brins dans des directions aléatoires (mêmes hash, coût négligeable)
@@ -177,6 +181,14 @@ export function createGrass( scene, sim ) {
 			camera.position.z + fwd.z * ahead,
 		);
 		u.radius.value = gfx.grassRadius;
+		const entranceCorridor = sim.layout.navigation.corridors[ 1 ];
+		const mouthPoint = entranceCorridor.axisPoints[ 0 ];
+		const mouthRadius = entranceCorridor.radius * SDF_RADIUS_SCALE * TEXEL;
+		u.holeCenter.value.set(
+			mouthPoint.x * TEXEL - WORLD / 2, mouthPoint.y * TEXEL - WORLD / 2,
+		);
+		u.holeIn.value = mouthRadius * 0.9;
+		u.holeOut.value = mouthRadius + 0.65;
 
 		// densité : pleine près du sol, 12 % vu de très haut
 		const camH = Math.max( 0, camera.position.y );
