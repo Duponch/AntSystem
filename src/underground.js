@@ -10,9 +10,9 @@
 //   - continuité exacte avec les tunnels et cavités du nid.
 //
 // Trois pools instanciés bornés ajoutent mottes, roches et racines. Une tuile
-// déterministe suit la caméra sans nouvelle allocation et sans dépendre du
-// nombre de fourmis. Les objets sont projetés vers la coque visible et masqués
-// dans le vide physique du nid.
+// déterministe est répétée dans le repère monde sans nouvelle allocation et
+// sans dépendre du nombre de fourmis. La caméra ne fait que révéler les objets
+// que sa coque rencontre ; ils restent masqués dans le vide physique du nid.
 //
 // Le décor de surface et son fog sont coupés atomiquement dans main.js. Les
 // fourmis de la couche opposée sont masquées dans ants.js.
@@ -35,7 +35,7 @@ import {
 	positionWorld, cameraPosition, cameraNear, cameraFar, cameraViewMatrix,
 	viewZToPerspectiveDepth, time,
 	vec3, vec4, float, max, min, abs, clamp, mix, dot, length, normalize,
-	select, smoothstep, exp, fract, color, mx_noise_float, floor,
+	select, smoothstep, exp, fract, color, mx_noise_float, fwidth,
 } from 'three/tsl';
 
 import { GRID, WORLD, gfx, params } from './config.js';
@@ -154,14 +154,14 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 	const gradSceneSDF = ( p, radius ) => {
 
-		const e = float( 0.22 );
+		const e = float( 0.50 );
 		return vec3(
-			sampleSceneSDF( p.add( vec3( 0.22, 0, 0 ) ), radius )
-				.sub( sampleSceneSDF( p.sub( vec3( 0.22, 0, 0 ) ), radius ) ),
-			sampleSceneSDF( p.add( vec3( 0, 0.22, 0 ) ), radius )
-				.sub( sampleSceneSDF( p.sub( vec3( 0, 0.22, 0 ) ), radius ) ),
-			sampleSceneSDF( p.add( vec3( 0, 0, 0.22 ) ), radius )
-				.sub( sampleSceneSDF( p.sub( vec3( 0, 0, 0.22 ) ), radius ) ),
+			sampleSceneSDF( p.add( vec3( 0.50, 0, 0 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0.50, 0, 0 ) ), radius ) ),
+			sampleSceneSDF( p.add( vec3( 0, 0.50, 0 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0, 0.50, 0 ) ), radius ) ),
+			sampleSceneSDF( p.add( vec3( 0, 0, 0.50 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0, 0, 0.50 ) ), radius ) ),
 		).mul( float( 1 ).div( e ) );
 
 	};
@@ -289,6 +289,8 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		const hit = float( 0 ).toVar();
 		const t = tEnter.toVar();
 		const t0 = tEnter.toVar();
+		const lastVoidT = tEnter.toVar();
+		const hasVoid = float( 0 ).toVar();
 
 		If( tEnter.lessThan( tExit ), () => {
 
@@ -299,6 +301,33 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 				If( d.greaterThanEqual( 0 ), () => {
 
+					// The minimum march step can cross the final millimetres of
+					// wall. Three bisections recover a stable sub-pixel contact,
+					// and only run for pixels that actually traversed a cavity.
+					If( hasVoid.greaterThan( 0.5 ), () => {
+
+						const tA = lastVoidT.toVar();
+						const tB = t.toVar();
+
+						for ( let refinement = 0; refinement < 3; refinement ++ ) {
+
+							const tM = tA.add( tB ).mul( 0.5 );
+							const dM = sampleSceneSDF( ro.add( rd.mul( tM ) ), radius );
+							If( dM.lessThan( 0 ), () => {
+
+								tA.assign( tM );
+
+							} ).Else( () => {
+
+								tB.assign( tM );
+
+							} );
+
+						}
+
+						t.assign( tB );
+
+					} );
 					hit.assign( 1 );
 					Break();
 
@@ -307,6 +336,8 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 				// dans une cavité : on avance de la distance à sa paroi. Le bruit
 				// casse le caractère 1-lipschitzien du champ, d'où le facteur 0,8
 				// qui évite de traverser une paroi mince.
+				lastVoidT.assign( t );
+				hasVoid.assign( 1 );
 				t.addAssign( max( d.negate().mul( 0.8 ), 0.035 ) );
 
 				If( t.greaterThan( tExit ), () => {
@@ -316,6 +347,20 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 				} );
 
 			} );
+
+		} );
+
+		// A ray almost coaxial with a long tunnel can exhaust the march before a
+		// physical wall. Close it with a bounded visual soil cap: this prevents a
+		// black background leak and avoids far-depth precision stair-stepping.
+		If( hit.lessThan( 0.5 ).and( tEnter.lessThan( tExit ) ), () => {
+
+			const capDistance = max( radius.mul( 2.2 ), 14 );
+			t.assign( max(
+				tEnter,
+				min( tExit.sub( 0.01 ), tEnter.add( capDistance ) ),
+			) );
+			hit.assign( 1 );
 
 		} );
 
@@ -477,7 +522,8 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		// contact de l'objectif. w (distance parcourue dans le vide) est donc
 		// exactement le discriminant, et il donne en prime un degrade doux aux
 		// bouches de galerie.
-		const wallness = smoothstep( 0.04, 0.55, r.w ).toVar();
+		const wallAA = max( fwidth( r.w ).mul( 1.75 ), 0.018 );
+		const wallness = smoothstep( wallAA, wallAA.add( 0.55 ), r.w ).toVar();
 
 		const rd = normalize( positionWorld.sub( cameraPosition ) );
 		const radius = excavationRadius( rd );
@@ -494,7 +540,7 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 			mx_noise_float( q.add( vec3( 0.19, 0, 0 ) ) ).sub( bump0 ),
 			mx_noise_float( q.add( vec3( 0, 0.19, 0 ) ) ).sub( bump0 ),
 			mx_noise_float( q.add( vec3( 0, 0, 0.19 ) ) ).sub( bump0 ),
-		).mul( uDigRelief ).mul( 1.7 );
+		).mul( uDigRelief ).mul( 1.25 );
 		const n = normalize( geometricNormal.add( bump ) ).toVar();
 
 		// --- OCCLUSION AMBIANTE dérivée du champ ---
@@ -519,7 +565,7 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 		// Sur la TRANCHE, l'occlusion n'a aucun sens (la matière continue vers la
 		// caméra) : on n'applique le noircissement que sur les vraies parois.
-		const open = ao.div( wsum ).mul( 0.75 ).add( 0.25 );
+		const open = ao.div( wsum ).mul( 0.60 ).add( 0.40 );
 		const occ = mix( float( 1 ), open, wallness.mul( uAO ) ).toVar();
 
 		// --- lumiere ---
@@ -542,8 +588,8 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 			float( 1 ).sub( lampDistance.div( uDigRadius.mul( 2.8 ).add( 16 ) ) ), 0.12, 1,
 		);
 		const rawLight = lambert.mul( uHeadLight ).mul( falloff ).mul( 1.65 ).add( 0.46 );
-		const celLight = floor( clamp( rawLight, 0, 2.4 ).mul( 5 ) ).div( 5 );
-		const wallLight = mix( rawLight, celLight, 0.42 );
+		const shapedLight = smoothstep( 0, 1.45, rawLight ).mul( 1.45 );
+		const wallLight = min( mix( rawLight, shapedLight, 0.24 ), 1.45 );
 		const faceLight = float( 0.48 );
 		const amount = mix( faceLight, wallLight, wallness ).toVar();
 
@@ -551,7 +597,10 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		// trou la paroi devient rasante, et une paroi rasante est dans l'ombre.
 		// Sans cette ligne les galeries ressortaient en relief.
 		const lip = float( 1 ).sub( abs( dot( n, l ) ) );
-		const lipShade = mix( float( 1 ), float( 0.26 ), lip.mul( wallness ) ).toVar();
+		const lipShade = mix(
+			float( 1 ), float( 0.72 ),
+			smoothstep( 0.18, 0.92, lip.mul( wallness ) ),
+		).toVar();
 
 		// perte de lumiere avec la profondeur de galerie, mais douce : trop fort,
 		// les chambres du fond disparaissaient au lieu de se lire en enfilade
@@ -591,21 +640,23 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 		const base = soilAt( p );
 		const lit = base.mul( amount ).mul( occ ).mul( lipShade )
-			.mul( cave.mul( 0.72 ).add( 0.28 ) )
+			.mul( cave.mul( 0.62 ).add( 0.38 ) )
 			.mul( mix( float( 1 ), float( 1.55 ), ghost ) );
 
 		// lueur chaude au fond des galeries : elle vient de l'interieur du nid,
 		// signale les cavites lointaines au lieu de les noyer dans le noir
-		const warm = color( 0xffa055 ).mul( float( 1 ).sub( cave ) ).mul( 0.22 ).mul( occ )
+		const warm = color( 0xffa055 ).mul( float( 1 ).sub( cave ) ).mul( 0.26 ).mul( occ )
 			.mul( wallness )
 			.add( color( 0xffb267 ).mul( ghost ).mul( 0.16 ) );
 
 		// LISERE de bouche de galerie : un filet clair la ou la paroi rencontre la
 		// tranche. L'oeil accroche le dessin des cavites.
 		const rim = smoothstep( 0.30, 0.80, wallness ).mul( smoothstep( 1.1, 0.05, r.w ) );
-		const edge = color( 0xf0cb96 ).mul( rim ).mul( 0.30 );
+		const edge = color( 0xf0cb96 ).mul( rim ).mul( 0.08 );
 
-		return lit.add( warm ).add( edge );
+		const cavityFill = base.mul( wallness ).mul( 0.16 );
+
+		return lit.add( warm ).add( edge ).add( cavityFill );
 
 	} )();
 

@@ -16,6 +16,8 @@ Le bake `camera-excavation-v2` de `src/underground-visual.js` contient uniquemen
 
 Le nid physique reste défini par le volume de `nestvolume.js`. Son SDF commande les chambres, les tunnels, le raymarch des parois et le scanner. Il est reconstruit seulement lorsque la forme du nid change.
 
+Le raymarch ferme aussi explicitement les axes exceptionnellement longs par un fond visuel de terre à distance bornée. Un rayon presque aligné avec un tunnel ne peut donc jamais révéler le fond de scène noir ou perdre sa précision de profondeur. Lorsqu'un rayon passe du vide à la matière, trois bissections affinent le contact, puis une largeur de transition dérivée de `fwidth` lisse la lèvre à l'échelle du pixel : le contour et la profondeur restent stables sans augmenter le nombre de pas dans le reste de l'image.
+
 L’excavation de caméra est un second champ, éphémère et purement visuel. Sa forme principale est une sphère de rayon réglable, perturbée par un relief borné. Avec la convention « négatif dans le vide », le champ rendu est l’union :
 
 ```text

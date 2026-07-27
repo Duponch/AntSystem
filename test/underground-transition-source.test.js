@@ -137,6 +137,10 @@ test( 'UNDERGROUND-RENDER-001 excavation unions with the nest and owns its depth
 	assert.match( undergroundSource, /return min\( sampleSDF\( p \), excavation \);/ );
 	assert.match( undergroundSource, /material\.depthNode = Fn/ );
 	assert.match( undergroundSource, /material\.fog = false;/ );
+	assert.match( undergroundSource, /for \( let refinement = 0; refinement < 3; refinement \+\+ \)/ );
+	assert.match( undergroundSource, /const wallAA = max\( fwidth\( r\.w \)\.mul\( 1\.75 \), 0\.018 \);/ );
+	assert.match( undergroundSource, /const capDistance = max\( radius\.mul\( 2\.2 \), 14 \);/ );
+	assert.match( undergroundSource, /min\( tExit\.sub\( 0\.01 \), tEnter\.add\( capDistance \) \)/ );
 
 } );
 

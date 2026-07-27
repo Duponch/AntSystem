@@ -283,7 +283,7 @@
       "doc/technique/architecture.md": "sha256:322ca2b5766e3ae9a8fa506eb9c499cf33479372ff1049bb4785a65bf0eba4a5",
       "doc/technique/navigation-contact-3d.md": "sha256:c13114d8010c771c256ba9d1fc3569a3c9783b058c5d52b4b6de96092e9c0796",
       "doc/technique/performance.md": "sha256:b85d78dba015ce6b0ca6ff5c36391037990166f6a90a4a370551cffe3bbeb3cc",
-      "doc/technique/rendu-souterrain-stylise.md": "sha256:ac5f8c3b86b7f262395a99240e933dbd1a5b64cb5bb722ea9db1bd32e4737e14"
+      "doc/technique/rendu-souterrain-stylise.md": "sha256:7ed6186d4ee780e8f69faa33338c5700c68c22eeb695335e487629c95d4ee4f0"
     },
     "watched": {
       "src/ant-observer.js": "sha256:e423f384b5f2fe32bbb585188682f02d9c5f495f3d6d33802302e40970bdb994",
@@ -318,7 +318,7 @@
       "src/ui.js": "sha256:e8301015446b0e0b73259a9d024bb600038874945f3ebbace2b7eb02ebea1b7e",
       "src/underground-assets.js": "sha256:9f971af69ef4860ebb099be27af126621386f209d689595fe4f6d242f39beaf8",
       "src/underground-visual.js": "sha256:8805e0991d89a2e7f4c57d7adf8be84d1ac1c5b62c6bae89dc6925ba36b4db73",
-      "src/underground.js": "sha256:d62ffd66d644cc3a685f032154816276a0652a80388978c498f60f8299be2377",
+      "src/underground.js": "sha256:7e381dcacc119bcdfbb7aa08ffd1ea0daaf18622e26e5fa1047b960a1c3e8dff",
       "src/warden.js": "sha256:f1f4d571d0560bf77384d31ae79d6b05158fd09a532426b908b064992c76f8f4",
       "test/ant-observer.intent.test.js": "sha256:f98fa26bbcfa050458b8664e10a4887314328a12413053e40ec55018a2c5de82",
       "test/ant-observer.motion.test.js": "sha256:d60b906a9623a39aaf5cf6235d9570d2b55b89fc0cb9dbcc8b5c86ef99eefd72",
@@ -348,7 +348,7 @@
       "test/nest.organic-registry.test.js": "sha256:c1db8603c3bae92816821766ccd60fc4fdaf12aee2c35cf44db3d106f6e2f1d2",
       "test/support-geometry.spatial-hash.test.js": "sha256:3ee702a893c804863b56fae7e4fb97fef075bf289f5b5aa4b3818ea1988180fb",
       "test/underground-geology-v2.test.js": "sha256:fe3e2a59cffe1516302a5b33da45bb4186708d843ba14e785dfc496301d7883e",
-      "test/underground-transition-source.test.js": "sha256:5a0548783183de8a623fc23775720b6a48f129c7d9599c91582f1830c2bee01a",
+      "test/underground-transition-source.test.js": "sha256:89167ccf32dba409b115c4072bb755dd902c224c1fa74cd19cefbf819d0a859e",
       "test/underground-visual.test.js": "sha256:74c7970b573c41b32cf0b00da419aeee08ed721048be9e700f3c797a0d205c5d",
       "test/warden-verdict.test.js": "sha256:041d95ee3d34b629cebdb0a5be00d4ec13aeb96407afe26a4b85773bf14ed2cb"
     }
