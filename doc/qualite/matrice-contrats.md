@@ -4,7 +4,7 @@
 |---|---|---|---|
 | `COL-ECO` | Castes, ponte, développement, stocks, famine et menaces suivent la même chaîne causale ; grenier, reine et couvain conservent leur couche déclarée | `COLONY-TROUGH-001/002`, `COLONY-BROOD-001`, scénarios T2, T3, T5, T6 et T9 | Campagne colonie GPU : ponte, éclosion, livraison, famine et prédateurs |
 | `COL-START` | Colonie établie entièrement souterraine ; rôles cohérents ; éclosion au couvain ; mode surface explicite | `COL-START-001` à `COL-START-004` | T1 : démarrage naturel ; T10 : ON→OFF→ON et toggles sérialisés |
-| `NAV-SURFACE` | 12 pistes × 144 échantillons précalculés ; topologie organique macroscopique et géométrie CPU/GPU communes ; contact SDF direct ; supports/tangentes continus ; bake parallèle bit-identique ; mutations FIFO atomiques ; layout et volume résolus sur `[19, 24]` | `NAV-SURFACE-001` à `008`, `NEST-ORGANIC-001` à `005`, `NAV-SURFACE-PERF-001`, `NAV-SURFACE-PAR-001` à `004`, `NAV-NEST-TXN-001` à `004`, `NAV-NEST-PAUSE-001/002`, `NAV-VOLUME-001/002`, `NAV-VOLUME-GPU-001` à `004` | Warden : cinématique, pose/support, sonde du volume réel et scénarios structurels |
+| `NAV-SURFACE` | Bake `natural-growth-tree-v2` de 96 fiches ; arbre binaire append-only, K24 par défaut, vestibules et chambres distincts ; 12 pistes × 144 échantillons précalculés ; géométrie CPU/GPU commune ; contact SDF direct ; supports/tangentes continus ; bake parallèle bit-identique ; mutations FIFO atomiques ; layout et volume résolus sur `[19, 24]` | `NAV-SURFACE-001` à `008`, `NEST-NATURAL-001` à `006`, `NEST-ORGANIC-001` à `005`, `NAV-SURFACE-PERF-001`, `NAV-SURFACE-PAR-001` à `004`, `NAV-NEST-TXN-001` à `004`, `NAV-NEST-PAUSE-001/002`, `NAV-VOLUME-001/002`, `NAV-VOLUME-GPU-001` à `004` | Warden : cinématique, pose/support, sonde du volume réel et scénarios structurels |
 | `NAV-ENTRANCE` | Entrée périphérique ; trou physique à `y = 0` ; lèvre continue pour tout `dt` ; raccord borné ; transition conservant piste et résidu | `NAV-ENTRANCE-001` à `NAV-ENTRANCE-009` et validation exhaustive `NEST-LAYOUT` | `NAV-ENTRANCE-RUNTIME-001` force sortie+entrée ; `report.pass` exige l’aller-retour |
 | `OBS` | Intention réelle ; arrêts attendus ; immobilité suspecte ; pause vitesse×0 ; distances monde ; suivi temporel isolé | `OBS-START-001`, `OBS-PAUSE-001`, `OBS-DIST-001` et tests observer | Inspection d’un identifiant et traces Warden |
 
@@ -17,8 +17,9 @@
 | Partition, fusion bit-identique et fallback worker | `test/corridor-surface-parallel.test.js` |
 | Portails, progression, absence de warp | `test/corridor-network.continuity.test.js` |
 | Formes irrégulières, étages superposés, profondeur, append-only | `test/corridor-network.regression.test.js` |
-| Registre organique append-only, couronnes irrégulières, parentage ramifié multi-strates, détours et matrice exhaustive de séparation | `test/nest.organic-registry.test.js` |
-| Non-répétitivité, chambres multilobées, sinuosité, rayons variables et strates | `test/nest.organic-layout.test.js` |
+| Bake naturel versionné, préfixes K24/K96, arbre binaire profond, diversité des corridors, absence de séries de quatre, vestibules/chambres | `test/nest.natural-topology.test.js` |
+| Registre append-only, parent bake, détours et matrice exhaustive de séparation | `test/nest.organic-registry.test.js` |
+| Nœuds multilobés, sinuosité, rayons variables et profondeur cohérente | `test/nest.organic-layout.test.js` |
 | Profondeur bornée et résolution verticale minimale | `test/nest.depth-resolution.test.js` |
 | Contact propre, support, convergence, stretch et continuité K96 × 12 | `test/corridor-network.surface-contact.test.js`, `test/chamber-surface.test.js` |
 | Clé spatiale numérique exacte et bornée | `test/support-geometry.spatial-hash.test.js` |
@@ -51,4 +52,4 @@ Une modification d’un des cinq contrats est livrable lorsque :
 - le manifeste est synchronisé ;
 - les tests GPU pertinents ont été exécutés pour tout changement de kernel, texture, pose, SDF, cycle biologique ou transition surface/sous-sol.
 
-Un changement uniquement documentaire doit également exécuter `docs:sync`, car le hash du document fait partie du manifeste.
+Toute modification de la simulation doit mettre à jour dans la même livraison les tests qui prouvent le comportement et la documentation technique et fonctionnelle qui l’explique. Un changement uniquement documentaire doit également exécuter `docs:sync`, car le hash du document fait partie du manifeste.

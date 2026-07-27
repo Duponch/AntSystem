@@ -42,41 +42,22 @@ export const K_MAX = 96;                 // loges candidates (registre complet)
 export const MIN_TUNNEL_WIDTH = 5.5;
 export const DEPTH_SIZE = 640;           // côté de la carte de profondeur (texels)
 
-// angle d'or : deux loges consécutives ne sont jamais alignées, la couverture
-// angulaire reste bonne pour N'IMPORTE QUEL préfixe
+// Le registre final est un arbre de croissance bake. Les validations d'authoring
+// peuvent être aussi exhaustives que nécessaire, mais le jeu ne lit que 96 fiches
+// immuables : aucune recherche de placement n'arrive dans la boucle de frame.
 const GOLD = 2.399963229728653;
-const SERIES_CORE_WORLD = 3;
-const LEVEL_DEPTH_SPREAD_WORLD = [ 2, 1.8, 3, 4 ];
-export const MAX_NEST_DEPTH_DRIFT_WORLD = Math.max( ... LEVEL_DEPTH_SPREAD_WORLD );
-const SERIES_PITCH_WORLD = 7.2;
-const BRANCH_ORBIT_WORLD = 10.2;
-const LAYOUT_ROTATION = 3.427;
-const BRANCH_TARGET_WORLD = 12.5;
-const BRANCH_MAX_WORLD = 22;
-const ORGANIC_LAYOUT_PROBE_DEPTH = 19;
-const ORGANIC_FIELD_MARGIN_WORLD = 2;
-const ORGANIC_CHAMBER_MARGIN_WORLD = 0.5;
-const ORGANIC_PLACEMENT_ATTEMPTS = 256;
+export const NEST_LAYOUT_VERSION = 'natural-growth-tree-v2';
+export const NEST_ROLE = Object.freeze( {
+	TRANSIT: 0,
+	CHAMBER: 1,
+	FUNCTIONAL: 2,
+} );
+export const MAX_NEST_DEPTH_DRIFT_WORLD = 0;
 export const ENTRANCE_PORTAL_OFFSET_WORLD = 11;
 export const ENTRANCE_PORTAL_ANGLE_RAD = 230 * Math.PI / 180;
 export const ENTRANCE_CONNECTOR_BULGE_WORLD = 3;
-// Rare detours discovered by the exhaustive capsule oracle live here. The
-// organic registry starts without exceptions; entries are justified only by a
-// named failing geometry contract, never by visual hand-tuning.
-const CORRIDOR_CURVATURE_SCALE_OVERRIDE = new Map();
-const CORRIDOR_BULGE_OVERRIDE_WORLD = new Map();
-const SERIES_CENTER_OVERRIDE_WORLD = new Map( [
-	[ 5, { x: 3, y: 0 } ],
-	[ 17, { x: 2, y: 0 } ],
-	[ 22, { x: 0, y: 3 } ],
-] );
-// These six rising roots intersect the entrance or a foreign branch in the
-// exhaustive W12 oracle; they retain a level-0 parent in every valid preset.
-const ROOT_SHALLOW_ONLY_SERIES = new Set( [ 3, 7, 11, 12, 19, 22 ] );
-// Unit 87 remains on its own branch: the alternative cross-series descent
-// violates the exhaustive K96 tangent oracle even after safe route fairing.
-const SAME_SERIES_ONLY_UNITS = new Set( [ 87 ] );
-
+// Trois raccords courts réduisent leur sinuosité pour préserver leurs cols physiques.
+const CORRIDOR_CURVATURE_SCALE_OVERRIDE = new Map( [ [ 3, 0 ], [ 14, 0.72 ], [ 25, 0.55 ] ] );
 // ---------------------------------------------------------------------------
 // NIVEAUX — profondeur, taille des chambres, vocation.
 // Fractions de la profondeur totale. La hiérarchie vient de la biologie :
@@ -125,21 +106,13 @@ function vdc( n, b ) {
 }
 
 // ---------------------------------------------------------------------------
-// ORDRE D'ÉMISSION. La série 0 descend TOUS les niveaux : dès la plus petite
-// colonie, le nid possède sa salle de garde, son grenier, sa crèche et sa
-// chambre royale. Les séries suivantes étoffent chaque étage.
+// MORPHOLOGIE ET REGISTRE DE CROISSANCE
 // ---------------------------------------------------------------------------
-const EMISSION = ( () => {
-
-	const list = [];
-	for ( let q = 0; list.length < K_MAX; q ++ ) {
-
-		for ( let s = 0; s < LAYERS && list.length < K_MAX; s ++ ) list.push( { q, s } );
-
-	}
-	return list;
-
-} )();
+// Les quatre premières fiches garantissent immédiatement les fonctions vitales.
+// Les suivantes ne sont plus regroupées en « étages de quatre » : chacune est
+// une pousse indépendante d'un arbre continu, comme dans le registre historique
+// 2efd1f6, mais validée contre les volumes physiques modernes.
+const FOUNDING_TYPES = [ ROOM.GARDE, ROOM.GRENIER, ROOM.CRECHE, ROOM.ROYALE ];
 
 // budget de loges : loi d'échelle des nids réels (le volume creusé croît comme
 // la racine carrée de la population, exposant mesuré ~0,5 sur plusieurs espèces)
@@ -150,12 +123,10 @@ export function nestBudget( W, scale = 1 ) {
 
 }
 
-// quantification : ~20 paliers sur toute la course du curseur, pas des milliers
+// quantification : la croissance active un préfixe immuable par paquets de 4,
+// mais ces quatre nouvelles loges appartiennent à des rameaux différents.
 export const quantK = ( K ) => Math.max( LAYERS, Math.round( K / LAYERS ) * LAYERS );
 
-// ---------------------------------------------------------------------------
-// LA fonction pure : tout ce qui définit la loge k
-// ---------------------------------------------------------------------------
 function organicHash( value ) {
 
 	let hash = ( value ^ 0x9e3779b9 ) >>> 0;
@@ -165,525 +136,226 @@ function organicHash( value ) {
 
 }
 
-function unitMorphology( k, depthMax ) {
+function naturalLevel( depthFraction ) {
 
-	const { q, s } = EMISSION[ k ];
-	const level = LEVEL[ s ];
-	const growth = 0.78 + 0.44 * vdc( k + 1, 5 );
-	const rwx = level.rw * growth * ( 0.85 + 0.30 * vdc( k + 1, 11 ) );
-	const rwz = level.rw * growth * ( 0.85 + 0.30 * vdc( k + 2, 11 ) );
-	const rh = level.rh * growth;
-	const stratifiedDepth = - depthMax * level.zf
-		- LEVEL_DEPTH_SPREAD_WORLD[ s ] * vdc( k + 1, 7 );
-	const roofClearance = rh * 2 + 0.65 + 0.35 * vdc( k + 1, 41 );
-	return {
-		q, s, level, rwx, rwz, rh,
-		depth: Math.min( stratifiedDepth, - roofClearance ),
-	};
+	if ( depthFraction < 0.27 ) return 0;
+	if ( depthFraction < 0.51 ) return 1;
+	if ( depthFraction < 0.75 ) return 2;
+	return 3;
 
 }
 
-function organicBranchCandidate( q, attempt ) {
+function morphologyOf( k, depthMax, record ) {
 
-	const seriesRadius = Math.sqrt(
-		SERIES_CORE_WORLD * SERIES_CORE_WORLD
-		+ SERIES_PITCH_WORLD * SERIES_PITCH_WORLD * q );
-	const seriesAngle = GOLD * q + LAYOUT_ROTATION;
-	let centerX = Math.cos( seriesAngle ) * seriesRadius;
-	let centerY = Math.sin( seriesAngle ) * seriesRadius;
-	// Rejected candidates may slide inside a small local crown. This avoids
-	// imposing a repeated ring lattice while keeping every accepted branch
-	// spatially bounded and every registry prefix immutable after baking.
-	if ( attempt > 0 ) {
+	if ( ! record ) throw new RangeError( `Missing natural registry record ${ k }` );
+	const role = record.role;
+	const h0 = organicHash( k * 401 + 17 );
+	const h1 = organicHash( k * 613 + 29 );
+	const h2 = organicHash( k * 887 + 43 );
+	let base, rh;
+	if ( role === NEST_ROLE.TRANSIT ) {
 
-		const tangentX = - Math.sin( seriesAngle );
-		const tangentY = Math.cos( seriesAngle );
-		const radial = ( organicHash( q * 911 + attempt * 43 ) - 0.5 ) * 8;
-		const tangential = ( organicHash( q * 577 + attempt * 79 ) - 0.5 ) * 8;
-		centerX += Math.cos( seriesAngle ) * radial + tangentX * tangential;
-		centerY += Math.sin( seriesAngle ) * radial + tangentY * tangential;
+		base = 1.55 + 0.48 * h0;
+		rh = 0.58 + 0.22 * h2;
 
-	}
-	const centerOverride = SERIES_CENTER_OVERRIDE_WORLD.get( q );
-	if ( centerOverride ) {
+	} else if ( role === NEST_ROLE.FUNCTIONAL ) {
 
-		centerX += centerOverride.x;
-		centerY += centerOverride.y;
-
-	}
-	let angle = GOLD * ( q + attempt * 3 + 1 ) + LAYOUT_ROTATION
-		+ 0.8 * ( organicHash( q + attempt * 101 ) - 0.5 );
-	const handedness = organicHash( q + attempt * 13 + 701 ) < 0.5 ? - 1 : 1;
-	// Half the roots meander gently, half fold more tightly. Keeping a branch
-	// inside a bounded local crown prevents a natural silhouette from becoming
-	// an unbounded random walk or pushing the SDF outside its fixed field.
-	const tight = organicHash( q + 301 ) < 0.5;
-	const minimumTurn = ( tight ? 102 : 70 ) * Math.PI / 180;
-	const turnSpan = ( tight ? 16 : 12 ) * Math.PI / 180;
-	const points = [];
-	for ( let level = 0; level < LAYERS; level ++ ) {
-
-		if ( level > 0 ) angle += handedness * (
-			minimumTurn + turnSpan * organicHash(
-				q * 11 + attempt * 101 + level * 97 ) );
-		points.push( {
-			x: centerX + Math.cos( angle ) * BRANCH_ORBIT_WORLD,
-			y: centerY + Math.sin( angle ) * BRANCH_ORBIT_WORLD,
-		} );
-
-	}
-	return points;
-
-}
-
-let ORGANIC_PLACEMENT;
-let ORGANIC_ROUTES;
-
-// The pure registry entry: morphology and placement depend only on k. Growing
-// the colony still activates an immutable prefix. The expensive rejection
-// search is an offline authoring oracle; runtime consumes its reviewed bake.
-export function nestUnit( k, depthMax ) {
-
-	const morphology = unitMorphology( k, depthMax );
-	const { q, s, level, rwx, rwz, rh, depth } = morphology;
-	const placement = ORGANIC_PLACEMENT[ k ];
-	const neighbour = ORGANIC_PLACEMENT[ s < LAYERS - 1 ? k + 1 : k - 1 ];
-	const chamberYaw = Math.atan2(
-		neighbour.y - placement.y, neighbour.x - placement.x )
-		+ ( vdc( k + 1, 31 ) - 0.5 ) * 0.18;
-	const chamberBalance = 0.18 + 0.64 * vdc( k + 1, 37 );
-	return {
-		k, q, level: s, layer: s,
-		R: ( ( rwx + rwz ) * 0.5 ) / TEXEL,
-		rwx, rwz, rh,
-		chamberYaw, chamberBalance,
-		organicRoute: ORGANIC_ROUTES[ k ] ?? null,
-		x: NEST.x + placement.x / TEXEL,
-		y: NEST.y + placement.y / TEXEL,
-		depth,
-		type: level.rooms[ q % level.rooms.length ],
-	};
-
-}
-// PARENTAGE APPEND-ONLY. La serie fondatrice garantit les quatre fonctions
-// biologiques initiales. Ensuite, une loge profonde choisit une loge ANTERIEURE
-// de l'etage juste au-dessus, sans obligation d'appartenir a la meme serie.
-// Certaines nouvelles salles hautes germent depuis l'etage 1 : le reseau ne
-// forme plus une ligne de service portant des echelles identiques. Les autres
-// rejoignent une racine haute ; aucun choix ne consulte un noeud futur.
-export function parentOf( k, U ) {
-
-	const child = U[ k ];
-	if ( child.q === 0 ) return k === 0 ? - 1 : k - 1;
-
-	// Organic growth is not a bundle of identical four-room ladders. Deep rooms
-	// attach to a compatible older room one stratum above; selected shallow roots
-	// may rise from stratum 1. The result remains an append-only rooted tree.
-	const rootGrowsFromBelow = child.level === 0
-		&& organicHash( k * 193 + child.q * 53 + 17 ) < 0.58
-		&& ! ROOT_SHALLOW_ONLY_SERIES.has( child.q );
-	const desiredLevel = child.level === 0
-		? ( rootGrowsFromBelow ? 1 : 0 ) : child.level - 1;
-	const allowCrossSeries = child.level === 0
-		|| ( ! SAME_SERIES_ONLY_UNITS.has( k ) && organicHash( k * 193 + child.q * 53 + 901 ) < 0.7 );
-	const targetDistance = child.level === 0 ? BRANCH_TARGET_WORLD : 13.5;
-	const candidates = [];
-	for ( let j = 0; j < k; j ++ ) {
-
-		const previous = U[ j ];
-		if ( child.level === 0 ) {
-
-			if ( rootGrowsFromBelow ? previous.level > 1 : previous.level !== 0 ) continue;
-
-		} else {
-
-			if ( previous.level !== child.level - 1 ) continue;
-			if ( ! allowCrossSeries && previous.q !== child.q ) continue;
-
-		}
-		const dx = ( previous.x - child.x ) * TEXEL;
-		const dz = ( previous.y - child.y ) * TEXEL;
-		const dy = Number.isFinite( previous.depth ) && Number.isFinite( child.depth )
-			? previous.depth - child.depth : 0;
-		const distanceWorld = Math.hypot( dx, dy, dz );
-		if ( distanceWorld > BRANCH_MAX_WORLD ) continue;
-		const shortfall = Math.max( 0, targetDistance - distanceWorld );
-		const overshoot = Math.max( 0, distanceWorld - targetDistance );
-		const levelPenalty = Math.abs( previous.level - desiredLevel ) * 1.8;
-		const ageJitter = organicHash( k * 1009 + j * 313 ) * 0.22;
-		candidates.push( {
-			j,
-			distanceDelta: Math.abs( distanceWorld - targetDistance ),
-			score: shortfall * 1.7 + overshoot + levelPenalty + ageJitter,
-		} );
-
-	}
-
-	candidates.sort( ( a, b ) =>
-		a.score - b.score
-		|| a.distanceDelta - b.distanceDelta
-		|| a.j - b.j );
-	if ( candidates.length === 0 )
-		throw new Error( `No append-only branch parent within ${ BRANCH_MAX_WORLD } world units for chamber ${ k }` );
-	return candidates[ 0 ].j;
-
-}
-const ROUTE_TUNNEL_RADIUS_WORLD = 12 * TEXEL * 0.85 + 0.095;
-const ROUTE_SOIL_MARGIN_WORLD = 0.4;
-const ROUTE_FIELD_LIMIT_WORLD = DEPTH_SIZE * TEXEL * 0.5
-	- ORGANIC_FIELD_MARGIN_WORLD;
-export const MAX_ROUTE_VERTICAL_DRIFT_WORLD = 10;
-const ROUTE_VERTICAL_LIMIT_WORLD = MAX_ROUTE_VERTICAL_DRIFT_WORLD;
-
-function routeSegmentDistance( firstStart, firstEnd, secondStart, secondEnd ) {
-
-	const subtract = ( a, b ) => a.map( ( value, axis ) => value - b[ axis ] );
-	const dot = ( a, b ) => a.reduce( ( sum, value, axis ) => sum + value * b[ axis ], 0 );
-	const u = subtract( firstEnd, firstStart );
-	const v = subtract( secondEnd, secondStart );
-	const w = subtract( firstStart, secondStart );
-	const a = dot( u, u ), b = dot( u, v ), c = dot( v, v );
-	const d = dot( u, w ), e = dot( v, w );
-	const denominator = a * c - b * b;
-	let sNumerator, sDenominator = denominator;
-	let tNumerator, tDenominator = denominator;
-	if ( denominator < 1e-12 ) {
-
-		sNumerator = 0;
-		sDenominator = 1;
-		tNumerator = e;
-		tDenominator = c;
+		const functionalRadius = [ 2.9, 3.55, 3.35, 4.15 ];
+		base = functionalRadius[ k ] ?? 3.45;
+		rh = 0.88 + 0.24 * h2;
 
 	} else {
 
-		sNumerator = b * e - c * d;
-		tNumerator = a * e - b * d;
-		if ( sNumerator < 0 ) {
-
-			sNumerator = 0;
-			tNumerator = e;
-			tDenominator = c;
-
-		} else if ( sNumerator > sDenominator ) {
-
-			sNumerator = sDenominator;
-			tNumerator = e + b;
-			tDenominator = c;
-
-		}
+		base = 2.45 + 1.15 * h0;
+		rh = 0.74 + 0.30 * h2;
 
 	}
-	if ( tNumerator < 0 ) {
-
-		tNumerator = 0;
-		if ( - d < 0 ) sNumerator = 0;
-		else if ( - d > a ) sNumerator = sDenominator;
-		else { sNumerator = - d; sDenominator = a; }
-
-	} else if ( tNumerator > tDenominator ) {
-
-		tNumerator = tDenominator;
-		if ( - d + b < 0 ) sNumerator = 0;
-		else if ( - d + b > a ) sNumerator = sDenominator;
-		else { sNumerator = - d + b; sDenominator = a; }
-
-	}
-	const s = Math.abs( sNumerator ) < 1e-12 ? 0 : sNumerator / sDenominator;
-	const t = Math.abs( tNumerator ) < 1e-12 ? 0 : tNumerator / tDenominator;
-	return Math.hypot( ... w.map( ( value, axis ) =>
-		value + s * u[ axis ] - t * v[ axis ] ) );
+	const rwx = base * ( 0.82 + 0.32 * h1 );
+	const rwz = base * ( 0.82 + 0.32 * organicHash( k * 977 + 61 ) );
+	const unclampedDepth = - depthMax * record.depthFraction;
+	const depth = Math.min( unclampedDepth, - ( rh * 2 + 0.68 ) );
+	const level = naturalLevel( Math.abs( depth ) / depthMax );
+	return { role, rwx, rwz, rh, depth, level };
 
 }
 
-function conservativePointChamberDistance( point, chamber ) {
+function roomTypeOf( k, level, role ) {
 
-	const relative = point.map( ( value, axis ) => value - chamber.center[ axis ] );
-	const absolute = relative.map( Math.abs );
-	const normalizedSquared = absolute.reduce( ( sum, value, axis ) =>
-		sum + ( value / chamber.radii[ axis ] ) ** 2, 0 );
-	if ( normalizedSquared <= 1 ) return 0;
-	const equation = ( lambda ) => absolute.reduce( ( sum, value, axis ) => {
-
-		const radius = chamber.radii[ axis ];
-		return sum + ( radius * value / ( lambda + radius * radius ) ) ** 2;
-
-	}, 0 ) - 1;
-	let low = 0, high = 1;
-	while ( equation( high ) > 0 ) high *= 2;
-	for ( let iteration = 0; iteration < 28; iteration ++ ) {
-
-		const middle = ( low + high ) * 0.5;
-		if ( equation( middle ) > 0 ) low = middle; else high = middle;
-
-	}
-	const lambda = ( low + high ) * 0.5;
-	return Math.hypot( ... absolute.map( ( value, axis ) => {
-
-		const radius = chamber.radii[ axis ];
-		const surface = radius * radius * value / ( lambda + radius * radius );
-		return value - surface;
-
-	} ) );
-
-}
-function routeCandidateTable( seed ) {
-
-	const routes = [ { lateralBulgeWorld: 0, verticalBulgeWorld: 0 } ];
-	for ( let lateral = - 26; lateral <= 26; lateral += 2 ) {
-
-		for ( const vertical of [ 0, - 2.5, 2.5, - 5, 5, - 7.5, 7.5, - 10 ] ) {
-
-			if ( lateral === 0 && vertical === 0 ) continue;
-			routes.push( { lateralBulgeWorld: lateral, verticalBulgeWorld: vertical } );
-
-		}
-
-	}
-	return routes.sort( ( first, second ) => {
-
-		const firstCost = Math.hypot(
-			first.lateralBulgeWorld, first.verticalBulgeWorld * 1.4 );
-		const secondCost = Math.hypot(
-			second.lateralBulgeWorld, second.verticalBulgeWorld * 1.4 );
-		return firstCost - secondCost
-			|| organicHash( seed * 409 + first.lateralBulgeWorld * 17
-				+ first.verticalBulgeWorld * 31 )
-			- organicHash( seed * 409 + second.lateralBulgeWorld * 17
-				+ second.verticalBulgeWorld * 31 );
-
-	} );
+	if ( k < FOUNDING_TYPES.length ) return FOUNDING_TYPES[ k ];
+	if ( role === NEST_ROLE.TRANSIT ) return ROOM.TUNNEL;
+	const rooms = LEVEL[ level ].rooms;
+	return rooms[ Math.floor( organicHash( k * 1093 + 79 ) * rooms.length ) % rooms.length ];
 
 }
 
-function routeIsClear( path, child, parent, chambers, accepted ) {
+function naturalChamberYaw( k, record ) {
 
-	// The rendered capsule axis is one tunnel radius above the carved floor.
-	// Collision planning must therefore validate that physical axis, not the
-	// floor curve below it.
-	const points = path.map( ( point ) => [
-		point.x * TEXEL, point.depth + ROUTE_TUNNEL_RADIUS_WORLD, point.y * TEXEL,
-	] );
-	const requiredChamberDistance = ROUTE_TUNNEL_RADIUS_WORLD
-		+ ROUTE_SOIL_MARGIN_WORLD;
-	const requiredTunnelDistance = ROUTE_TUNNEL_RADIUS_WORLD * 2
-		+ ROUTE_SOIL_MARGIN_WORLD;
-	const centerWorldX = NEST.x * TEXEL, centerWorldZ = NEST.y * TEXEL;
-	for ( const point of points ) {
+	// Une lentille est orientée selon l'axe principal de ses VRAIS corridors
+	// incidents. Les directions sont moyennées modulo PI : l'entrée et la sortie
+	// d'une même branche renforcent le même axe au lieu de s'annuler.
+	const neighbours = [];
+	if ( record.parent >= 0 ) neighbours.push( NATURAL_REGISTRY[ record.parent ] );
+	for ( let child = k + 1; child < NATURAL_REGISTRY.length; child ++ )
+		if ( NATURAL_REGISTRY[ child ].parent === k ) neighbours.push( NATURAL_REGISTRY[ child ] );
+	if ( neighbours.length === 0 ) return GOLD * ( k + 1 );
+	let doubledX = 0, doubledY = 0;
+	for ( const neighbour of neighbours ) {
 
-		if ( Math.abs( point[ 0 ] - centerWorldX ) + ROUTE_TUNNEL_RADIUS_WORLD
-			> ROUTE_FIELD_LIMIT_WORLD
-			|| Math.abs( point[ 2 ] - centerWorldZ ) + ROUTE_TUNNEL_RADIUS_WORLD
-			> ROUTE_FIELD_LIMIT_WORLD
-			|| point[ 1 ] > - 0.45
-			|| point[ 1 ] < - ( MAX_NEST_DEPTH
-				+ MAX_NEST_DEPTH_DRIFT_WORLD + ROUTE_VERTICAL_LIMIT_WORLD ) ) return false;
+		const angle = Math.atan2( neighbour.z - record.z, neighbour.x - record.x );
+		doubledX += Math.cos( angle * 2 );
+		doubledY += Math.sin( angle * 2 );
 
 	}
-	for ( const chamber of chambers ) {
-
-		if ( chamber.k === child || chamber.k === parent ) continue;
-		for ( let index = 0; index < points.length - 1; index ++ ) {
-
-			const start = points[ index ], end = points[ index + 1 ];
-			const middle = start.map( ( value, axis ) => ( value + end[ axis ] ) * 0.5 );
-			const halfSampleGap = Math.hypot( ... start.map(
-				( value, axis ) => value - middle[ axis ] ) );
-			const lowerBound = Math.min(
-				conservativePointChamberDistance( start, chamber ),
-				conservativePointChamberDistance( middle, chamber ),
-				conservativePointChamberDistance( end, chamber ),
-			) - halfSampleGap;
-			if ( lowerBound < requiredChamberDistance ) return false;
-
-		}
-
-	}
-	for ( const previous of accepted ) {
-
-		if ( previous.child === parent || previous.parent === parent
-			|| previous.child === child || previous.parent === child ) continue;
-		for ( let first = 0; first < points.length - 1; first ++ ) {
-
-			for ( let second = 0; second < previous.points.length - 1; second ++ )
-				if ( routeSegmentDistance(
-					points[ first ], points[ first + 1 ],
-					previous.points[ second ], previous.points[ second + 1 ],
-				) < requiredTunnelDistance ) return false;
-
-		}
-
-	}
-	return true;
+	return Math.atan2( doubledY, doubledX ) * 0.5
+		+ ( organicHash( k * 1237 + 97 ) - 0.5 ) * 0.10;
 
 }
+// La fiche pure : placement, parent et détour proviennent du bake versionné ;
+// les dimensions restent dérivées de k pour garder une donnée compacte.
+export function nestUnit( k, depthMax ) {
 
-function routeClearsChamber( points, chamber ) {
-
-	const requiredDistance = ROUTE_TUNNEL_RADIUS_WORLD + ROUTE_SOIL_MARGIN_WORLD;
-	for ( let index = 0; index < points.length - 1; index ++ ) {
-
-		const start = points[ index ], end = points[ index + 1 ];
-		const middle = start.map( ( value, axis ) => ( value + end[ axis ] ) * 0.5 );
-		const halfSampleGap = Math.hypot( ... start.map(
-			( value, axis ) => value - middle[ axis ] ) );
-		const lowerBound = Math.min(
-			conservativePointChamberDistance( start, chamber ),
-			conservativePointChamberDistance( middle, chamber ),
-			conservativePointChamberDistance( end, chamber ),
-		) - halfSampleGap;
-		if ( lowerBound < requiredDistance ) return false;
-
-	}
-	return true;
-
-}
-
-function organicUnitAt( k, point ) {
-
-	const morphology = unitMorphology( k, ORGANIC_LAYOUT_PROBE_DEPTH );
+	if ( ! Number.isInteger( k ) || k < 0 || k >= K_MAX )
+		throw new RangeError( `Invalid chamber index ${ k }` );
+	const record = NATURAL_REGISTRY[ k ];
+	const morphology = morphologyOf( k, depthMax, record );
+	const chamberYaw = naturalChamberYaw( k, record );
 	return {
-		k, q: morphology.q, level: morphology.s, layer: morphology.s,
-		x: NEST.x + point.x / TEXEL,
-		y: NEST.y + point.y / TEXEL,
-		depth: morphology.depth,
+		k, q: k, level: morphology.level, layer: morphology.level,
+		role: record.role,
+		R: ( ( morphology.rwx + morphology.rwz ) * 0.5 ) / TEXEL,
 		rwx: morphology.rwx, rwz: morphology.rwz, rh: morphology.rh,
+		chamberYaw,
+		chamberBalance: 0.18 + 0.64 * organicHash( k * 1291 + 101 ),
+		organicRoute: record.route,
+		x: NEST.x + record.x / TEXEL,
+		y: NEST.y + record.z / TEXEL,
+		depth: morphology.depth,
+		type: roomTypeOf( k, morphology.level, record.role ),
 	};
 
 }
 
-function organicChamberOf( unit ) {
+// Lecture O(1) du parent bake. Un parent est toujours antérieur : activer un
+// préfixe plus grand n'altère aucun corridor déjà utilisé par une fourmi.
+export function parentOf( k ) {
 
-	return {
-		k: unit.k,
-		center: [ unit.x * TEXEL, unit.depth + unit.rh * 0.5, unit.y * TEXEL ],
-		radii: [ unit.rwx, unit.rh * 1.5, unit.rwz ],
-	};
-
-}
-
-function organicChambersAreSeparated( first, second ) {
-
-	const verticalSeparation = Math.abs( first.depth + first.rh
-		- second.depth - second.rh ) - first.rh - second.rh;
-	if ( verticalSeparation >= ORGANIC_CHAMBER_MARGIN_WORLD ) return true;
-	const horizontalSeparation = Math.hypot(
-		( first.x - second.x ) * TEXEL,
-		( first.y - second.y ) * TEXEL,
-	) - Math.max( first.rwx, first.rwz )
-		- Math.max( second.rwx, second.rwz );
-	return horizontalSeparation >= ORGANIC_CHAMBER_MARGIN_WORLD;
+	if ( ! Number.isInteger( k ) || k < 0 || k >= K_MAX )
+		throw new RangeError( `Invalid chamber index ${ k }` );
+	const parent = NATURAL_REGISTRY[ k ].parent;
+	if ( parent < - 1 || parent >= k )
+		throw new Error( `Invalid baked parent ${ parent } for chamber ${ k }` );
+	return parent;
 
 }
-
-function buildOrganicRegistry() {
-
-	const placements = new Array( K_MAX );
-	const routes = new Array( K_MAX ).fill( null );
-	const units = [];
-	const chambers = [];
-	const acceptedRoutes = [];
-	const halfFieldWorld = DEPTH_SIZE * TEXEL * 0.5
-		- ORGANIC_FIELD_MARGIN_WORLD;
-	for ( let q = 0; q < K_MAX / LAYERS; q ++ ) {
-
-		const firstIndex = q * LAYERS;
-		let acceptedSeries = null;
-		for ( let attempt = 0; attempt < ORGANIC_PLACEMENT_ATTEMPTS; attempt ++ ) {
-
-			const candidate = organicBranchCandidate( q, attempt );
-			const proposedUnits = candidate.map( ( point, level ) =>
-				organicUnitAt( firstIndex + level, point ) );
-			let valid = proposedUnits.every( ( unit ) =>
-				Math.abs( ( unit.x - NEST.x ) * TEXEL ) + unit.rwx <= halfFieldWorld
-				&& Math.abs( ( unit.y - NEST.y ) * TEXEL ) + unit.rwz <= halfFieldWorld );
-			for ( let index = 0; index < proposedUnits.length && valid; index ++ ) {
-
-				for ( const previous of [ ... units, ... proposedUnits.slice( 0, index ) ] )
-					if ( ! organicChambersAreSeparated( proposedUnits[ index ], previous ) ) {
-
-						valid = false;
-						break;
-
-					}
-
-			}
-			const proposedChambers = proposedUnits.map( organicChamberOf );
-			for ( const previousRoute of acceptedRoutes ) {
-
-				for ( const chamber of proposedChambers ) {
-
-					if ( previousRoute.child === chamber.k
-						|| previousRoute.parent === chamber.k ) continue;
-					if ( ! routeClearsChamber( previousRoute.points, chamber ) ) valid = false;
-
-				}
-
-			}
-			if ( ! valid ) continue;
-			const combinedUnits = [ ... units, ... proposedUnits ];
-			const combinedChambers = [ ... chambers, ... proposedChambers ];
-			const proposedRoutes = [];
-			const proposedRouteParams = [];
-			const firstRoute = q === 0 ? firstIndex + 1 : firstIndex;
-			for ( let child = firstRoute;
-				child < firstIndex + LAYERS && valid; child ++ ) {
-
-				let parent;
-				try { parent = parentOf( child, combinedUnits ); } catch { valid = false; break; }
-				const start = combinedUnits[ parent ];
-				const end = combinedUnits[ child ];
-				let selected = null, selectedPath = null;
-				for ( const route of routeCandidateTable( child + attempt * K_MAX ) ) {
-
-					const path = tunnelPathWithRoute( start, end, child, 48, route );
-					if ( ! routeIsClear( path, child, parent, combinedChambers,
-						[ ... acceptedRoutes, ... proposedRoutes ] ) ) continue;
-					selected = route;
-					selectedPath = path;
-					break;
-
-				}
-				if ( ! selected ) { valid = false; break; }
-				const accepted = {
-					child, parent,
-					points: selectedPath.map( ( point ) => [
-						point.x * TEXEL,
-						point.depth + ROUTE_TUNNEL_RADIUS_WORLD,
-						point.y * TEXEL,
-					] ),
-				};
-				proposedRoutes.push( accepted );
-				proposedRouteParams.push( [ child, selected ] );
-
-			}
-			if ( valid ) acceptedSeries = {
-				candidate, proposedUnits, proposedChambers,
-				proposedRoutes, proposedRouteParams,
-			};
-			if ( acceptedSeries ) break;
-
-		}
-		if ( ! acceptedSeries ) throw new Error(
-			`No collision-free organic series and routes for ${ q }` );
-		for ( let level = 0; level < LAYERS; level ++ )
-			placements[ firstIndex + level ] = acceptedSeries.candidate[ level ];
-		units.push( ... acceptedSeries.proposedUnits );
-		chambers.push( ... acceptedSeries.proposedChambers );
-		acceptedRoutes.push( ... acceptedSeries.proposedRoutes );
-		for ( const [ child, route ] of acceptedSeries.proposedRouteParams )
-			routes[ child ] = route;
-
-	}
-	return { placements, routes };
-
-}
-
-const BAKED_ORGANIC_PLACEMENT = [[5.856733955190994,-6.110879171789633],[-6.4492788066616145,-10.399253686105144],[-12.846710094351831,1.3181312422636777],[-2.5821285474937636,9.351044271157939],[0.09809385665819903,2.058028759219209],[5.453397788156909,-9.738330874706088],[18.02312627274294,-6.817528678122741],[18.028448198495504,5.644461713077208],[-10.76428115529359,2.3702515316425092],[1.647398503672186,1.304964698927293],[5.740793586948065,13.308359026820554],[-5.848765988316284,19.891154190268296],[-1.2371594909352357,-23.550112275538872],[-14.218312920341441,-22.203602484429663],[-15.038980287055683,-8.906251469095615],[-2.274555990567113,-5.997799024240253],[16.170058890725134,-2.520090709172539],[26.43349879246538,5.128289927826391],[21.231707708174536,16.737764615392937],[8.960169376588919,14.480286174977916],[-13.633302594411608,14.190764142781685],[-1.851632344137914,11.417168904463875],[-1.250217191273208,-1.0123414666681727],[-13.364090805468674,-4.6777489893572115],[18.752380815346974,-19.043473069223317],[7.1953720284035665,-24.19260588434969],[-0.43708697718571266,-15.270252576361314],[6.0881288894363035,-4.77692312660616],[4.004159069455039,10.954783977161144],[12.563389141005038,20.4087099814303],[6.325409425473813,30.43186782974587],[-6.082326664379938,26.716613403338833],[-22.832947729582383,-7.019640145045168],[-28.424256999325266,-17.911767233752137],[-18.526516226926322,-26.390423703263792],[-8.505126728705621,-18.78341675181424],[30.10948583386453,5.092993676757407],[33.53144746448961,-6.940012063718029],[22.947366447846964,-13.265310545131058],[13.977773604707654,-4.600698602279367],[-22.262715609137608,29.13797839650603],[-7.499660579277924,22.151673489665693],[-19.884492494856513,10.204360637578647],[-26.366887553740582,25.15418252607766],[10.278981038612578,-32.65474017872328],[-2.1072877170739623,-37.50799634841949],[-8.81980266439334,-26.35125847177318],[0.1460780695910111,-17.74303688600244],[17.560456958143416,10.209381227172946],[25.99918602862926,19.60735299445504],[18.103718468840224,30.200882603163045],[7.150723559942762,25.634037503652877],[-23.766306151864445,3.677133267642513],[-39.46809393127661,-3.5444015770516533],[-26.213056081738273,-14.561630764976684],[-20.818816914879932,0.7296317701800614],[27.78791265271951,-9.945197222279191],[32.30614605492168,-20.89776597060341],[22.162456106858958,-28.785875190495048],[12.706609943249802,-21.84953056393244],[-14.804924967477039,36.19197235731729],[1.1431414189658646,31.897573051549934],[-7.187522159019789,18.134523176428818],[-18.542845175636913,29.218028377866112],[-9.694453524403682,-28.394044042959173],[-20.914639550590255,-33.52888206187811],[-28.868363519039764,-23.000087274303333],[-20.077218389161363,-13.471154999336662],[43.23861276664253,11.678510005151267],[41.56298758205861,-1.0587513049273811],[29.687508617850465,-2.625690450740695],[24.942170635468116,9.781629740961439],[-31.515167327147942,24.310876218517414],[-39.6501491557081,14.711535399668774],[-31.746990517618116,4.380787157943416],[-20.718286287048798,9.060930877647895],[18.221759186064002,-37.199847197762665],[21.095580420591318,-25.435603050634924],[10.753737592781377,-19.21243503370344],[1.7385855375945098,-27.108941441145056],[0.5536707285150868,32.44148832583063],[7.8022468434201535,42.2796523466983],[18.938275757950038,38.6025983105949],[18.74978654371832,26.183626626709614],[-23.692059848111132,-22.313132346556635],[-27.15752829998467,-6.745485893460813],[-41.83187706853663,-16.05194362673733],[-29.191406278454522,-25.814768476206044],[42.59125307544874,-5.825573037632136],[39.962030512268235,-18.516917228222393],[27.174183700336137,-18.524169023800535],[24.58870223102945,-5.726588149094582],[-28.651088047909813,37.383829978757184],[-24.67660912658306,21.59511322422133],[-10.519852176122297,31.55730959395292],[-23.97546504923556,40.650877235647535]];
-const BAKED_ORGANIC_ROUTES = [null,[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[-4,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[4,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[-2,0],[0,0],[0,0],[-2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[4,0],[0,0],[-6,-2.5],[2,2.5],[0,0],[0,0],[0,0],[-4,0],[-4,-2.5],[0,0],[-2,-2.5],[0,0],[0,0]];
-ORGANIC_PLACEMENT = BAKED_ORGANIC_PLACEMENT.map( ( [ x, y ] ) => ( { x, y } ) );
-ORGANIC_ROUTES = BAKED_ORGANIC_ROUTES.map( ( route ) => route ? ( {
-	lateralBulgeWorld: route[ 0 ], verticalBulgeWorld: route[ 1 ],
-} ) : null );
+// Registre final revu hors ligne : [ x, z, profondeur, rôle, parent, détour X, détour Y ].
+// Les détours ne changent ni le nombre d'échantillons ni le coût par fourmi.
+const BAKED_NATURAL_DATA = Object.freeze( [
+	[ 0, 0, 0.15, 2, -1, 0, 0 ],
+	[ 13, 4, 0.38, 2, 0, 0, 0 ],
+	[ 0.8, -2.6, 0.66, 2, 1, 0, 0 ],
+	[ -2, 10, 0.94, 2, 2, -2.75, 0 ],
+	[ -15.359085394894572, 2.6253354265682596, 0.26310169612038881, 1, 0, 0, 0 ],
+	[ 7.8931319670432156, 15.408521412358128, 0.35012083290591833, 0, 1, 0, 0 ],
+	[ 6.1862658830064321, -17.385306887458597, 0.720196293396689, 1, 2, 0, 0 ],
+	[ 9.0708280157003554, 9.6124062363399236, 0.90178408125970644, 1, 3, -1.25, 0 ],
+	[ 18.792794087440821, 1.06600765456735, 0.924400083585456, 0, 3, -0.75, 0 ],
+	[ -31.943368990763773, 7.2337820021672128, 0.3407055510283783, 1, 4, 0, 0 ],
+	[ 11.445530980136621, 26.236844773876751, 0.3103258719640653, 1, 5, -2, 0 ],
+	[ 11.91910130965675, -31.977544119132219, 0.815382692777073, 1, 6, 0, 0.25 ],
+	[ 14.611008676495745, 16.287787645953038, 0.93858278055810518, 1, 7, 0, 0 ],
+	[ 29.93347860711949, -0.15229870249809108, 0.89083879877881711, 0, 8, 0, 0 ],
+	[ -13, -12, 0.33821289044767616, 0, 4, 0, 0 ],
+	[ -2.1139781246710729, 27.528963359763353, 0.44974300174936649, 0, 5, 0, 0 ],
+	[ -1.8853716160170153, -28.329870591549192, 0.84254471355546268, 0, 6, 3, 0 ],
+	[ 6.0574256294111413, 25.672302588412855, 0.85358240954183184, 1, 7, 0, 0 ],
+	[ 31.41919266454839, -8.3133020144175767, 0.93277297091345324, 1, 8, 0, 0 ],
+	[ -43.512970478733308, 7.8113482246759265, 0.42477648743107976, 1, 9, 0, 0 ],
+	[ 11.313398289288168, 33.5588742342877, 0.28038645212088215, 1, 10, 0, 0 ],
+	[ 16.394049552904356, -44.308973748917218, 0.87733902144155718, 1, 11, 0, 0 ],
+	[ 25.247147020710617, 26.906883748246031, 0.96450056044158738, 1, 12, 0, 0 ],
+	[ 37.716685628969742, -1.0310883480638693, 0.85403392046788973, 1, 13, 0, 0 ],
+	[ -26.793118179520356, 2.8725566362984116, 0.54320627638407193, 1, 19, 0, -1 ],
+	[ -8.15851698047678, 33.730409665892182, 0.4833605500933118, 0, 15, 0, 0 ],
+	[ -30.158725242135873, -7.4692789356304186, 0.39345960133302582, 0, 14, 0, 0 ],
+	[ -41.109079921153906, -15.37599286326245, 0.49527387950975887, 0, 26, 0, 0 ],
+	[ 22.936544174683078, -35.500151068271592, 0.78722945608690931, 1, 11, 0, 0 ],
+	[ -33.629566015572628, -13.249493553600235, 0.54772815598924052, 0, 27, 0, 0 ],
+	[ -13.925837758331449, 29.861520327777026, 0.49587097951155151, 0, 15, 6.25, 2 ],
+	[ -43.444048712446588, 1.1822556258581542, 0.50387714813969653, 0, 26, 0, 0 ],
+	[ 6.17645503571044, 42.65578922668638, 0.44492301349703778, 0, 10, 6, 0 ],
+	[ -28.413350237139909, -8.8684542553347434, 0.63604807323232726, 1, 27, 4, -2.5 ],
+	[ 11.109095956932681, 23.519277926206328, 0.95382388216559921, 0, 12, 0, 0 ],
+	[ -17.283091849802975, 36.558335546837128, 0.56294063359255786, 0, 25, 0, 0 ],
+	[ 39.264396454402082, -12.143330375183661, 0.863982104235828, 1, 13, 0, 2.5 ],
+	[ -42.834536572581783, -4.085682879704529, 0.27316958810941872, 1, 9, 0, 0 ],
+	[ -27.173857292229759, 32.230794806081143, 0.50253366460244731, 0, 30, 0.25, 0 ],
+	[ 13.543551441158174, 43.860204729005417, 0.27584552113656474, 1, 20, 0, 0 ],
+	[ -26.721450226353667, 39.036788718720693, 0.59151532788345218, 1, 30, 0, 0 ],
+	[ 17.670778385586949, 39.102526124275371, 0.30360570564397116, 0, 20, 0, 0 ],
+	[ 3.609551613949324, 33.613626275393337, 0.58102130260576679, 1, 32, 0, 0 ],
+	[ -14.580594813638342, 1.3532677437590328, 0.60872154314821436, 0, 24, 0, 0 ],
+	[ 5.1799627159847459, 25.4367488361199, 0.51892914063919893, 0, 32, 0, 2.5 ],
+	[ -13.591556140601844, -35.209163147479146, 0.959587542654154, 0, 16, 0, 0 ],
+	[ -20.498982059899031, 27.55035995184349, 0.696228610154024, 0, 40, 2, 0 ],
+	[ -16.571092185027211, -29.488995325693047, 0.84161846344303337, 0, 16, 0, 0 ],
+	[ -21.34593966995428, 21.19372849473028, 0.51370343108412064, 1, 38, 0, 0 ],
+	[ -18.108261145943544, -4.5075237899227059, 0.78622786823567059, 0, 33, 0, 0 ],
+	[ 9.7820726887990581, 8.7913008536641861, 0.59941418867080654, 0, 44, 4, 0 ],
+	[ -11.326010550435315, 26.022629699218996, 0.68110119201174579, 1, 25, 2, 0 ],
+	[ 40.014481764742825, -20.751341953993855, 0.96164276573755259, 1, 18, -2, 0 ],
+	[ -26.265748362307352, -1.4666538687068034, 0.72592526500482546, 1, 33, 0, 0 ],
+	[ -24.36766759639271, -32.055849987425752, 0.83742680662426716, 0, 47, 0, 0 ],
+	[ -26.663477353056308, -37.142188985088232, 0.89293666892959789, 0, 45, 0, 0 ],
+	[ -22.886087036078852, -21.60997518232173, 0.93048521036673337, 0, 47, 0, 0 ],
+	[ -19.415716014204751, -15.856755096976419, 0.81464153051192922, 0, 54, 0, 5 ],
+	[ 10.475801882593778, 42.382184092121378, 0.82584146047066664, 0, 17, 0, 0 ],
+	[ -20.55463879455327, 3.6665290721569095, 0.85047265468011668, 0, 53, -2, 0 ],
+	[ 14.855566008208362, -36.261810373885048, 0.966290828824792, 0, 21, 0, 0 ],
+	[ 24.831204133913221, -14.003158115369022, 0.91744405569628884, 1, 52, 0, 0 ],
+	[ 17.510792532805738, -22.09935874791617, 0.83482380603511985, 0, 28, 0, 0 ],
+	[ -13.927349381524843, 10.344396989831823, 0.5643682997969619, 0, 48, 0, 0 ],
+	[ 15.852829116321391, 31.047866006489297, 0.28776978402617454, 0, 41, 2, 0 ],
+	[ -2.6918186194021434, 3.6120726624113138, 0.63789233484048435, 1, 43, 0, 0 ],
+	[ -25.294890627296045, 10.03967612823473, 0.60568908956099488, 0, 48, 0, 0 ],
+	[ -12.873311041512078, -18.856693196401679, 0.81962665724664541, 0, 54, 4, 2.5 ],
+	[ -14.517343126346864, 20.355965706320816, 0.7915461082314762, 0, 46, 0, 0 ],
+	[ 12.873323485657512, -7.2693735883475323, 0.93309593732041718, 1, 62, 0, 0 ],
+	[ 9.3046727535495073, 1.0130191711812255, 0.65369453114868947, 0, 50, 0, 0 ],
+	[ -8.3006771140254649, 19.83536563184844, 0.63418556254596137, 0, 46, -1.25, 0 ],
+	[ 3.0752410914333357, 12.110935641485591, 0.72588894977868079, 1, 65, 0, 0 ],
+	[ -0.42212872561292336, 19.245952718604229, 0.75822553175574392, 0, 51, 2, 0 ],
+	[ -33.101826486201709, 2.5787480409631378, 0.803455301992376, 0, 53, 0, 0 ],
+	[ 15.030004829223325, 16.99242241794337, 0.25941017921099574, 0, 64, 6, 2.5 ],
+	[ 8.7101614468670245, -20.354765165179991, 0.928293016995836, 0, 62, 0, 0 ],
+	[ -31.964760493090282, -14.924655126689045, 0.95006679026551222, 1, 56, 0, 0 ],
+	[ -2.7651753315703687, -4.3980076205917893, 0.91485085611870076, 1, 49, 0, 0 ],
+	[ -40.21663381858373, 5.64022345333697, 0.80524232051372591, 1, 74, 0, 0 ],
+	[ -32.368429988058864, 12.793701550418646, 0.76238777283445436, 1, 74, 0, 0 ],
+	[ -6.4166932914271779, -11.548658655914309, 0.73267598105482812, 0, 49, 0, 0 ],
+	[ -17.028447768527556, 10.334339633150574, 0.91108399078666358, 0, 59, 0, 0 ],
+	[ -27.251259905765135, 19.177175502643809, 0.91896937038111559, 0, 59, 0, 0 ],
+	[ -6.5711307439689293, 9.2812649347893554, 0.66960764027272446, 0, 63, 0, 0 ],
+	[ -1.9084431220641369, 27.8963118778408, 0.78868286188791392, 1, 72, -2.25, 2.25 ],
+	[ 0.2382294403029519, -11.371883459032681, 0.81181977101938974, 0, 67, -2, 0 ],
+	[ -2.162595431765217, -22.764094463562071, 0.955855027762146, 0, 76, 2, -2.5 ],
+	[ 7.0959260540241278, -7.6040054428090862, 0.758354955683344, 0, 70, 0, 0 ],
+	[ -23.522892616620961, -11.565884752053572, 0.90442759694438424, 1, 56, 2, 0 ],
+	[ 19.344080881478927, -8.8077151168607468, 0.9455605521079532, 1, 61, 1, 0 ],
+	[ 7.1767184891933029, -31.496264830733111, 0.96390178606240839, 1, 76, -0.25, 0 ],
+	[ -4.9011139041038518, -14.246032219129454, 0.96299320487849038, 1, 67, 0, 0 ],
+	[ -36.310782789466273, -9.0429766457605911, 0.95880031005378, 0, 77, 0, 0 ],
+	[ -13.226058966617956, -23.546717680412225, 0.95931678997218517, 0, 87, 0, 0 ],
+	[ -1.0853761291666926, 38.589870514255246, 0.80493634556543625, 1, 85, 0, 0 ],
+] );
+export const BAKED_NATURAL_REGISTRY = Object.freeze( BAKED_NATURAL_DATA.map(
+	( [ x, z, depthFraction, role, parent, lateralBulgeWorld, verticalBulgeWorld ], k ) => Object.freeze( {
+		x, z, depthFraction, role, parent,
+		route: k === 0 ? null : Object.freeze( { lateralBulgeWorld, verticalBulgeWorld } ),
+	} ),
+) );
+if ( BAKED_NATURAL_REGISTRY.length !== K_MAX )
+	throw new Error( 'Natural registry must contain exactly ' + K_MAX + ' records' );
+const NATURAL_REGISTRY = BAKED_NATURAL_REGISTRY;
 // TRACE D'UN TUNNEL.
 //
 // La courbe est une BEZIER QUADRATIQUE, et ce choix n'est pas esthetique : les
@@ -714,9 +386,11 @@ function tunnelPathWithRoute( a, b, seed, steps = 10, route = {} ) {
 	// est partagee par le creusage, le SDF et les pistes : aucun bruit visuel ne
 	// peut desynchroniser les pattes de la paroi physique.
 	const curvatureScale = CORRIDOR_CURVATURE_SCALE_OVERRIDE.get( seed ) ?? 1;
-	const amplitude = ( 0.64 + 0.48 * vdc( seed + 1, 7 ) ) * curvatureScale / TEXEL;
-	const collisionAvoidance = ( ( CORRIDOR_BULGE_OVERRIDE_WORLD.get( seed ) ?? 0 )
-		+ ( route.lateralBulgeWorld ?? 0 ) ) / TEXEL;
+	const chordWorld = chord * TEXEL;
+	const freeSpanScale = Math.max( 0.24, Math.min( 1, ( chordWorld - 6 ) / 8 ) );
+	const amplitude = ( 0.64 + 0.48 * vdc( seed + 1, 7 ) )
+		* curvatureScale * freeSpanScale / TEXEL;
+	const collisionAvoidance = ( route.lateralBulgeWorld ?? 0 ) / TEXEL;
 	const phase = GOLD * ( seed + 1 );
 	const points = [];
 

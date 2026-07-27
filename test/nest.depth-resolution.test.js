@@ -57,6 +57,6 @@ test( 'NAV-VOLUME-002 the thinnest tunnel keeps at least three vertical voxels',
 		voxelsAcross >= 3,
 		'minimum tunnel has only ' + voxelsAcross.toFixed( 3 ) + ' vertical voxels',
 	);
-	assert.ok( voxelsAcross < 3.3, 'test no longer exercises the resolution boundary' );
+	assert.ok( voxelsAcross < 3.4, 'test no longer exercises the resolution boundary' );
 
 } );

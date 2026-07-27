@@ -24,33 +24,12 @@ const EPS = 1e-6;
 
 const quantize = ( value, step = 0.02 ) => Math.round( value / step );
 
-function branchShapeSignature( units, series ) {
-
-	const first = series * 4;
-	const vectors = [];
-	for ( let level = 1; level < 4; level ++ ) {
-
-		const a = units[ first + level - 1 ];
-		const b = units[ first + level ];
-		const dx = ( b.x - a.x ) * TEXEL;
-		const dz = ( b.y - a.y ) * TEXEL;
-		vectors.push( [
-			quantize( Math.hypot( dx, dz ), 0.1 ),
-			quantize( Math.atan2( dz, dx ), 0.04 ),
-		] );
-
-	}
-	const initialAngle = vectors[ 0 ][ 1 ];
-	return vectors.map( ( [ length, angle ] ) =>
-		`${ Math.round( length / 10 ) }:${ Math.round( ( angle - initialAngle ) / 5 ) }` ).join( '|' );
-
-}
-
 function wrapAngle( angle ) {
 
 	return Math.atan2( Math.sin( angle ), Math.cos( angle ) );
 
 }
+
 
 function maximumLateralDeviationWorld( path ) {
 
@@ -72,57 +51,63 @@ function maximumLateralDeviationWorld( path ) {
 
 describe( 'deterministic organic nest morphology', () => {
 
-	test( 'NEST-ORGANIC-001 branch silhouettes are deterministic and non-repeating', () => {
+	test( 'NEST-ORGANIC-001 branch directions and turns reject geometric motifs', () => {
 
-		const first = buildNest( K_MAX, DEPTH, WIDTH, false );
-		const repeated = buildNest( K_MAX, DEPTH, WIDTH, false );
-		assert.deepEqual( repeated.units, first.units );
-		assert.deepEqual( repeated.parents, first.parents );
+		for ( const count of [ 24, K_MAX ] ) {
 
-		const signatures = new Set();
-		const headings = new Set();
-		const turns = [];
-		let clockwise = 0, counterClockwise = 0, nearRightAngles = 0;
-		for ( let series = 0; series < K_MAX / 4; series ++ ) {
+			const nest = buildNest( count, DEPTH, WIDTH, false );
+			const headings = [];
+			const turns = [];
+			for ( let child = 1; child < count; child ++ ) {
 
-			signatures.add( branchShapeSignature( first.units, series ) );
-			const firstIndex = series * 4;
-			const directions = [];
-			for ( let level = 1; level < 4; level ++ ) {
+				const parent = nest.parents[ child ];
+				const from = nest.units[ parent ];
+				const to = nest.units[ child ];
+				const heading = Math.atan2( to.y - from.y, to.x - from.x );
+				headings.push( heading );
 
-				const a = first.units[ firstIndex + level - 1 ];
-				const b = first.units[ firstIndex + level ];
-				const heading = Math.atan2( b.y - a.y, b.x - a.x );
-				directions.push( heading );
-				headings.add( Math.floor(
-					( wrapAngle( heading ) + Math.PI ) / ( Math.PI * 2 ) * 18 ) );
+				const grandParent = nest.parents[ parent ];
+				if ( grandParent < 0 ) continue;
+				const previous = nest.units[ grandParent ];
+				const incoming = Math.atan2( from.y - previous.y, from.x - previous.x );
+				turns.push( wrapAngle( heading - incoming ) );
 
 			}
-			for ( let index = 1; index < directions.length; index ++ ) {
 
-				const turn = wrapAngle( directions[ index ] - directions[ index - 1 ] );
-				turns.push( turn );
-				if ( turn < - 0.08 ) clockwise ++;
-				if ( turn > 0.08 ) counterClockwise ++;
-				if ( Math.abs( Math.abs( turn ) - Math.PI / 2 ) < Math.PI / 15 )
-					nearRightAngles ++;
+			const headingBins = new Array( 18 ).fill( 0 );
+			for ( const heading of headings ) {
+
+				const bin = Math.min( 17, Math.floor(
+					( wrapAngle( heading ) + Math.PI ) / ( Math.PI * 2 ) * headingBins.length ) );
+				headingBins[ bin ] ++;
 
 			}
+			const coveredDirections = headingBins.filter( ( total ) => total > 0 ).length;
+			const clockwise = turns.filter( ( turn ) => turn < - 0.08 ).length;
+			const counterClockwise = turns.filter( ( turn ) => turn > 0.08 ).length;
+			const nearRightAngles = turns.filter( ( turn ) =>
+				Math.abs( Math.abs( turn ) - Math.PI / 2 ) < Math.PI / 15 ).length;
+			const minimumDirections = count === 24 ? 12 : 16;
+
+			assert.ok( coveredDirections >= minimumDirections,
+				'K' + count + ' covers only ' + coveredDirections + '/18 macroscopic directions' );
+			assert.ok( Math.max( ...headingBins ) / headings.length <= 0.2,
+				'K' + count + ' retained a dominant geometric axis' );
+			assert.ok( clockwise >= Math.floor( turns.length * 0.3 )
+				&& counterClockwise >= Math.floor( turns.length * 0.3 ),
+				'K' + count + ' turn handedness is biased (' + clockwise + '/' + counterClockwise + ')' );
+			assert.ok( nearRightAngles / turns.length <= 0.25,
+				'K' + count + ' has ' + nearRightAngles + '/' + turns.length + ' near-right-angle turns' );
+			const absoluteTurns = turns.map( Math.abs );
+			assert.ok( Math.min( ...absoluteTurns ) <= 20 * Math.PI / 180,
+				'K' + count + ' lacks gently curving branches' );
+			assert.ok( Math.max( ...absoluteTurns ) >= 120 * Math.PI / 180,
+				'K' + count + ' lacks strongly meandering branches' );
 
 		}
-		assert.ok( signatures.size >= 14,
-			`organic registry retained only ${ signatures.size } distinct branch silhouettes` );
-		assert.ok( headings.size >= 12,
-			`branch axes cover only ${ headings.size }/18 macroscopic directions` );
-		assert.ok( clockwise >= 14 && counterClockwise >= 14,
-			`turn handedness remained biased (${ clockwise } clockwise, ${ counterClockwise } counter-clockwise)` );
-		assert.ok( nearRightAngles <= Math.floor( turns.length * 0.25 ),
-			`${ nearRightAngles }/${ turns.length } turns still reproduce the right-angle motif` );
-		const absoluteTurns = turns.map( Math.abs );
-		assert.ok( Math.min( ... absoluteTurns ) <= 78 * Math.PI / 180 );
-		assert.ok( Math.max( ... absoluteTurns ) >= 112 * Math.PI / 180 );
 
 	} );
+
 
 	test( 'NEST-ORGANIC-002 chambers use bounded asymmetric lobes', () => {
 

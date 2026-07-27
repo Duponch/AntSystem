@@ -2,7 +2,7 @@
 
 ## Chaîne de données
 
-1. `buildNest()` produit un registre organique déterministe de chambres, parents, objectifs et courbes de tunnels.
+1. `buildNest()` lit le bake versionné `natural-growth-tree-v2` : 96 fiches immuables décrivent positions, parents, rôles et détours de corridor.
 2. `buildCorridorNetworkAsync()` construit le graphe puis délègue la projection des 12 pistes de chaque corridor à une file de deux à quatre Workers exacts.
 3. `buildNestLayoutAsync()` publie atomiquement routes, axes, contacts et supports après validation complète du candidat.
 4. Le SDF du nid, la gorge d’entrée, le trou du sol et le masquage de l’herbe dérivent des mêmes primitives géométriques propres.
@@ -11,7 +11,11 @@
 
 Le réseau compilé est la référence commune. Une représentation visuelle peut être voxelisée ou moins détaillée, mais elle ne doit inventer une autre bouche, une autre paroi contractuelle ou une autre courbe de navigation.
 
-La macro-géométrie est elle-même partagée. Le registre place les séries dans des couronnes irrégulières, alterne les virages horaires et antihoraires et mélange des bifurcations amples (70–82°) ou resserrées (102–118°). Le parentage n’est plus une chaîne fixe de quatre loges : une loge profonde choisit un parent antérieur compatible dans la strate supérieure, tandis qu’une partie des racines hautes remonte depuis la strate 1. Le graphe reste un arbre append-only mais se ramifie à toutes les profondeurs. Un oracle d’authoring rejette les candidats qui sortent du champ ou violent la marge de terre, puis publie un bake déterministe append-only : le runtime ne relance aucune recherche. Une chambre logique devient trois lobes tronqués contenus dans une enveloppe conservatrice ; chaque corridor devient seize capsules, avec axe sinueux et rayon variable sans réduction de clearance. Les 144 échantillons de chacune des 12 pistes sont compilés une fois et partagés. Le CPU de contact et le GPU de rendu consomment ces mêmes primitives.
+La macro-topologie est un arbre de croissance binaire, enraciné et append-only. Chaque fiche référence au plus un parent strictement antérieur ; chaque nœud reçoit au plus deux enfants. Les quatre premières fiches forment le tronc fondateur et assurent les fonctions garde, grenier, crèche et chambre royale. Les suivantes prolongent le tronc, créent des bifurcations et des rameaux terminaux à des longueurs et profondeurs variées. Une partie démarre normalement avec le préfixe K24 ; le registre K96 réserve la croissance sans déplacer ni reconnecter le préfixe déjà actif.
+
+Ce modèle remplace l’ancien découpage en séries de quatre niveaux, dont la répétition produisait des rangées et des échelles visuellement géométriques. L’indice `q` est désormais propre à chaque fiche et ne désigne plus un groupe. Les petits nœuds de transit sont des vestibules sans fonction biologique ; les chambres, plus larges, portent les usages de la colonie. Le registre statique relu est la source d’autorité : chaque évolution modifie explicitement ses fiches, puis doit satisfaire les oracles de topologie, de collision et de surface avant publication.
+
+La macro-géométrie est partagée par les différentes couches. Chaque nœud volumique devient trois lobes tronqués contenus dans une enveloppe conservatrice ; chaque corridor devient seize capsules, avec axe sinueux et rayon variable sans réduction de clearance. Les 144 échantillons de chacune des 12 pistes sont compilés une fois et partagés. Le CPU de contact et le GPU de rendu consomment ces mêmes primitives. Cette topologie n’ajoute ni chemin privé ni état géométrique par fourmi : l’échantillonnage individuel reste O(1).
 
 ## Textures de surface
 

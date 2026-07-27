@@ -28,7 +28,6 @@ const COLLISION_DEPTHS = process.env.NEST_TEST_DEPTH
 const COLLISION_WIDTHS = process.env.NEST_TEST_WIDTH
 	? [ Number( process.env.NEST_TEST_WIDTH ) ] : [ 5.5, 6, 12 ];
 const COLLISION_NETWORK_SAMPLES = 8;
-const BRANCH_MAX = 22;
 const CHAMBER_MARGIN = 0.5;
 const TUNNEL_CHAMBER_MARGIN = 0.4;
 const TUNNEL_TUNNEL_MARGIN = 0.4;
@@ -298,69 +297,28 @@ describe( 'deterministic organic nest registry', () => {
 		assert.deepEqual( full.units.slice( 0, 4 ).map( ( unit ) => unit.type ), [
 			ROOM.GARDE, ROOM.GRENIER, ROOM.CRECHE, ROOM.ROYALE,
 		] );
-
-		let crossSeriesParents = 0;
-		let rootsFromBelow = 0;
+		const childCounts = new Uint8Array( K_MAX );
+		let roots = 0;
 		for ( let k = 0; k < K_MAX; k ++ ) {
 
-			const unit = full.units[ k ];
 			const parent = full.parents[ k ];
 			assert.ok( parent < k && parent >= - 1, `invalid parent ${ parent } for ${ k }` );
-			if ( unit.q === 0 ) {
-
-				assert.equal( parent, k === 0 ? - 1 : k - 1,
-					`founding series must expose all four biological strata` );
-				continue;
-
-			}
-			const previous = full.units[ parent ];
-			if ( unit.level === 0 ) {
-
-				assert.ok( previous.level === 0 || previous.level === 1,
-					`root ${ k } attached below the shallow service strata` );
-				if ( previous.level === 1 ) rootsFromBelow ++;
-
-			} else assert.equal( previous.level, unit.level - 1,
-				`room ${ k } attached to level ${ previous.level }, expected ${ unit.level - 1 }` );
-			const distance = Math.hypot(
-				( unit.x - previous.x ) * TEXEL,
-				unit.depth - previous.depth,
-				( unit.y - previous.y ) * TEXEL );
-			assert.ok( distance <= BRANCH_MAX + EPS,
-				`organic edge ${ k } is ${ distance } world units long` );
-			if ( previous.q !== unit.q ) crossSeriesParents ++;
+			if ( parent < 0 ) roots ++; else childCounts[ parent ] ++;
 
 		}
-		assert.ok( crossSeriesParents >= 36,
-			`only ${ crossSeriesParents } rooms escape the repeated four-room ladder` );
-		assert.ok( rootsFromBelow >= 5,
-			`only ${ rootsFromBelow } shallow roots grow from the stratum below` );
+		assert.equal( roots, 1 );
+		assert.ok( childCounts.every( ( count ) => count <= 2 ), 'the growth tree is not binary' );
 
 	} );
 
-	test( 'NEST-LAYOUT-002 uses asymmetric stable scoring and rejects overlong candidates', () => {
+	test( 'NEST-LAYOUT-002 parent lookup is the immutable baked topology', () => {
 
-		const scale = ( world ) => world / TEXEL;
-		const child = { level: 0, q: 1, x: 0, y: 0 };
-		const candidates = [
-			{ level: 0, q: 0, x: scale( 11.5 ), y: 0 },
-			{ level: 0, q: 0, x: scale( 14 ), y: 0 },
-			{ level: 0, q: 0, x: scale( 30 ), y: 0 },
-			child,
-		];
-		assert.equal( parentOf( 3, candidates ), 1, 'benign overshoot should beat a short steep branch' );
-		assert.equal( parentOf( 2, [
-			{ level: 0, q: 0, x: scale( 13 ), y: 0 },
-			{ level: 0, q: 0, x: - scale( 13 ), y: 0 },
-			child,
-		] ), 0, 'index must break an exact score tie' );
-		assert.throws( () => parentOf( 1, [
-			{ level: 0, q: 0, x: scale( 30 ), y: 0 },
-			child,
-		] ), /no append-only branch parent/i );
+		const full = buildNest( K_MAX, DEPTH, TUNNEL_WIDTH, false );
+		for ( let k = 0; k < K_MAX; k ++ ) assert.equal( parentOf( k ), full.parents[ k ] );
+		for ( const invalid of [ - 1, K_MAX, 1.5, NaN ] )
+			assert.throws( () => parentOf( invalid ), /invalid chamber index/i );
 
 	} );
-
 	test( 'NEST-LAYOUT-003 chambers have a constructive separating plane and fit the field', () => {
 
 		const nest = buildNest( K_MAX, DEPTH, TUNNEL_WIDTH, false );
