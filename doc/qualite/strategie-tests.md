@@ -16,6 +16,7 @@ La suite couvre notamment :
 - `COL-START` : placement, rôles, délais et mode historique ;
 - `NAV-SURFACE` : repères transportés, projection sur la surface propre, supports, pistes, portails, planchers, mutations atomiques et résolution physique du volume ;
 - `NAV-ENTRANCE` : continuité de l’anneau, trou raycastable, rayon partagé, lèvre physique continue, placement périphérique et raccord borné ;
+- `UNDERGROUND-VISUAL` : horizons monde, plongée bornée au bloc, excavation visuelle indépendante, pools périodiques déterministes sans popping, plantes racinaires atomiques, migration des réglages, masque SDF propre de la matière et budgets fixes ;
 - `OBS` : intentions, arrêts attendus, détection d’immobilité, pause à vitesse nulle, distances monde et reset temporel ;
 - réseau de corridors : déterminisme, routage, budget résiduel multi-arêtes, invariance au découpage temporel, continuité, profondeur, limites, croissance append-only et complexité structurelle ;
 - bake parallèle : partition équilibrée, fusion bit-identique, transfert unique des buffers, fallback synchrone et terminaison des workers ;
@@ -25,6 +26,8 @@ La suite couvre notamment :
 - `NEST-ORGANIC-001` à `NEST-ORGANIC-005` : couverture angulaire, rotations dans les deux sens et rareté des angles droits, puis trois lobes bornés, sinuosité visible mais limitée, rayons lisses sans perte de clearance et cohérence des profondeurs.
 
 `COLONY-TROUGH-001/002` et `COLONY-BROOD-001` empêchent le rendu et les échanges de dériver vers une nappe superposée. `NAV-SURFACE-001` à `006` couvrent les repères, tables directes, contact SDF, portails et chambres. `NAV-SURFACE-007` borne le stretch ; `NAV-SURFACE-008` ajoute la campagne exhaustive K96 × 12 sur les supports, tangentes CPU/GPU, progression et contact. `NAV-SURFACE-PERF-001` protège la clé spatiale 48 bits. `NAV-SURFACE-PAR-001` à `004` protègent la partition et la fusion exactes ainsi que les chemins de fallback et d’erreur. `NAV-NEST-TXN-001` à `004` et `NAV-NEST-PAUSE-001/002` protègent la file de mutations, la publication atomique et la courte barrière GPU. `NAV-ENTRANCE-005` aligne toute la bouche sur `y = 0`; `NAV-ENTRANCE-006` à `009` couvrent grand pas, tangence, confinement extérieur et émergence. `NAV-VOLUME-001/002` protègent l’intervalle `[19, 24]` et la migration des paramètres : la borne basse est la première configuration exhaustive des 96 loges qui conserve 0,4 unité de terre pour toutes les largeurs 5,5..12 ; la borne haute maintient trois voxels verticaux dans le tunnel le plus fin. `NEST-NATURAL-001` à `006` empêchent le retour des séries de quatre ou la confusion entre vestibule et chambre ; `NEST-ORGANIC-001` à `005` empêchent qu’une simplification graphique désynchronise la surface physique. `NAV-VOLUME-GPU-001` à `004` protègent adressage, demi-précision et filtrage de la sonde. `OBS-PAUSE-001` et `OBS-DIST-001` protègent la sémantique de l’inspecteur.
+
+`UNDERGROUND-VISUAL-001` à `007` protègent les cinq horizons, le test du bloc physique, le bake indépendant du nid, les racines superficielles, la périodicité et la tenue de l’excavation maximale dans une demi-tuile. `VISUAL-005/006` utilisent exactement le prédicat de production `isEmbeddedInExcavationShell` pour l’ancrage et la densité, sans oracle parallèle. `UNDERGROUND-VISUAL-PERF-001` instancie les géométries réelles et recalcule exactement 98 232 triangles, boîte porteuse comprise, pour les cinq draws de base ; le scanner optionnel reste un draw supplémentaire. `UNDERGROUND-TRANSITION-001` à `005` couvrent l’exposition du socle, l’ordre caméra→plongée, le masque de couche et les bornes UI ; `UNDERGROUND-TRANSITION-006` charge des valeurs persistées hors bornes et exige leur migration vers rayon 10, relief 0, contraste 1,4 et poussière 1. `UNDERGROUND-RENDER-001` à `004` inspectent l’union SDF et la profondeur, les invalidations du cache et du bake, les plantes racinaires atomiques et le masque `sampleSDFClean(positionWorld)` des deux matériaux mottes/roches.
 
 La documentation ne fige volontairement pas le nombre total de tests. Le nom, le contenu et le hash des fichiers de preuve contractuels sont suivis par `docs-sync`.
 
@@ -91,7 +94,7 @@ npm run docs:check
 Le contrôle valide :
 
 - les documents requis et les liens locaux ;
-- les six guides UI, leur frontmatter, leur ordre et leurs contrats ;
+- les sept guides UI, leur frontmatter, leur ordre et leurs contrats ;
 - les titres canoniques et les preuves nommées Node ou runtime ;
 - l’appartenance de chaque source `src/navigation/*.js` à un contrat ;
 - les hashes normalisés des documents, sources, tests et campagnes runtime.

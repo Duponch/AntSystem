@@ -5,9 +5,9 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 ## Parcours de lecture
 
 - Fonctionnel : [colonie, castes et cycle de vie](./fonctionnel/colonie.md), [démarrage naturel](./fonctionnel/demarrage-naturel.md), [intentions et arrêts](./fonctionnel/intentions-et-arrets.md).
-- Technique : [architecture](./technique/architecture.md), [navigation et contact 3D](./technique/navigation-contact-3d.md), [coûts et performance](./technique/performance.md).
+- Technique : [architecture](./technique/architecture.md), [navigation et contact 3D](./technique/navigation-contact-3d.md), [rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md), [coûts et performance](./technique/performance.md).
 - Qualité : [stratégie de tests](./qualite/strategie-tests.md) et [matrice contrats/tests](./qualite/matrice-contrats.md).
-- Guide intégré à l’interface : [colonie](./guide/colonie.md), [démarrage](./guide/demarrage-naturel.md), [cycle de vie et ressources](./guide/cycle-vie-ressources.md), [attentes et menaces](./guide/attentes-menaces-limites.md), [navigation](./guide/navigation-3d.md), [inspecteur](./guide/inspecteur.md).
+- Guide intégré à l’interface : [colonie](./guide/colonie.md), [démarrage](./guide/demarrage-naturel.md), [cycle de vie et ressources](./guide/cycle-vie-ressources.md), [attentes et menaces](./guide/attentes-menaces-limites.md), [navigation](./guide/navigation-3d.md), [vue souterraine](./guide/vue-souterraine.md), [inspecteur](./guide/inspecteur.md).
 
 ## Contrats stables
 
@@ -17,6 +17,7 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 | `COL-START` | Placement cohérent et activation échelonnée au démarrage ou à l’éclosion | [Démarrage naturel](./fonctionnel/demarrage-naturel.md#col-start) |
 | `NAV-SURFACE` | Contact direct, support continu et profondeur compatible avec le volume 3D | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-surface) |
 | `NAV-ENTRANCE` | Bouche physique et transition surface/tunnel partageant la même géométrie | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-entrance) |
+| `UNDERGROUND-VISUAL` | Excavation visuelle, strates et décor souterrain bornés, indépendants du nid physique | [Rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md#underground-visual--rendu-souterrain-stylisé) |
 | `OBS` | Intentions lisibles et distinction entre arrêt attendu et immobilité suspecte | [Intentions et arrêts](./fonctionnel/intentions-et-arrets.md#obs) |
 
 Ces identifiants sont des contrats de comportement, pas des numéros de version. Un changement qui les affecte doit mettre à jour le code, les tests et leur document canonique dans la même modification.
@@ -31,4 +32,4 @@ npm run build
 
 `npm run check` enchaîne ces trois contrôles. `npm run docs:sync` ne corrige pas la documentation : il régénère seulement [le manifeste](./manifest.json) après relecture intentionnelle des changements.
 
-Le manifeste contient des SHA-256 normalisés de tous les Markdown de `doc/`, du générateur, ainsi que des sources, tests Node et campagnes runtime associés aux cinq contrats. `docs:check` échoue si un élément dérive, si un des six guides disparaît, si son frontmatter devient incohérent, si un lien local casse ou si une preuve nommée est retirée.
+Le manifeste contient des SHA-256 normalisés de tous les Markdown de `doc/`, du générateur, ainsi que des sources, tests Node et campagnes runtime associés aux six contrats. `docs:check` échoue si un élément dérive, si un des sept guides disparaît, si son frontmatter devient incohérent, si un lien local casse ou si une preuve nommée est retirée.

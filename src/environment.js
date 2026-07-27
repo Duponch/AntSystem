@@ -163,6 +163,7 @@ export async function createEnvironment( scene, sim ) {
 	}
 	return {
 		ground,
+		soil,
 		uTrail,
 		entranceMat,
 		entrance,

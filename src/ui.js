@@ -79,8 +79,9 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 				await colony.reset();
 
 			}
-			ants.queen.visible = requested;
-			colony.setVisible( requested );
+			const visibleUnderground = requested && ants.uDive.value > 0.5;
+			ants.queen.visible = visibleUnderground;
+			colony.setVisible( visibleUnderground );
 			if ( ! requested ) gfx.scannerView = false;
 			gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
 
@@ -247,6 +248,10 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fLife.add( gfx, 'scannerView' ).name( '📡 Vue scanner' );
 
 	const fCut = fLife.addFolder( '🔍 Sous-sol & matière' );
+	fCut.add( gfx, 'undergroundRadius', 6, 10, 0.1 ).name( 'Rayon d\'excavation' );
+	fCut.add( gfx, 'undergroundRelief', 0, 1.8, 0.05 ).name( 'Relief de la terre' );
+	fCut.add( gfx, 'undergroundContrast', 0.6, 1.4, 0.05 ).name( 'Contraste des strates' );
+	fCut.add( gfx, 'undergroundDust', 0, 1, 0.01 ).name( 'Poussière' );
 	fCut.add( gfx, 'nestLight', 0, 3, 0.05 ).name( 'Lampe frontale' );
 	fCut.add( gfx, 'nestAO', 0, 1, 0.05 ).name( 'Occlusion (relief)' );
 	fCut.add( gfx, 'nestGhost', 0, 1.5, 0.05 ).name( 'Galeries en transparence' );

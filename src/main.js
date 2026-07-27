@@ -191,7 +191,7 @@ async function main() {
 	// chaque fois que le nid change de forme
 	const nestVolume = createNestVolume( { renderer, layout } );
 	nestVolume.rebuild();
-	const underground = createUnderground( { scene, layout, env, camera, volume: nestVolume } );
+	const underground = createUnderground( { scene, layout, camera, volume: nestVolume } );
 
 	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
 	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
@@ -211,8 +211,9 @@ async function main() {
 		controls.maxDistance = Math.max( controls.maxDistance, layout.depthMax * 3 );
 
 	}
-	colony.setVisible( params.colony );
-	ants.queen.visible = params.colony;
+	// Le couvain et la reine ne coûtent aucun draw depuis la surface.
+	colony.setVisible( false );
+	ants.queen.visible = false;
 
 	const godrays = createGodrays( renderer, scene, camera, sky );
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
@@ -382,8 +383,12 @@ async function main() {
 
 		}
 
+		// Resolve camera motion before deriving the underground state.
+		cinematic.update( rawDt );
+		if ( ! params.cinematic ) controls.update();
+
 		underground.update( rawDt );                 // plongée = caméra dans le bloc de terre
-		ants.uDive.value = underground.dive ? 1 : 0; // plongée → surface fantomatique
+		ants.uDive.value = underground.dive ? 1 : 0; // render only the camera layer
 		// SCANNER : passe émissive des souterraines (à travers la terre) + reine
 		// luminescente + couvain et stocks de nourriture — chaque type d'élément
 		// a SA couleur, relue chaque frame (réglable live)
@@ -414,11 +419,8 @@ async function main() {
 		if ( running ) ragdoll.tick();
 		spiders.update( simDt );
 
-		// PLONGÉE SOUS TERRE : bascule BINAIRE à y < 0, sans transition. Le
-		// décor de surface disparaît d'un coup (comme une vraie caméra qu'on
-		// enfonce dans la terre), le fond de terre d'underground prend le
-		// relais au même instant. Les fourmis de surface, elles, RESTENT :
-		// rendues semi-transparentes.
+		// Entering the soil hides every surface-only renderable atomically.
+		// Underground fauna and colony meshes remain available.
 		const dived = underground.dive;
 		if ( dived !== wasDived ) {
 
@@ -426,10 +428,21 @@ async function main() {
 			props.group.visible = ! dived;
 			sky.dome.visible = ! dived;
 			sky.moon.visible = ! dived;
+			sky.moonLight.visible = ! dived;
+			sky.ambient.visible = ! dived;
+			scene.fog = dived ? null : sky.fog;
 			foodballs.balls.visible = ! dived;
 			foodballs.halos.visible = ! dived;
+			env.ground.visible = ! dived;
+			env.soil.visible = ! dived;
+			env.entrance.visible = ! dived;
+			colony.setVisible( params.colony && dived );
+			ants.queen.visible = params.colony && dived;
 
 		}
+		// Surface-only debug geometry can be toggled from the UI at any time.
+		cones.setVisible( ! dived && gfx.debugCones );
+
 		// spiders.update() gère lui-même mesh.visible chaque frame : on force
 		// APRÈS lui, sans toucher à sa logique interne
 		if ( dived ) spiders.mesh.visible = false;
@@ -438,11 +451,6 @@ async function main() {
 		grass.update( camera, rawDt );
 		// grass.update() aussi réécrit mesh.visible chaque frame : on force après
 		if ( dived ) grass.mesh.visible = false;
-		cinematic.update( rawDt );
-
-		// OrbitControls.update() repositionne la caméra même désactivé :
-		// on le saute pendant les plans cinématiques
-		if ( ! params.cinematic ) controls.update();
 
 		// early-out réel : sans godrays, aucun post-processing n'est payé ;
 		// sous terre les rayons de lune n'ont plus de sens

@@ -6,9 +6,10 @@
 | `COL-START` | Colonie établie entièrement souterraine ; rôles cohérents ; éclosion au couvain ; mode surface explicite | `COL-START-001` à `COL-START-004` | T1 : démarrage naturel ; T10 : ON→OFF→ON et toggles sérialisés |
 | `NAV-SURFACE` | Bake `natural-growth-tree-v2` de 96 fiches ; arbre binaire append-only, K24 par défaut, vestibules et chambres distincts ; 12 pistes × 144 échantillons précalculés ; géométrie CPU/GPU commune ; contact SDF direct ; supports/tangentes continus ; bake parallèle bit-identique ; mutations FIFO atomiques ; layout et volume résolus sur `[19, 24]` | `NAV-SURFACE-001` à `008`, `NEST-NATURAL-001` à `006`, `NEST-ORGANIC-001` à `005`, `NAV-SURFACE-PERF-001`, `NAV-SURFACE-PAR-001` à `004`, `NAV-NEST-TXN-001` à `004`, `NAV-NEST-PAUSE-001/002`, `NAV-VOLUME-001/002`, `NAV-VOLUME-GPU-001` à `004` | Warden : cinématique, pose/support, sonde du volume réel et scénarios structurels |
 | `NAV-ENTRANCE` | Entrée périphérique ; trou physique à `y = 0` ; lèvre continue pour tout `dt` ; raccord borné ; transition conservant piste et résidu | `NAV-ENTRANCE-001` à `NAV-ENTRANCE-009` et validation exhaustive `NEST-LAYOUT` | `NAV-ENTRANCE-RUNTIME-001` force sortie+entrée ; `report.pass` exige l’aller-retour |
+| `UNDERGROUND-VISUAL` | Excavation indépendante du nid ; cinq horizons ; pools périodiques sans popping ; plantes racinaires atomiques ; invalidations relief/épaisseur ; migration bornée des réglages persistés ; mottes/roches masquées par le SDF propre ; profondeur, couche caméra et scanner cohérents | `UNDERGROUND-VISUAL-001` à `007`, `UNDERGROUND-VISUAL-PERF-001`, `UNDERGROUND-TRANSITION-001` à `006`, `UNDERGROUND-RENDER-001` à `004` | Inspection WebGPU : bascule surface/sous-sol, profondeur, matière absente des cavités réelles, absence de fog et scanner optionnel |
 | `OBS` | Intention réelle ; arrêts attendus ; immobilité suspecte ; pause vitesse×0 ; distances monde ; suivi temporel isolé | `OBS-START-001`, `OBS-PAUSE-001`, `OBS-DIST-001` et tests observer | Inspection d’un identifiant et traces Warden |
 
-## Invariants transverses de navigation
+## Invariants transverses
 
 | Domaine | Fichiers de tests Node |
 |---|---|
@@ -27,6 +28,7 @@
 | Frontières d’échantillon et puits vertical | `test/corridor-network.sample-boundary.test.js`, `test/corridor-network.vertical-shaft.test.js` |
 | Mutations FIFO, rollback, pause de commit et équivalence Worker | `test/nest-mutation-transaction.test.js`, `test/nest-layout-async.integration.test.js`, `test/nest-mutation-ui.test.js` |
 | Adressage 3D, RGBA16F, interpolation et signes du volume | `test/nest-volume-probe.test.js`, puis sonde Warden réelle |
+| Strates, bake périodique sans popping, plantes racinaires atomiques, migration des réglages, masque SDF propre, invalidations de cache, budgets et transition de couche | `test/underground-visual.test.js`, `test/underground-transition-source.test.js` |
 | Couches autoritatives grenier/reine/couvain | `test/colony-layout.test.js` |
 | Lèvre continue, grands pas et émergence | `test/entrance-geometry.test.js`, `test/warden-verdict.test.js` |
 
@@ -44,7 +46,7 @@ Le volume rendu reste `128 × 68 × 128`, avec 3 unités de marge basse et 1,7 u
 
 ## Critère de livraison
 
-Une modification d’un des cinq contrats est livrable lorsque :
+Une modification d’un des six contrats est livrable lorsque :
 
 - les tests Node associés passent ;
 - le build passe ;

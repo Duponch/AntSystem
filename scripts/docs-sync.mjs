@@ -190,6 +190,34 @@ const CONTRACTS = Object.freeze( {
 			'NAV-ENTRANCE-RUNTIME-001',
 		],
 	},
+	'UNDERGROUND-VISUAL': {
+		document: 'doc/technique/rendu-souterrain-stylise.md',
+		guides: [ 'doc/guide/vue-souterraine.md' ],
+		sources: [
+			'src/config.js',
+			'src/environment.js',
+			'src/main.js',
+			'src/ants.js',
+			'src/underground.js',
+			'src/underground-visual.js',
+			'src/ui.js',
+		],
+		tests: [
+			'test/underground-visual.test.js',
+			'test/underground-transition-source.test.js',
+		],
+		runtimeTests: [],
+		evidence: [
+			'UNDERGROUND-VISUAL-001',
+			'UNDERGROUND-VISUAL-002',
+			'UNDERGROUND-VISUAL-003',
+			'UNDERGROUND-VISUAL-004',
+			'UNDERGROUND-VISUAL-005',
+			'UNDERGROUND-VISUAL-006',
+			'UNDERGROUND-VISUAL-007',
+			'UNDERGROUND-VISUAL-PERF-001',
+		],
+	},
 	OBS: {
 		document: 'doc/fonctionnel/intentions-et-arrets.md',
 		guides: [ 'doc/guide/inspecteur.md', 'doc/guide/attentes-menaces-limites.md' ],
@@ -206,6 +234,7 @@ const REQUIRED_GUIDES = Object.freeze( [
 	{ path: 'doc/guide/cycle-vie-ressources.md', order: 30 },
 	{ path: 'doc/guide/attentes-menaces-limites.md', order: 40 },
 	{ path: 'doc/guide/navigation-3d.md', order: 50 },
+	{ path: 'doc/guide/vue-souterraine.md', order: 55 },
 	{ path: 'doc/guide/inspecteur.md', order: 60 },
 ] );
 
@@ -217,6 +246,7 @@ const REQUIRED_DOCS = Object.freeze( [
 	'doc/technique/architecture.md',
 	'doc/technique/navigation-contact-3d.md',
 	'doc/technique/performance.md',
+	'doc/technique/rendu-souterrain-stylise.md',
 	'doc/qualite/strategie-tests.md',
 	'doc/qualite/matrice-contrats.md',
 	... REQUIRED_GUIDES.map( ( guide ) => guide.path ),

@@ -152,10 +152,11 @@ export async function createAnts( sim ) {
 	};
 
 	const uPhase = uniform( 0 );
-	// plongée (0/1 binaire) : caméra DANS le bloc de terre → les souterraines
-	// deviennent visibles, et les fourmis de SURFACE passent en fantomatique
-	// (opacityNode) — elles restent présentes mais ne font plus écran
+	// Binary camera layer: surface outside the soil, underground inside it.
+	// The opposite layer is removed before rendering, never blended over it.
 	const uDive = uniform( 0 );
+	const sameCameraLayer = ( under ) => under.and( uDive.greaterThan( 0.5 ) )
+		.or( under.not().and( uDive.lessThan( 0.5 ) ) );
 	// scanner (0/1 binaire) : les souterraines sont AUSSI dessinées en émissif
 	// plat à travers tout (passe jumelle scanBodies + lueur de la reine),
 	// dans une couleur réglable depuis l'UI
@@ -178,12 +179,10 @@ export async function createAnts( sim ) {
 		If( instanceIndex.toFloat().lessThan( sim.u.antCount ), () => {
 
 			const P = pose.read( instanceIndex );
-			// caméra hors du bloc de terre → les souterraines sont invisibles
-			// sous le sol opaque, on les SAUTE au classement (ni VAT ni ombres) ;
-			// la reine (index 0, colonie active) a son mesh dédié ; une fourmi
-			// RAGDOLLÉE est dessinée par son propre pipeline (sinon elle
-			// apparaîtrait deux fois)
-			const hidden = P.under.and( uDive.lessThan( 0.01 ) );
+			// Only classify the layer occupied by the camera. This removes the other
+			// layer before VAT rendering, shadowing and transparent composition.
+			const hidden = sameCameraLayer( P.under ).not();
+
 			const model = modelFor( P );
 
 			If( P.isQueen.not().and( hidden.not() ).and( P.ragdolled.not() ), () => {
@@ -373,6 +372,11 @@ export async function createAnts( sim ) {
 				// passe scanner : seules les SOUTERRAINES existent ici
 				vis.assign( select( P.under, vis, float( 0 ) ) );
 
+			} else {
+
+				// Surface geometry must never reach the underground depth buffer.
+				vis.assign( select( sameCameraLayer( P.under ), vis, float( 0 ) ) );
+
 			}
 
 			// le corps tourne autour de son PIVOT anatomique (articulation « root »),
@@ -413,14 +417,11 @@ export async function createAnts( sim ) {
 
 		} )();
 
-		// PLONGÉE : les fourmis de SURFACE deviennent semi-transparentes
-		// (on plonge sous elles, elles ne doivent plus faire écran) tandis que
-		// les souterraines restent pleines — elles sont le sujet de la vue.
-		// opacity constante par instance → pas de tri à faire, depthWrite resté
-		// actif : les corps s'occluent encore correctement entre eux.
+		// Surface ants are fully absent during a dive; underground ants stay opaque.
+		// Zero alpha complements classification and the degenerate-vertex guard.
 		material.opacityNode = Fn( () => {
 
-			return mix( float( 1 ), float( 0.25 ),
+			return float( 1 ).sub(
 				varyingProperty( 'float', 'vUnder' ).oneMinus().mul( uDive ) );
 
 		} )();
@@ -594,7 +595,8 @@ export async function createAnts( sim ) {
 		} );
 
 		// dégénérée si dévorée (le temps qu'antfollow lâche la sélection)
-		const vis = select( P.gone, float( 0 ), float( 1 ) );
+		const vis = select( P.gone, float( 0 ), float( 1 ) )
+			.mul( select( sameCameraLayer( P.under ), float( 1 ), float( 0 ) ) );
 
 		// LA REINE est un cas à part : échelle royale, gaster étiré, pivot à
 		// SON gabarit (sinon la surbrillance la dessine en ouvrière naine au
@@ -651,9 +653,10 @@ export async function createAnts( sim ) {
 	grainMat.positionNode = Fn( () => {
 
 		const P = pose.read( instanceIndex );
-		// grain caché avec sa porteuse : souterraine + caméra hors du bloc
-		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
-		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
+		// Carried food follows the camera layer, just like its ant.
+		const sameLayer = sameCameraLayer( P.under );
+
+		const show = select( P.carrying.and( sameLayer ), float( 1 ), float( 0 ) );
 		const offset = qrot( P.q, mouthOffset( P ) );
 
 		return positionLocal.mul( show ).add( offset ).add( P.world );
@@ -684,8 +687,9 @@ export async function createAnts( sim ) {
 	haloMat.positionNode = Fn( () => {
 
 		const P = pose.read( instanceIndex );
-		const hidden = P.under.and( uDive.lessThan( 0.01 ) );
-		const show = select( P.carrying.and( hidden.not() ), float( 1 ), float( 0 ) );
+		const sameLayer = sameCameraLayer( P.under );
+
+		const show = select( P.carrying.and( sameLayer ), float( 1 ), float( 0 ) );
 		const center = qrot( P.q, mouthOffset( P ) ).add( P.world );
 
 		const view = normalize( cameraPosition.sub( center ) );

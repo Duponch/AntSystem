@@ -1,32 +1,21 @@
-// LE BLOC DE TERRE — la map est un pavé de terre, et c'est tout.
+// BIOME SOUTERRAIN STYLISE.
 //
-// Ce que remplace ce fichier : quatre maillages de plancher déformés dans le
-// vertex shader, une découpe en disque dans le sol, un cylindre de paroi, puis
-// un « mode coupe » avec plan de coupe et fosse. Rideaux verticaux, tube
-// flottant, skybox en arrière-plan, bascules de mode : tout cela est supprimé.
+// Sous la surface, la caméra ouvre une cavité visuelle irrégulière dans un
+// volume de terre intact. Cette excavation n'altère ni le terrain, ni le nid,
+// ni le pathfinding : elle est unionnée au SDF du nid uniquement au rendu.
 //
-// Le principe : IL N'Y A AUCUN MODE. Depuis la surface le bloc est un simple
-// pavé opaque (environment.js) — la fourmilière est enterrée, invisible. La
-// caméra qui ENTRE dans le bloc (comme une caméra au bout d'une forreuse qui
-// ne creuse pas) voit simplement ce qui l'entoure :
+// Une passe raymarchée fournit la couleur et une profondeur réelle :
+//   - cinq horizons géologiques ancrés dans le monde ;
+//   - relief 3D, agrégats et lumière chaude décentrée ;
+//   - continuité exacte avec les tunnels et cavités du nid.
 //
-//   • LA TERRE au contact : une boîte englobe le nid et lance un rayon par
-//     pixel jusqu'au champ de distance de nestvolume.js. Dans la terre pleine
-//     le contact est immédiat — on voit la texture de terre ; dans une cavité
-//     le rayon la traverse et révèle ses parois éclairées. On ne voit que ce
-//     qui entoure réellement la caméra : tunnels et loges autour d'elle.
-//   • UN FOND DE TERRE uniforme (grande boîte vue de l'intérieur) : la skybox
-//     n'existe plus. La strate est prise à la profondeur de la caméra (une
-//     seule couche, aucun horizon), le grain en 3D réel (pas de rayures).
-//   • Le décor de surface disparaît (main.js), les fourmis de surface
-//     deviennent semi-transparentes (ants.js, uDive), les souterraines
-//     apparaissent — tout cela au franchissement exact de la paroi du bloc.
+// Trois pools instanciés bornés ajoutent mottes, roches et racines. Une tuile
+// déterministe suit la caméra sans nouvelle allocation et sans dépendre du
+// nombre de fourmis. Les objets restent derrière la coque, dont la profondeur
+// masque naturellement toute portion qui flotterait dans le vide.
 //
-// La plupart des pixels touchent la matière au PREMIER pas — seuls ceux qui
-// tombent dans une cavité marchent réellement : le raymarching reste
-// abordable. La PROFONDEUR est écrite par le shader (depthNode) : fourmis et
-// œufs se composent correctement avec la terre, sans tri ni transparence.
-//
+// Le décor de surface et son fog sont coupés atomiquement dans main.js. Les
+// fourmis de la couche opposée sont masquées dans ants.js.
 // LE SCANNER (style Deep Rock Galactic) est un simple BONUS par-dessus, armé
 // par la case « Vue scanner » de l'UI et affiché seulement caméra dans le
 // bloc : une boîte additive SANS test de profondeur dessine le nid COMPLET en
@@ -37,7 +26,8 @@
 //
 // Une impulsion sphérique (périodique + une grosse à l'activation) fait
 // flamboyer l'hologramme à son passage. Coût : quelques ALU par pas de
-// marche, ZÉRO passe ni texture ajoutée ; la boîte est cachée hors plongée.
+// marche, sans texture ni passe supplémentaire à celle du scanner ; la boîte
+// est cachée hors plongée.
 
 import * as THREE from 'three/webgpu';
 import {
@@ -45,27 +35,38 @@ import {
 	positionWorld, cameraPosition, cameraNear, cameraFar, cameraViewMatrix,
 	viewZToPerspectiveDepth, time,
 	vec3, vec4, float, max, min, abs, clamp, mix, dot, length, normalize,
-	select, smoothstep, exp, fract, color, mx_noise_float,
+	select, smoothstep, exp, fract, color, mx_noise_float, floor,
 } from 'three/tsl';
 
-import { GRID, WORLD, NEST, MIN_NEST_DEPTH, gfx, params } from './config.js';
+import { GRID, WORLD, gfx, params } from './config.js';
+import {
+	UNDERGROUND_VISUAL_BUDGET,
+	generateUndergroundVisualLayout,
+	isEmbeddedInExcavationShell,
+	isInsideUndergroundBlock,
+	soilLayerAtDepth,
+	wrapPeriodicCoordinate,
+} from './underground-visual.js';
 
-export function createUnderground( { scene, layout, env, camera, volume } ) {
+export function createUnderground( { scene, layout, camera, volume } ) {
 
 	const group = new THREE.Group();
 	scene.add( group );
 
-	const centerX = ( NEST.x / GRID - 0.5 ) * WORLD;
-	const centerZ = ( NEST.y / GRID - 0.5 ) * WORLD;
 	const entryX = ( layout.entry.x / GRID - 0.5 ) * WORLD;
 	const entryZ = ( layout.entry.y / GRID - 0.5 ) * WORLD;
 
 	// ------------------------------------------------------------------
-	const uDepthMax = uniform( MIN_NEST_DEPTH );
 	const uSurfaceY = uniform( 0 );
 	const uHeadLight = uniform( 1 );
 	const uAO = uniform( 1 );
 	const uGhost = uniform( gfx.nestGhost );
+	const uSoilThickness = uniform( Math.max( gfx.groundThickness, layout.depthMax + 4 ) );
+	const uDigRadius = uniform( gfx.undergroundRadius );
+	const uDigRelief = uniform( gfx.undergroundRelief );
+	const uDigBlend = uniform( 1 );
+	const uSoilContrast = uniform( gfx.undergroundContrast );
+	const uSurfaceCap = uniform( - 0.004 );
 
 	// --- scanner : activation binaire + impulsion (voir en-tête) ---
 	const uScan = uniform( gfx.nestScan );         // intensité maître (UI)
@@ -110,18 +111,43 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 	};
 
-	// gradient du champ : sert à la normale ET à détecter la tranche plate
-	const gradSDF = ( p ) => {
+	// Rayon de l'excavation fictive. Le bruit est évalué une seule fois par
+	// rayon : la coque est irrégulière sans ajouter un bruit à chaque pas.
+	const excavationRadius = ( direction ) => {
 
-		const e = float( 0.35 );
-		return vec3(
-			sampleSDF( p.add( vec3( 0.35, 0, 0 ) ) ).sub( sampleSDF( p.sub( vec3( 0.35, 0, 0 ) ) ) ),
-			sampleSDF( p.add( vec3( 0, 0.35, 0 ) ) ).sub( sampleSDF( p.sub( vec3( 0, 0.35, 0 ) ) ) ),
-			sampleSDF( p.add( vec3( 0, 0, 0.35 ) ) ).sub( sampleSDF( p.sub( vec3( 0, 0, 0.35 ) ) ) ),
-		).mul( float( 1 ).div( e ) );
+		const relief = mx_noise_float(
+			direction.mul( 2.35 ).add( cameraPosition.mul( 0.045 ) ) );
+		return max( uDigRadius.mul( uDigBlend )
+			.mul( relief.mul( uDigRelief ).mul( 0.035 ).add( 1 ) ), 0.8 );
 
 	};
 
+	// Union du vide réel du nid et de la cavité purement visuelle de caméra.
+	// max(sphère, plan) garde un plafond de terre juste sous y=0 ; min(...)
+	// ouvre ensuite cette cavité dans le SDF existant sans modifier le nid.
+	const sampleSceneSDF = ( p, radius ) => {
+
+		const excavation = max(
+			length( p.sub( cameraPosition ) ).sub( radius ),
+			p.y.sub( uSurfaceCap ),
+		);
+		return min( sampleSDF( p ), excavation );
+
+	};
+
+	const gradSceneSDF = ( p, radius ) => {
+
+		const e = float( 0.22 );
+		return vec3(
+			sampleSceneSDF( p.add( vec3( 0.22, 0, 0 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0.22, 0, 0 ) ), radius ) ),
+			sampleSceneSDF( p.add( vec3( 0, 0.22, 0 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0, 0.22, 0 ) ), radius ) ),
+			sampleSceneSDF( p.add( vec3( 0, 0, 0.22 ) ), radius )
+				.sub( sampleSceneSDF( p.sub( vec3( 0, 0, 0.22 ) ), radius ) ),
+		).mul( float( 1 ).div( e ) );
+
+	};
 	// Canal G du volume : le champ PROPRE (sans bruit, plafond plat), baké pour
 	// la vue scanner — le bruit du canal R sème de faux franchissements de
 	// paroi dans la terre pleine, qui se lisent en grêle de points.
@@ -136,31 +162,38 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 	};
 
 	// ------------------------------------------------------------------
-	// Terre : horizons pédologiques. Le profil ne dépend que de la profondeur,
-	// avec une frontière ondulée par UN seul bruit — trois octaves par fragment
-	// coûteraient dix fois le budget pour un gain invisible.
-	// `detail` = point où évaluer le GRAIN (par défaut le même que la strate).
-	// Le fond de plongée prend la strate à la profondeur de la caméra mais le
-	// grain à la vraie position : strate uniforme SANS aplatir le bruit (sinon
-	// y constant dégénère le bruit 3D en rayures verticales sur les murs).
+	// Terre : cinq horizons pédologiques ancrés dans le monde. Le macro-bruit
+	// ondule leurs limites ; le second point permet d'échantillonner séparément
+	// les détails 3D quand un matériau réutilise la palette.
 	// ------------------------------------------------------------------
 	const soilAt = ( p, detail = p ) => {
 
-		const n = mx_noise_float( p.mul( 0.22 ) ).mul( 0.5 ).add( 0.5 );
-		const f = clamp( p.y.negate().div( uDepthMax ).add( n.sub( 0.5 ).mul( 0.10 ) ), 0, 1 ).toVar();
-		const c = mix( color( 0x4a3520 ), color( 0x6b4726 ), smoothstep( 0.00, 0.16, f ) ).toVar();
-		c.assign( mix( c, color( 0x7c5530 ), smoothstep( 0.16, 0.42, f ) ) );   // horizon A
-		c.assign( mix( c, color( 0x71563a ), smoothstep( 0.42, 0.70, f ) ) );   // horizon B compact
-		c.assign( mix( c, color( 0x63513e ), smoothstep( 0.70, 1.00, f ) ) );   // horizon C
-		// grain : agregats et cailloux, l'echelle qui donne la matiere « terre ».
-		// Il DOIT s'estomper avec la distance : a 40 unites un motif de periode
-		// 0,4 tombe sous le pixel et moire en damier sur toute la tranche.
-		const g = mx_noise_float( detail.mul( 2.6 ) ).mul( 0.5 ).add( 0.5 );
-		const fade = clamp( float( 1 ).sub( length( detail.sub( cameraPosition ) ).mul( 0.028 ) ), 0, 1 );
-		return c.mul( g.sub( 0.5 ).mul( fade ).mul( 0.34 ).add( 1 ) );
+		// Les limites sont ancrées dans le monde : changer de nid ou tourner la
+		// caméra ne déplace jamais la géologie. Un macro-bruit ondule seulement
+		// les frontières, il ne remplace pas les cinq horizons lisibles.
+		const wave = mx_noise_float( p.mul( 0.09 ) ).mul( 0.018 );
+		const f = clamp(
+			p.y.negate().div( max( uSoilThickness, 1 ) ).add( wave ), 0, 1,
+		).toVar();
+		const c = color( 0x3a2114 ).toVar();
+		c.assign( mix( c, color( 0x5a3018 ), smoothstep( 0.07, 0.09, f ) ) );
+		c.assign( mix( c, color( 0x8a441b ), smoothstep( 0.27, 0.29, f ) ) );
+		c.assign( mix( c, color( 0xc2782e ), smoothstep( 0.51, 0.53, f ) ) );
+		c.assign( mix( c, color( 0xb9996a ), smoothstep( 0.77, 0.79, f ) ) );
+
+		// Deux fréquences seulement : gros agrégats, puis cassure minérale. Le
+		// détail fin s'efface avec la distance afin de ne jamais produire de moiré.
+		const aggregate = mx_noise_float( detail.mul( 0.42 ) ).mul( 0.5 ).add( 0.5 );
+		const crumb = mx_noise_float( detail.mul( 2.1 ) ).mul( 0.5 ).add( 0.5 );
+		const fade = clamp(
+			float( 1 ).sub( length( detail.sub( cameraPosition ) ).mul( 0.035 ) ), 0, 1,
+		);
+		const matter = aggregate.sub( 0.5 ).mul( 0.30 )
+			.add( crumb.sub( 0.5 ).mul( 0.14 ).mul( fade ) ).add( 1 );
+		const shaded = c.mul( matter );
+		return mix( color( 0x68401f ), shaded, uSoilContrast );
 
 	};
-
 	// ------------------------------------------------------------------
 	// Impulsion du scanner au point p : base constante (l'hologramme ne
 	// s'éteint jamais tout à fait) + onde sphérique périodique partie du
@@ -195,6 +228,8 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		const ro = cameraPosition;
 		const rd = normalize( positionWorld.sub( cameraPosition ) ).toVar();
 
+		const radius = excavationRadius( rd ).toVar();
+
 		// --- intersection avec la boîte du volume (méthode des dalles) ---
 		const safe = ( v ) => select( abs( v ).lessThan( 1e-4 ), float( 1e-4 ), v );
 		const inv = vec3( 1 ).div( vec3( safe( rd.x ), safe( rd.y ), safe( rd.z ) ) );
@@ -220,9 +255,9 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 			Loop( { start: 0, end: 72, condition: '<' }, () => {
 
 				const p = ro.add( rd.mul( t ) );
-				const d = sampleSDF( p ).toVar();
+				const d = sampleSceneSDF( p, radius ).toVar();
 
-				If( d.greaterThanEqual( 0 ).and( p.y.lessThan( uSurfaceY ) ), () => {
+				If( d.greaterThanEqual( 0 ), () => {
 
 					hit.assign( 1 );
 					Break();
@@ -232,7 +267,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 				// dans une cavité : on avance de la distance à sa paroi. Le bruit
 				// casse le caractère 1-lipschitzien du champ, d'où le facteur 0,8
 				// qui évite de traverser une paroi mince.
-				t.addAssign( max( d.negate().mul( 0.8 ), 0.1 ) );
+				t.addAssign( max( d.negate().mul( 0.8 ), 0.035 ) );
 
 				If( t.greaterThan( tExit ), () => {
 
@@ -381,6 +416,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 	const material = new THREE.MeshBasicNodeMaterial();
 	material.side = THREE.BackSide;      // la boîte reste valide caméra à l'intérieur
 	material.depthWrite = true;
+	material.fog = false;
 
 	material.colorNode = Fn( () => {
 
@@ -403,12 +439,23 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		// bouches de galerie.
 		const wallness = smoothstep( 0.04, 0.55, r.w ).toVar();
 
-		const g = gradSDF( p ).toVar();
-		const gl = length( g ).toVar();
-		// au contact (wallness ≈ 0) la « paroi » fait face à la caméra :
-		// normale = rayon inversé, comme une tranche de planche naturaliste
 		const rd = normalize( positionWorld.sub( cameraPosition ) );
-		const n = normalize( mix( rd.negate(), g.negate().div( max( gl, 1e-4 ) ), wallness ) ).toVar();
+		const radius = excavationRadius( rd );
+		const g = gradSceneSDF( p, radius ).toVar();
+		const gl = length( g ).toVar();
+		const geometricNormal = normalize( mix(
+			rd.negate(), g.negate().div( max( gl, 1e-4 ) ), wallness,
+		) );
+		// Le relief n'est pas une texture plaquée : un gradient 3D casse la
+		// normale de la coque et fait lire de véritables mottes éclairées.
+		const q = p.mul( 0.82 );
+		const bump0 = mx_noise_float( q );
+		const bump = vec3(
+			mx_noise_float( q.add( vec3( 0.19, 0, 0 ) ) ).sub( bump0 ),
+			mx_noise_float( q.add( vec3( 0, 0.19, 0 ) ) ).sub( bump0 ),
+			mx_noise_float( q.add( vec3( 0, 0, 0.19 ) ) ).sub( bump0 ),
+		).mul( uDigRelief ).mul( 1.7 );
+		const n = normalize( geometricNormal.add( bump ) ).toVar();
 
 		// --- OCCLUSION AMBIANTE dérivée du champ ---
 		// C'est ELLE qui rend les cavités lisibles : au fond d'une galerie la
@@ -425,7 +472,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 			const h = 0.45 * i;
 			const w = 1 / i;
-			ao.addAssign( clamp( sampleSDF( p.add( n.mul( h ) ) ).negate().div( h ), 0, 1 ).mul( w ) );
+			ao.addAssign( clamp( sampleSceneSDF( p.add( n.mul( h ) ), radius ).negate().div( h ), 0, 1 ).mul( w ) );
 			wsum.addAssign( w );
 
 		}
@@ -445,18 +492,19 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 		// eclairage plat, les vraies parois la lampe frontale.
 		const toCam = cameraPosition.sub( p );
 		const dist = length( toCam ).toVar();
-		const l = toCam.div( max( dist, 1e-4 ) );
+		// Une lampe légèrement décentrée révèle les volumes ; une lampe placée
+		// exactement dans l'objectif rendrait une coque sphérique uniformément plate.
+		const toLamp = cameraPosition.add( vec3( 2.8, 3.4, 1.8 ) ).sub( p );
+		const lampDistance = length( toLamp ).toVar();
+		const l = toLamp.div( max( lampDistance, 1e-4 ) );
 		const lambert = clamp( dot( n, l ), 0, 1 );
-		const falloff = clamp( float( 1 ).sub( dist.div( uDepthMax.mul( 3 ).add( 60 ) ) ), 0.06, 1 );
-
-		// La TERRE AU CONTACT recoit un eclairage plat et SOMBRE : c'est de la
-		// terre contre l'objectif, pas une paroi eclairee. Les vraies parois,
-		// elles, recoivent la lampe frontale. L'inversion de contraste est
-		// volontaire : ce sont les cavites qui sont claires et ouvertes, la
-		// terre qui fait le fond sombre. C'est ce qui les fait lire comme des
-		// creux et non comme des bosses.
-		const wallLight = lambert.mul( uHeadLight ).mul( falloff ).mul( 2.2 ).add( 0.10 );
-		const faceLight = float( 0.72 );
+		const falloff = clamp(
+			float( 1 ).sub( lampDistance.div( uDigRadius.mul( 2.8 ).add( 16 ) ) ), 0.12, 1,
+		);
+		const rawLight = lambert.mul( uHeadLight ).mul( falloff ).mul( 1.65 ).add( 0.46 );
+		const celLight = floor( clamp( rawLight, 0, 2.4 ).mul( 5 ) ).div( 5 );
+		const wallLight = mix( rawLight, celLight, 0.42 );
+		const faceLight = float( 0.48 );
 		const amount = mix( faceLight, wallLight, wallness ).toVar();
 
 		// REBORD. L'indice qui fait basculer la lecture creux/bosse : au bord d'un
@@ -467,7 +515,7 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 		// perte de lumiere avec la profondeur de galerie, mais douce : trop fort,
 		// les chambres du fond disparaissaient au lieu de se lire en enfilade
-		const cave = exp( r.w.mul( - 0.16 ) ).toVar();
+		const cave = exp( max( r.w.sub( radius ), 0 ).mul( - 0.13 ) ).toVar();
 
 		// --- LES GALERIES PAR TRANSPARENCE ---
 		// Le contact immediat ne montre que de la terre : les cavites a un
@@ -541,44 +589,229 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 	group.add( box );
 
 	// ------------------------------------------------------------------
-	// Le FOND DE TERRE de la plongée : sous terre, la skybox n'existe plus.
-	// Grande SPHÈRE OPAQUE vue de l'intérieur — pas une boîte : les arêtes et
-	// coins d'un cube restaient perceptibles en filigrane (dégradé des normales
-	// par face), une sphère n'a aucune silhouette propre. Dessinée en PREMIER
-	// (renderOrder −3), SANS écriture de profondeur → fourmis, œufs et
-	// hologramme passent toujours devant. Hors brouillard : le fond doit
-	// rester de la terre, pas se laver vers la couleur du ciel.
+	// Matière 3D bornée. Les positions X/Z sont une tuile monde de 26 unités
+	// recyclée autour de la caméra. Les centres restent dans une fine bande
+	// DERRIÈRE la coque ; son depthNode découpe donc naturellement chaque objet
+	// et aucun caillou ne peut flotter au milieu du vide excavé.
 	// ------------------------------------------------------------------
-	const SOIL_R = 300;       // assez grand pour englober toute la carte
+	let visualLayout = generateUndergroundVisualLayout( {
+		world: WORLD,
+		thickness: Math.max( gfx.groundThickness, layout.depthMax + 4 ),
+	} );
+	const clodMaterial = new THREE.MeshLambertNodeMaterial( {
+		color: 0xffffff, vertexColors: true, flatShading: true, fog: false,
+	} );
+	clodMaterial.emissive.set( 0x120704 );
+	clodMaterial.emissiveIntensity = 0.32;
+	const rockMaterial = new THREE.MeshLambertNodeMaterial( {
+		color: 0xffffff, vertexColors: true, flatShading: true, fog: false,
+		emissive: 0x241d17, emissiveIntensity: 0.35,
+	} );
+	// Le depth test découpe l'excavation caméra ; ce masque supplémentaire
+	// découpe le vide réel du nid. Une motte ou une roche à l'intersection d'une
+	// galerie ne peut donc jamais devenir un objet flottant.
+	const matterVisibility = sampleSDFClean( positionWorld ).greaterThanEqual( 0 );
+	clodMaterial.maskNode = matterVisibility;
+	rockMaterial.maskNode = matterVisibility;
+	const rootMaterial = new THREE.MeshLambertMaterial( {
+		color: 0xa9602d, flatShading: true, fog: false,
+		emissive: 0x30150a, emissiveIntensity: 0.35,
+	} );
 
-	const soilMat = new THREE.MeshBasicNodeMaterial();
-	soilMat.side = THREE.BackSide;
-	soilMat.depthWrite = false;
-	soilMat.fog = false;
+	const clods = new THREE.InstancedMesh(
+		new THREE.IcosahedronGeometry( 1, 0 ), clodMaterial,
+		UNDERGROUND_VISUAL_BUDGET.clods,
+	);
+	const rocks = new THREE.InstancedMesh(
+		new THREE.IcosahedronGeometry( 1, 0 ), rockMaterial,
+		UNDERGROUND_VISUAL_BUDGET.rocks,
+	);
+	const roots = new THREE.InstancedMesh(
+		new THREE.CylinderGeometry( 1, 0.72, 1, 5, 1, false ), rootMaterial,
+		Math.max( 1, visualLayout.rootCount ),
+	);
+	for ( const mesh of [ clods, rocks, roots ] ) {
 
-	soilMat.colorNode = Fn( () => {
+		mesh.count = 0;
+		mesh.frustumCulled = false;
+		mesh.renderOrder = - 1;
+		mesh.visible = false;
+		mesh.instanceMatrix.setUsage( THREE.DynamicDrawUsage );
+		group.add( mesh );
 
-		// La strate est prise À LA PROFONDEUR DE LA CAMÉRA : une caméra
-		// enfoncée dans la terre voit UNE seule couche de sol, uniforme.
-		// Échantillonner la strate à la profondeur du fragment donnait un
-		// dégradé vertical — un faux horizon avec bandes haut/bas, exactement
-		// l'effet « filtre sur la skybox » à proscrire. Le grain, lui, reste
-		// évalué à la position réelle : à y constant le bruit 3D dégénérerait
-		// en stries sur la sphère. Le facteur 0,72 épouse l'éclairage plat de
-		// la terre au contact (faceLight) : aucune ligne de jonction entre le
-		// raymarch et ce fond — le tout se lit comme UNE masse de terre.
-		return soilAt(
-			vec3( positionWorld.x, cameraPosition.y, positionWorld.z ), positionWorld ).mul( 0.72 );
+	}
 
-	} )();
+	const dustPositions = new Float32Array( UNDERGROUND_VISUAL_BUDGET.dust * 3 );
+	for ( let i = 0; i < UNDERGROUND_VISUAL_BUDGET.dust; i ++ ) {
 
-	const soilBox = new THREE.Mesh( new THREE.SphereGeometry( 1, 32, 16 ), soilMat );
-	soilBox.frustumCulled = false;
-	soilBox.renderOrder = - 3;
-	soilBox.visible = false;
-	soilBox.scale.setScalar( SOIL_R );
-	soilBox.position.set( centerX, 0, centerZ );
-	group.add( soilBox );
+		dustPositions[ i * 3 ] = visualLayout.dust[ i * 4 ];
+		dustPositions[ i * 3 + 1 ] = visualLayout.dust[ i * 4 + 1 ];
+		dustPositions[ i * 3 + 2 ] = visualLayout.dust[ i * 4 + 2 ];
+
+	}
+	const dustGeometry = new THREE.BufferGeometry();
+	dustGeometry.setAttribute( 'position', new THREE.BufferAttribute( dustPositions, 3 ) );
+	const dustMaterial = new THREE.PointsMaterial( {
+		color: 0xffc37a,
+		size: 0.065,
+		sizeAttenuation: true,
+		transparent: true,
+		opacity: gfx.undergroundDust * 0.42,
+		depthWrite: false,
+		fog: false,
+		blending: THREE.AdditiveBlending,
+	} );
+	const dust = new THREE.Points( dustGeometry, dustMaterial );
+	dust.frustumCulled = false;
+	dust.renderOrder = 1;
+	dust.visible = false;
+	group.add( dust );
+
+	// Éclairage chaud autonome : les lumières de surface sont coupées par main.js.
+	const earthAmbient = new THREE.AmbientLight( 0xffbd85, 1.35 );
+	const earthLamp = new THREE.PointLight( 0xffd0a0, 36, 30, 2 );
+	earthAmbient.visible = false;
+	earthLamp.visible = false;
+	group.add( earthAmbient, earthLamp );
+
+	const decorObject = new THREE.Object3D();
+	const decorColor = new THREE.Color();
+	const rootFrom = new THREE.Vector3();
+	const rootTo = new THREE.Vector3();
+	const rootMid = new THREE.Vector3();
+	const rootDirection = new THREE.Vector3();
+	const rootUp = new THREE.Vector3( 0, 1, 0 );
+	const lampOffset = new THREE.Vector3( 2.8, 3.4, 1.8 );
+	const lastDecorPosition = new THREE.Vector3( Infinity, Infinity, Infinity );
+	const rockPalette = [ 0x796f63, 0x8f806b, 0xaa875d, 0x806b58 ];
+	const decorStats = { clods: 0, rocks: 0, roots: 0 };
+	let lastDecorRadius = - 1;
+	let lastDecorThickness = - 1;
+	let lastDecorRelief = - 1;
+
+	function fillPeriodicInstances( mesh, data, cameraPositionCPU, radius, type ) {
+
+		const thickness = Math.max( 1, gfx.groundThickness );
+		const half = WORLD * 0.5 + 2.2;
+		let count = 0;
+		for ( let offset = 0, index = 0; offset < data.length; offset += 9, index ++ ) {
+
+			const x = wrapPeriodicCoordinate(
+				data[ offset ], cameraPositionCPU.x, visualLayout.tileSpan );
+			const y = data[ offset + 1 ];
+			const z = wrapPeriodicCoordinate(
+				data[ offset + 2 ], cameraPositionCPU.z, visualLayout.tileSpan );
+			if ( Math.abs( x ) > half || Math.abs( z ) > half || y >= 0 || y < - thickness ) continue;
+			const distance = Math.hypot(
+				x - cameraPositionCPU.x, y - cameraPositionCPU.y, z - cameraPositionCPU.z,
+			);
+			const visualScale = type === 'clod' ? 0.08 : 1.0;
+			const scaleX = data[ offset + 3 ] * visualScale;
+			const scaleY = data[ offset + 4 ] * visualScale;
+			const scaleZ = data[ offset + 5 ] * visualScale;
+			const instanceRadius = Math.max( scaleX, scaleY, scaleZ );
+			// Seule une calotte traverse la coque. Le prédicat partagé avec les
+			// tests garantit exactement les mêmes bandes d'ancrage en production.
+			if ( ! isEmbeddedInExcavationShell(
+				distance, radius, gfx.undergroundRelief, instanceRadius, type ) ) continue;
+
+			decorObject.position.set( x, y, z );
+			decorObject.scale.set( scaleX, scaleY, scaleZ );
+			decorObject.rotation.set( data[ offset + 6 ], data[ offset + 7 ], data[ offset + 8 ] );
+			decorObject.updateMatrix();
+			mesh.setMatrixAt( count, decorObject.matrix );
+			if ( type === 'clod' ) {
+
+				decorColor.setHex( soilLayerAtDepth( - y, thickness ).color );
+				decorColor.offsetHSL( ( index % 7 - 3 ) * 0.002, 0, ( index % 11 - 5 ) * 0.008 );
+
+			} else {
+
+				decorColor.setHex( rockPalette[ index % rockPalette.length ] );
+
+			}
+			mesh.setColorAt( count, decorColor );
+			count ++;
+
+		}
+		mesh.count = count;
+		mesh.instanceMatrix.needsUpdate = true;
+		if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
+		return count;
+
+	}
+
+	function fillRoots( cameraPositionCPU, radius ) {
+
+		const data = visualLayout.roots;
+		let count = 0;
+		// Une plante est une unité atomique de neuf segments : le même décalage
+		// périodique et le même verdict de visibilité s'appliquent à tout le groupe.
+		for ( let plantOffset = 0; plantOffset < data.length; plantOffset += 9 * 7 ) {
+
+			const baseAnchorX = data[ plantOffset ];
+			const baseAnchorZ = data[ plantOffset + 2 ];
+			const shiftX = wrapPeriodicCoordinate(
+				baseAnchorX, cameraPositionCPU.x, visualLayout.tileSpan ) - baseAnchorX;
+			const shiftZ = wrapPeriodicCoordinate(
+				baseAnchorZ, cameraPositionCPU.z, visualLayout.tileSpan ) - baseAnchorZ;
+			const anchorX = baseAnchorX + shiftX;
+			const anchorZ = baseAnchorZ + shiftZ;
+			const anchorDistance = Math.hypot(
+				anchorX - cameraPositionCPU.x, anchorZ - cameraPositionCPU.z );
+			const hangsFromCeiling = cameraPositionCPU.y + radius > - 0.35
+				&& anchorDistance >= 2.5 && anchorDistance < radius * 0.82;
+			if ( ! hangsFromCeiling ) continue;
+
+			for ( let segment = 0; segment < 9; segment ++ ) {
+
+				const offset = plantOffset + segment * 7;
+				rootFrom.set(
+					data[ offset ] + shiftX, data[ offset + 1 ], data[ offset + 2 ] + shiftZ );
+				rootTo.set(
+					data[ offset + 3 ] + shiftX, data[ offset + 4 ], data[ offset + 5 ] + shiftZ );
+				rootMid.addVectors( rootFrom, rootTo ).multiplyScalar( 0.5 );
+				rootDirection.subVectors( rootTo, rootFrom );
+				const segmentLength = rootDirection.length();
+				if ( segmentLength < 1e-4 ) continue;
+				decorObject.position.copy( rootMid );
+				decorObject.quaternion.setFromUnitVectors( rootUp, rootDirection.normalize() );
+				const rootRadius = data[ offset + 6 ];
+				decorObject.scale.set( rootRadius * 0.72, segmentLength, rootRadius * 0.72 );
+				decorObject.updateMatrix();
+				roots.setMatrixAt( count, decorObject.matrix );
+				count ++;
+
+			}
+
+		}
+		roots.count = count;
+		roots.instanceMatrix.needsUpdate = true;
+		return count;
+
+	}
+	function refreshDecor( radius, force = false ) {
+
+		const moved = lastDecorPosition.distanceToSquared( camera.position ) > 0.0324;
+		const radiusChanged = Math.abs( radius - lastDecorRadius ) > 0.055;
+		const thicknessChanged = Math.abs( gfx.groundThickness - lastDecorThickness ) > 0.01;
+		const reliefChanged = Math.abs( gfx.undergroundRelief - lastDecorRelief ) > 0.01;
+		if ( ! force && ! moved && ! radiusChanged && ! thicknessChanged && ! reliefChanged ) return;
+		if ( thicknessChanged ) visualLayout = generateUndergroundVisualLayout( {
+			world: WORLD,
+			thickness: Math.max( 0.2, gfx.groundThickness ),
+		} );
+		lastDecorPosition.copy( camera.position );
+		lastDecorRadius = radius;
+		lastDecorThickness = gfx.groundThickness;
+		lastDecorRelief = gfx.undergroundRelief;
+		decorStats.clods = fillPeriodicInstances(
+			clods, visualLayout.clods, camera.position, radius, 'clod' );
+		decorStats.rocks = fillPeriodicInstances(
+			rocks, visualLayout.rocks, camera.position, radius, 'rock' );
+		decorStats.roots = fillRoots( camera.position, radius );
+
+	}
 
 	// ------------------------------------------------------------------
 	// La boîte HOLOGRAMME : fil-de-fer du nid complet. Additive, sans écriture
@@ -618,35 +851,59 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 	}
 
 	// ------------------------------------------------------------------
-	// Plongée binaire (fond de terre, raymarch du nid, scanner)
+	// Plongée : masques binaires, ouverture visuelle amortie, scanner optionnel
 	// ------------------------------------------------------------------
 	let dive = false;          // caméra DANS le bloc de terre (binaire, sans fondu)
 	let scanOn = false;        // hologramme actif = plongée + case UI + colonie
 	let prevScanOn = false;    // détection du front (impulsion d'activation)
-	let scanFireAge = 1e6;     // âge de l'impulsion d'activation (1e6 = jamais)
+	let scanFireAge = 1e6;
+	let digBlend = 0;          // ouverture amortie de la cavité visuelle
 
 	function update( dt ) {
 
-		uDepthMax.value = layout.depthMax || MIN_NEST_DEPTH;
 		uHeadLight.value = gfx.nestLight;
 		uAO.value = gfx.nestAO;
 		uGhost.value = gfx.nestGhost;
+		uSoilThickness.value = Math.max( 1, gfx.groundThickness );
+		uDigRadius.value = gfx.undergroundRadius;
+		uDigRelief.value = gfx.undergroundRelief;
+		uSoilContrast.value = gfx.undergroundContrast;
 		uScan.value = gfx.nestScan;
 		uScanPulse.value = gfx.nestScanPulse;
 		uScanColor.value.set( gfx.nestScanColor );
 
-		// PLONGÉE BINAIRE : la caméra franchit la paroi du BLOC de terre (le
-		// pavé d'environment.js : |x|,|z| ≤ WORLD/2, −épaisseur ≤ y < 0) →
-		// bascule d'un coup, comme une caméra au bout d'une forreuse. AUCUN
-		// fondu, aucune transition : le fond de terre et le raymarch du nid
-		// remplacent la surface d'un frame à l'autre (main.js masque le décor
-		// de surface au même instant). Être sous le niveau du sol MAIS HORS
-		// du bloc (à côté de la carte, ou sous son fond) ne déclenche rien.
+		// Le franchissement du bloc physique est binaire : surface, fog et couche
+		// de fourmis basculent ensemble. Seul le rayon de l'excavation s'ouvre
+		// pendant quelques dixièmes de seconde pour suggérer la caméra-forreuse.
+		// Être sous y=0 mais hors des limites du terrain ne déclenche rien.
 		const p = camera.position;
-		dive = p.y < 0 && p.y >= - gfx.groundThickness
-			&& Math.abs( p.x ) <= WORLD * 0.5 && Math.abs( p.z ) <= WORLD * 0.5;
-		soilBox.visible = dive;
+		const nextDive = isInsideUndergroundBlock( p, WORLD, gfx.groundThickness );
+		if ( nextDive && ! dive ) digBlend = 0.42;
+		if ( ! nextDive ) digBlend = 0;
+		dive = nextDive;
+		if ( dive ) digBlend = Math.min( 1, digBlend + dt * 1.9 );
+		uDigBlend.value = digBlend;
 		box.visible = dive;
+		const decorVisible = dive;
+		clods.visible = decorVisible;
+		rocks.visible = decorVisible;
+		roots.visible = decorVisible;
+		dust.visible = decorVisible && gfx.undergroundDust > 0.001;
+		earthAmbient.visible = decorVisible;
+		earthLamp.visible = decorVisible;
+		if ( dive ) {
+
+			const visualRadius = Math.max( 0.8, gfx.undergroundRadius * digBlend );
+			refreshDecor( visualRadius );
+			dust.position.copy( camera.position );
+			dust.scale.setScalar( visualRadius * 0.82 );
+			dust.rotation.y += dt * 0.045;
+			dust.rotation.x += dt * 0.012;
+			dustMaterial.opacity = gfx.undergroundDust * 0.42;
+			earthLamp.position.copy( camera.position ).add( lampOffset );
+			earthLamp.intensity = 36 * Math.max( 0, gfx.nestLight );
+
+		}
 
 		// Le SCANNER n'ajoute QUE l'hologramme, et seulement dans le bloc de
 		// terre (armé par l'UI, colonie existante). Rien d'autre ne change.
@@ -675,18 +932,19 @@ export function createUnderground( { scene, layout, env, camera, volume } ) {
 
 		// la boîte du raymarch court jusqu'au bord du terrain, et descend sous
 		// le nid : hors du volume baké, sampleSDF renvoie de la terre pleine
-		const half = Math.max( WORLD * 0.5, vSize.value.x * 0.5 + 8 );
-		const floorY = vMin.value.y - 6;
-		bMin.value.set( centerX - half, floorY, centerZ - half );
-		bSize.value.set( half * 2, - floorY + 0.05, half * 2 );
+		// Le biome visuel couvre le bloc physique entier et ne dépend jamais des
+		// dimensions du nid : on peut explorer de la terre vierge partout.
+		const margin = Math.max( 12, gfx.undergroundRadius * 1.5 + 3 );
+		const floorY = - Math.max( 1, gfx.groundThickness ) - margin;
+		bMin.value.set( - WORLD * 0.5 - margin, floorY, - WORLD * 0.5 - margin );
+		bSize.value.set( WORLD + margin * 2, - floorY + 0.08, WORLD + margin * 2 );
 		fitBox();
-
-
 
 	}
 
 	return {
 		group, update, box, uScanMode,
+		decor: { clods, rocks, roots, dust, stats: decorStats },
 		get dive() { return dive; },
 		get scanMode() { return scanOn ? 1 : 0; },
 	};

@@ -248,6 +248,12 @@ export const gfx = {
 	rdSubsteps: 8,                     // sous-pas XPBD par pas fixe
 
 	// Vue souterraine (nid volumetrique, caméra dans le bloc de terre)
+	// Excavation visuelle de la camera : geometrie bornee, independante du nid.
+	undergroundRadius: 9,               // rayon de la bulle creusee visuellement (unites monde)
+	undergroundRelief: 1,               // amplitude du relief des mottes et strates
+	undergroundContrast: 1,             // contraste de la palette geologique
+	undergroundDust: 0.72,               // densite visuelle de poussiere dans la cavite
+
 	nestLight: 1.0,                    // lampe frontale : lisibilite des galeries
 	nestAO: 1.0,                       // occlusion ambiante derivee du champ
 	nestBlend: 0.85,                   // fusion des cavites (organicite)
@@ -321,6 +327,16 @@ if ( saved ) {
 // volume 128x64x128 ne conservait meme plus un voxel dans le diametre d'un
 // tunnel. La migration garde toutes les sauvegardes chargeables et physiques.
 params.nestDepth = Math.min( MAX_NEST_DEPTH, Math.max( MIN_NEST_DEPTH, params.nestDepth ) );
+
+// Les versions précédentes autorisaient une excavation jusqu'à 14 u. Les
+// valeurs persistées sont migrées avant toute création de géométrie : une
+// ancienne sauvegarde ne peut donc pas violer la demi-tuile périodique ni les
+// bornes de qualité validées par les tests.
+const clampSetting = ( value, low, high ) => Math.min( high, Math.max( low, value ) );
+gfx.undergroundRadius = clampSetting( gfx.undergroundRadius, 6, 10 );
+gfx.undergroundRelief = clampSetting( gfx.undergroundRelief, 0, 1.8 );
+gfx.undergroundContrast = clampSetting( gfx.undergroundContrast, 0.6, 1.4 );
+gfx.undergroundDust = clampSetting( gfx.undergroundDust, 0, 1 );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau

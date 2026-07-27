@@ -52,11 +52,21 @@ La forme organique conserve le budget partagé existant : trois lobes par nœud,
 
 Accepter 200 unités avec la même grille réduirait fortement la résolution verticale et casserait ce contrat. Une telle échelle nécessite une architecture en briques, clipmap ou volume clairsemé. Augmenter simplement la profondeur logique sans changer le stockage n’est pas une optimisation acceptable.
 
+## Budget de la vue souterraine stylisée
+
+Le rendu `UNDERGROUND-VISUAL` ajoute cinq draws de base : un raymarch pour la terre excavée, un `InstancedMesh` pour 3 375 mottes, un pour 384 roches, un pour les 225 segments de racines courants (cap contractuel 1 152), puis un `Points` pour 128 poussières. Les trois meshes géologiques sont alloués une fois ; leurs données X/Z sont repliées périodiquement sur une tuile de 26 unités, tandis que la poussière reste un nuage local fixe. Le bake conserve les mêmes capacités lorsqu’il est régénéré après un changement d’épaisseur du sol.
+
+Le plafond conservateur exact totalise 98 232 triangles (`12 + 3 375 × 20 + 384 × 20 + 1 152 × 20`) : 12 pour la `BoxGeometry` porteuse, puis les icosaèdres et le cap des racines. Les draws fixes mottes et roches utilisent chacun un `MeshLambertNodeMaterial` dont le `maskNode` lit le canal SDF propre à `positionWorld` : chaque fragment de chacun de ces deux draws paie une lecture de texture, sans passe supplémentaire, et la matière disparaît dans le vide réel. Le scanner additif ajoute un sixième draw optionnel hors des cinq draws de base et hors de ce budget géologique. Les lumières souterraines n’émettent pas d’ombres et le fog de surface est désactivé sous terre.
+
+Le cache des matrices d’instances est invalidé par le mouvement, le rayon, le relief ou l’épaisseur ; seule cette dernière régénère le bake géologique borné. Aucun de ces réglages ne reconstruit le volume du nid ni les tables par fourmi. Le rayon UI est limité à 10 et la bande roche à 0,65 afin que l’excavation maximale reste dans la demi-tuile de 13 unités. `UNDERGROUND-VISUAL-PERF-001` instancie les trois géométries réelles, recompte leurs triangles, ajoute les 12 triangles de la porteuse et exige exactement 98 232 pour cinq draws de base. Il n’instrumente pas les commandes soumises au GPU et ne borne pas le coût de fragment du raymarch.
+
 ## Ce qui est testé
 
 Les tests de complexité vérifient la forme constante de l’état, l’absence de chemin privé, les dimensions des deux tables de surface, leur croissance linéaire avec corridors/pistes/échantillons et l’absence de grossissement après des milliers de pas.
 
 Les tests `NAV-SURFACE` contrôlent la surface propre, les supports, les portails, les planchers, la borne de stretch et la continuité exhaustive K96 × 12. `NAV-SURFACE-PERF-001` contrôle la clé spatiale. `NAV-SURFACE-PAR-001` à `004` comparent les buffers parallèles et synchrones octet par octet, puis exercent indisponibilité, erreurs d’infrastructure, erreurs déterministes et terminaison des workers. Le Warden exerce également la capacité maximale et exige des poses finies, des pivots sur leur support et une orientation cohérente. Ses kernels et buffers de diagnostic ne sont dispatchés que pendant une campagne Warden : leur coût en jeu normal est nul.
+
+Les tests `UNDERGROUND-VISUAL-001` à `007` vérifient les horizons, la détection du bloc, le déterminisme, la profondeur des racines, la coque de révélation, la densité périodique et l’absence de popping au rayon maximal. `VISUAL-005/006` appellent le même `isEmbeddedInExcavationShell` que le runtime CPU, pas une approximation de test. `UNDERGROUND-TRANSITION-001` à `005` contrôlent l’exposition du socle, l’ordre caméra→plongée, la bascule de couche et les bornes UI ; `UNDERGROUND-TRANSITION-006` couvre la migration des quatre réglages persistés. `UNDERGROUND-RENDER-001` à `004` inspectent le raymarch, les invalidations relief/épaisseur, les plantes racinaires atomiques et le `maskNode` SDF propre des deux matériaux mottes/roches.
 
 Cette campagne n’impose pas encore de budget p95 de temps GPU.
 
