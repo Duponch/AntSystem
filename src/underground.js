@@ -630,8 +630,8 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 	// ------------------------------------------------------------------
 	// Matière 3D bornée. Les positions X/Z sont une tuile monde de 26 unités
-	// recyclée autour de la caméra. Les candidats sont reprojetés vers la face
-	// visible de la coque ; la profondeur du raymarch compose ensuite les volumes.
+	// recyclée autour de la caméra. Chaque copie est fixe dans le repère monde ;
+	// la caméra ne fait que révéler celles que sa coque rencontre.
 	// ------------------------------------------------------------------
 	let visualLayout = generateUndergroundVisualLayout( {
 		world: WORLD,
@@ -857,26 +857,14 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 			const deltaY = sourceY - cameraPositionCPU.y;
 			const deltaZ = sourceZ - cameraPositionCPU.z;
 			const distance = Math.hypot( deltaX, deltaY, deltaZ );
-			if ( distance < 1e-5 ) continue;
+			if ( distance < 1e-5 || ! isEmbeddedInExcavationShell(
+				distance, radius, gfx.undergroundRelief, instanceRadius,
+				'artifact', gfx.undergroundArtifactExposure,
+			) ) continue;
+			if ( sourceY + instanceRadius >= - 0.02
+				|| sourceY - instanceRadius < - thickness ) continue;
 
-			// Les candidats gardent leur direction deterministe, mais leur centre est
-			// reprojete vers la plus petite enveloppe possible de l'excavation. Ils
-			// restent donc visibles meme au creux du relief, sans requete ni nouveau
-			// mesh. Une exposition elevee autorise le leger flottement stylistique.
-			const minimumSurface = Math.max(
-				0.8, radius * ( 1 - Math.max( 0, gfx.undergroundRelief ) * 0.035 ),
-			);
-			const presentedDistance = Math.max(
-				0.12, minimumSurface - instanceRadius * gfx.undergroundArtifactExposure,
-			);
-			const radialScale = presentedDistance / distance;
-			const x = cameraPositionCPU.x + deltaX * radialScale;
-			const y = cameraPositionCPU.y + deltaY * radialScale;
-			const z = cameraPositionCPU.z + deltaZ * radialScale;
-			if ( Math.abs( x ) > half || Math.abs( z ) > half
-				|| y + instanceRadius >= - 0.02 || y - instanceRadius < - thickness ) continue;
-
-			decorObject.position.set( x, y, z );
+			decorObject.position.set( sourceX, sourceY, sourceZ );
 			decorObject.scale.setScalar( scale );
 			decorObject.rotation.set( data[ offset + 3 ], data[ offset + 4 ], data[ offset + 5 ] );
 			decorObject.updateMatrix();

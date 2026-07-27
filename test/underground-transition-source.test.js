@@ -140,13 +140,15 @@ test( 'UNDERGROUND-RENDER-001 excavation unions with the nest and owns its depth
 
 } );
 
-test( 'UNDERGROUND-RENDER-002 geology pools stay fixed, camera-local and dust-free', () => {
+test( 'UNDERGROUND-RENDER-002 geology pools stay world-fixed, periodic and dust-free', () => {
 
 	assert.match( undergroundSource, /Object\.entries\( UNDERGROUND_ARTIFACT_CATALOG \)/ );
 	assert.match( undergroundSource, /artifactMeshes\[ key \] = new THREE\.InstancedMesh/ );
 	assert.match( undergroundSource, /visualLayout\.artifacts\[ key \]/ );
 	assert.match( undergroundSource, /lastDecorPosition\.distanceToSquared/ );
 	assert.match( undergroundSource, /wrapPeriodicCoordinate/ );
+	assert.match( undergroundSource, /decorObject\.position\.set\( sourceX, sourceY, sourceZ \)/ );
+	assert.doesNotMatch( undergroundSource, /presentedDistance|radialScale/ );
 	assert.doesNotMatch( undergroundSource, /new THREE\.(?:Points|PointsMaterial)\(/ );
 	assert.doesNotMatch( undergroundSource, /antCount|u\.antCount/ );
 
@@ -166,8 +168,8 @@ test( 'UNDERGROUND-RENDER-004 every buried GLB is clipped by the clean physical 
 		/const matterVisibility = sampleSDFClean\( positionWorld \)\.greaterThanEqual\( 0 \);/ );
 	assert.match( undergroundSource, /clodMaterial\.maskNode = matterVisibility;/ );
 	assert.match( undergroundSource, /material\.maskNode = matterVisibility;/ );
-	assert.match( undergroundSource, /minimumSurface - instanceRadius \* gfx\.undergroundArtifactExposure/ );
-	assert.match( undergroundSource, /const presentedDistance = Math\.max/ );
+	assert.match( undergroundSource,
+		/isEmbeddedInExcavationShell\([\s\S]*undergroundArtifactExposure/ );
 	assert.doesNotMatch( undergroundSource, /opacityNode = matterVisibility|alphaTest = 0\.5/ );
 
 } );

@@ -56,7 +56,7 @@ Accepter 200 unités avec la même grille réduirait fortement la résolution ve
 
 Le rendu `UNDERGROUND-VISUAL` ajoute **six draws de base** : un raymarch pour la terre excavée, un `InstancedMesh` pour 3 375 mottes, un pour les segments de racines, puis trois pour les modèles enfouis `Rock.glb`, `Bone.glb` et `FishBone.glb`. La poussière et son ancien draw `Points` ont été supprimés.
 
-Les trois GLB sont chargés une seule fois, aplatis, centrés et normalisés. Leurs géométries sont conservées dans trois pools instanciés fixes : 256 rochers de 166 triangles, 64 os de 304 triangles et 48 arêtes de 588 triangles. Le runtime ne présente simultanément que 18 rochers, 8 os et 7 arêtes autour de la caméra ; les pools complets définissent le plafond conservateur. Fréquence, dimension, variation, couleur et exposition ne font que modifier `.count`, les matrices ou les propriétés des matériaux, sans recharger les modèles. Le dépôt contient `Bone.glb`, pas `Bong.glb`.
+Les trois GLB sont chargés une seule fois, aplatis, centrés et normalisés. Leurs géométries sont conservées dans trois pools instanciés fixes : 256 rochers de 166 triangles, 64 os de 304 triangles et 48 arêtes de 588 triangles. Le runtime ne présente simultanément que 18 rochers, 8 os et 7 arêtes rencontrés par l’excavation ; les pools complets définissent le plafond conservateur. Toutes les transformations proviennent de coordonnées monde périodiques fixes. Fréquence, dimension, variation, couleur et exposition ne font que sélectionner ces transformations ou modifier les propriétés des matériaux, sans recharger les modèles et sans translation vers la caméra. Le dépôt contient `Bone.glb`, pas `Bong.glb`.
 
 Le plafond conservateur exact totalise **180 728 triangles** :
 

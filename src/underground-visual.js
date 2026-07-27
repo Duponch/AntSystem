@@ -135,19 +135,22 @@ export function isEmbeddedInExcavationShell(
 	if ( ! Number.isFinite( distance ) || ! Number.isFinite( radius )
 		|| ! Number.isFinite( relief ) || ! Number.isFinite( instanceRadius ) ) return false;
 	const baseSurface = Math.max( 0, radius );
+	const minimumSurface = baseSurface * ( 1 - Math.max( 0, relief ) * 0.035 );
 	const maximumSurface = baseSurface * ( 1 + Math.max( 0, relief ) * 0.035 );
 	const size = Math.max( 0, instanceRadius );
 	const clod = type === 'clod';
 	const safeExposure = Number.isFinite( exposure )
 		? Math.min( 1.2, Math.max( 0, exposure ) )
 		: 0.72;
-	const preferred = baseSurface + size * ( clod ? 0.82 : - safeExposure );
-	// Cette bande ne sert qu'à choisir des candidats déterministes autour de la
-	// coque. Le runtime les reprojette ensuite vers sa face visible selon le
-	// réglage d'exposition, sans modifier le nombre d'instances ni de draws.
+	const preferred = baseSurface + size * 0.82;
 	const connected = maximumSurface - size * 0.92;
-	const inner = Math.max( preferred, connected );
-	const outer = inner + ( clod ? 0.48 : 0.65 );
+	const exposureRatio = safeExposure / 1.2;
+	const inner = clod
+		? Math.max( preferred, connected )
+		: Math.max( 0, minimumSurface - size * ( 0.15 + exposureRatio * 0.75 ) );
+	const outer = clod
+		? inner + 0.48
+		: maximumSurface + size * ( 0.75 - exposureRatio * 0.4 );
 	return distance >= inner && distance <= outer;
 
 }

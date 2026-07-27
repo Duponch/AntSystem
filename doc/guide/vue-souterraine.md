@@ -55,7 +55,7 @@ Le dossier **🪨 Objets enfouis** possède un sous-dossier pour chaque famille 
 - **Variation** diversifie les tailles autour de cette moyenne ;
 - **Couleur** teinte le matériau.
 
-**Exposition** détermine à quel point les trois familles ressortent de la coque (0 = davantage prises dans la terre, 1,2 = très visibles avec un léger flottement stylistique possible). Les modèles sont projetés vers la face visible de l’excavation, chargés une seule fois puis instanciés ; ce réglage reste donc léger et n’ajoute aucun coût lié au nombre de fourmis. Les matériaux PBR conservent les normales d’origine des modèles. Une lumière directionnelle oblique suit la caméra et un faible remplissage préserve les ombres : les couleurs restent lisibles sans filtre brun et les volumes gardent un relief comparable au décor de surface.
+**Exposition** choisit, parmi les objets fixes que l’excavation rencontre, ceux qui dépassent le mieux de la terre (0 = davantage enfouis, 1,2 = davantage saillants). Elle ne déplace jamais un objet. Les modèles occupent des coordonnées monde déterministes et la caméra ne fait que les révéler ; ils sont chargés une seule fois puis instanciés, sans coût lié au nombre de fourmis. Les matériaux PBR conservent les normales d’origine des modèles. Une lumière directionnelle oblique suit la caméra et un faible remplissage préserve les ombres : les couleurs restent lisibles sans filtre brun et les volumes gardent un relief comparable au décor de surface.
 
 Le fichier de l’os est `Bone.glb`. Il n’existe pas de `Bong.glb` dans le dépôt.
 
