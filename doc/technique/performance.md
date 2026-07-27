@@ -54,11 +54,21 @@ Accepter 200 unités avec la même grille réduirait fortement la résolution ve
 
 ## Budget de la vue souterraine stylisée
 
-Le rendu `UNDERGROUND-VISUAL` ajoute cinq draws de base : un raymarch pour la terre excavée, un `InstancedMesh` pour 3 375 mottes, un pour 384 roches, un pour les 225 segments de racines courants (cap contractuel 1 152), puis un `Points` pour 128 poussières. Les trois meshes géologiques sont alloués une fois ; leurs données X/Z sont repliées périodiquement sur une tuile de 26 unités, tandis que la poussière reste un nuage local fixe. Le bake conserve les mêmes capacités lorsqu’il est régénéré après un changement d’épaisseur du sol.
+Le rendu `UNDERGROUND-VISUAL` ajoute **six draws de base** : un raymarch pour la terre excavée, un `InstancedMesh` pour 3 375 mottes, un pour les segments de racines, puis trois pour les modèles enfouis `Rock.glb`, `Bone.glb` et `FishBone.glb`. La poussière et son ancien draw `Points` ont été supprimés.
 
-Le plafond conservateur exact totalise 98 232 triangles (`12 + 3 375 × 20 + 384 × 20 + 1 152 × 20`) : 12 pour la `BoxGeometry` porteuse, puis les icosaèdres et le cap des racines. Les draws fixes mottes et roches utilisent chacun un `MeshLambertNodeMaterial` dont le `maskNode` lit le canal SDF propre à `positionWorld` : chaque fragment de chacun de ces deux draws paie une lecture de texture, sans passe supplémentaire, et la matière disparaît dans le vide réel. Le scanner additif ajoute un sixième draw optionnel hors des cinq draws de base et hors de ce budget géologique. Les lumières souterraines n’émettent pas d’ombres et le fog de surface est désactivé sous terre.
+Les trois GLB sont chargés une seule fois, aplatis, centrés et normalisés. Leurs géométries sont conservées dans trois pools instanciés fixes : 256 rochers de 166 triangles, 64 os de 304 triangles et 48 arêtes de 588 triangles. Le runtime ne présente simultanément que 18 rochers, 8 os et 7 arêtes autour de la caméra ; les pools complets définissent le plafond conservateur. Fréquence, dimension, variation, couleur et exposition ne font que modifier `.count`, les matrices ou les propriétés des matériaux, sans recharger les modèles. Le dépôt contient `Bone.glb`, pas `Bong.glb`.
 
-Le cache des matrices d’instances est invalidé par le mouvement, le rayon, le relief ou l’épaisseur ; seule cette dernière régénère le bake géologique borné. Aucun de ces réglages ne reconstruit le volume du nid ni les tables par fourmi. Le rayon UI est limité à 10 et la bande roche à 0,65 afin que l’excavation maximale reste dans la demi-tuile de 13 unités. `UNDERGROUND-VISUAL-PERF-001` instancie les trois géométries réelles, recompte leurs triangles, ajoute les 12 triangles de la porteuse et exige exactement 98 232 pour cinq draws de base. Il n’instrumente pas les commandes soumises au GPU et ne borne pas le coût de fragment du raymarch.
+Le plafond conservateur exact totalise **180 728 triangles** :
+
+```text
+12 + 3 375 × 20 + 1 152 × 20 + 256 × 166 + 64 × 304 + 48 × 588
+```
+
+Il inclut la `BoxGeometry` porteuse, toutes les mottes, le cap contractuel des racines et la capacité maximale des trois pools GLB. Le scanner additif ajoute un septième draw optionnel hors de ce budget. La baisse des fréquences réduit le nombre d’instances dessinées, mais le plafond et les allocations restent fixes.
+
+Les mottes utilisent un matériau Lambert et les trois objets un `MeshStandardNodeMaterial` PBR rugueux. Leur `maskNode` lit le canal SDF propre à `positionWorld` et les retire du vide réel sans passe supplémentaire. Une lumière neutre préserve leurs couleurs sans ajouter de draw. La palette de la terre utilise quelques bruits 3D bornés ; ses cinq couleurs, chaos, taille d’amas, fusion, grain et contraste sont des uniformes live. Le cache des matrices n’est invalidé que par le mouvement ou un réglage qui affecte la disposition.
+
+Aucune capacité, aucun draw et aucune table de cette vue ne dépend du nombre de fourmis ou de chambres. Le coût du décor reste donc constant vis-à-vis de la simulation ; le coût de fragment du raymarch dépend toujours de la résolution et du GPU. `UNDERGROUND-VISUAL-PERF-001` vérifie les six draws et le plafond exact, mais n’impose pas de durée GPU portable.
 
 ## Ce qui est testé
 
@@ -66,7 +76,7 @@ Les tests de complexité vérifient la forme constante de l’état, l’absence
 
 Les tests `NAV-SURFACE` contrôlent la surface propre, les supports, les portails, les planchers, la borne de stretch et la continuité exhaustive K96 × 12. `NAV-SURFACE-PERF-001` contrôle la clé spatiale. `NAV-SURFACE-PAR-001` à `004` comparent les buffers parallèles et synchrones octet par octet, puis exercent indisponibilité, erreurs d’infrastructure, erreurs déterministes et terminaison des workers. Le Warden exerce également la capacité maximale et exige des poses finies, des pivots sur leur support et une orientation cohérente. Ses kernels et buffers de diagnostic ne sont dispatchés que pendant une campagne Warden : leur coût en jeu normal est nul.
 
-Les tests `UNDERGROUND-VISUAL-001` à `007` vérifient les horizons, la détection du bloc, le déterminisme, la profondeur des racines, la coque de révélation, la densité périodique et l’absence de popping au rayon maximal. `VISUAL-005/006` appellent le même `isEmbeddedInExcavationShell` que le runtime CPU, pas une approximation de test. `UNDERGROUND-TRANSITION-001` à `005` contrôlent l’exposition du socle, l’ordre caméra→plongée, la bascule de couche et les bornes UI ; `UNDERGROUND-TRANSITION-006` couvre la migration des quatre réglages persistés. `UNDERGROUND-RENDER-001` à `004` inspectent le raymarch, les invalidations relief/épaisseur, les plantes racinaires atomiques et le `maskNode` SDF propre des deux matériaux mottes/roches.
+Les tests `UNDERGROUND-VISUAL-001` à `006`, puis `008` à `011` ciblent les contrats utiles : ancres de palette, détection du bloc, déterminisme, racines, périodicité, suppression de la poussière, validité des trois GLB, monotonie des fréquences et bornes de dimensions. `UNDERGROUND-VISUAL-PERF-001` exige six draws et 180 728 triangles au plafond. Les tests de transition protègent la bascule de couche, les contrôles UI et la migration ; `UNDERGROUND-RENDER-001` à `005` inspectent l’union SDF, les invalidations, les racines, le masque physique des objets et leur chargement unique. Le rendu artistique — équilibre de palette, absence perceptuelle de bandes et qualité des amas — est validé visuellement dans WebGPU plutôt que figé par des assertions de pixels fragiles.
 
 Cette campagne n’impose pas encore de budget p95 de temps GPU.
 

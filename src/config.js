@@ -250,9 +250,32 @@ export const gfx = {
 	// Vue souterraine (nid volumetrique, caméra dans le bloc de terre)
 	// Excavation visuelle de la camera : geometrie bornee, independante du nid.
 	undergroundRadius: 9,               // rayon de la bulle creusee visuellement (unites monde)
-	undergroundRelief: 1,               // amplitude du relief des mottes et strates
+	undergroundRelief: 1,               // amplitude du relief des mottes
 	undergroundContrast: 1,             // contraste de la palette geologique
-	undergroundDust: 0.72,               // densite visuelle de poussiere dans la cavite
+	undergroundColorHumus: '#302017',
+	undergroundColorTopsoil: '#57331f',
+	undergroundColorClay: '#774326',
+	undergroundColorOchre: '#a86632',
+	undergroundColorBedrock: '#a38b6c',
+	undergroundChaos: 1.15,             // deformation 3D des zones colorimetriques
+	undergroundPatchSize: 7.5,          // taille monde des amas de terre
+	undergroundBlend: 0.21,             // largeur du melange entre familles minerales
+	undergroundGrain: 0.34,             // contraste du grain fin
+
+	// Objets enfouis : pools instancies fixes, independants des fourmis.
+	undergroundRockFrequency: 0.85,
+	undergroundRockSize: 0.9,
+	undergroundRockVariation: 0.65,
+	undergroundRockColor: '#746b62',
+	undergroundBoneFrequency: 0.7,
+	undergroundBoneSize: 0.95,
+	undergroundBoneVariation: 0.5,
+	undergroundBoneColor: '#c8b58c',
+	undergroundFishBoneFrequency: 0.55,
+	undergroundFishBoneSize: 1.15,
+	undergroundFishBoneVariation: 0.45,
+	undergroundFishBoneColor: '#bea77e',
+	undergroundArtifactExposure: 0.72,
 
 	nestLight: 1.0,                    // lampe frontale : lisibilite des galeries
 	nestAO: 1.0,                       // occlusion ambiante derivee du champ
@@ -332,11 +355,27 @@ params.nestDepth = Math.min( MAX_NEST_DEPTH, Math.max( MIN_NEST_DEPTH, params.ne
 // valeurs persistées sont migrées avant toute création de géométrie : une
 // ancienne sauvegarde ne peut donc pas violer la demi-tuile périodique ni les
 // bornes de qualité validées par les tests.
-const clampSetting = ( value, low, high ) => Math.min( high, Math.max( low, value ) );
+const clampSetting = ( value, low, high ) => Number.isFinite( value )
+	? Math.min( high, Math.max( low, value ) )
+	: low;
 gfx.undergroundRadius = clampSetting( gfx.undergroundRadius, 6, 10 );
 gfx.undergroundRelief = clampSetting( gfx.undergroundRelief, 0, 1.8 );
 gfx.undergroundContrast = clampSetting( gfx.undergroundContrast, 0.6, 1.4 );
-gfx.undergroundDust = clampSetting( gfx.undergroundDust, 0, 1 );
+gfx.undergroundChaos = clampSetting( gfx.undergroundChaos, 0.45, 2.2 );
+gfx.undergroundPatchSize = clampSetting( gfx.undergroundPatchSize, 3, 18 );
+gfx.undergroundBlend = clampSetting( gfx.undergroundBlend, 0.1, 0.38 );
+gfx.undergroundGrain = clampSetting( gfx.undergroundGrain, 0, 0.8 );
+for ( const prefix of [ 'Rock', 'Bone', 'FishBone' ] ) {
+
+	gfx[ `underground${prefix}Frequency` ] = clampSetting(
+		gfx[ `underground${prefix}Frequency` ], 0, 1 );
+	gfx[ `underground${prefix}Size` ] = clampSetting(
+		gfx[ `underground${prefix}Size` ], 0.1, 2.5 );
+	gfx[ `underground${prefix}Variation` ] = clampSetting(
+		gfx[ `underground${prefix}Variation` ], 0, 1 );
+
+}
+gfx.undergroundArtifactExposure = clampSetting( gfx.undergroundArtifactExposure, 0, 1.2 );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau

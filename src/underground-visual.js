@@ -4,7 +4,7 @@
 // consumes one immutable, bounded bake; tests can therefore prove that the
 // stylised soil never grows with the ant population or the nest topology.
 
-export const UNDERGROUND_VISUAL_VERSION = 'camera-excavation-v1';
+export const UNDERGROUND_VISUAL_VERSION = 'camera-excavation-v2';
 
 export const SOIL_LAYERS = Object.freeze( [
 	Object.freeze( { id: 'humus', from: 0.00, to: 0.08, color: 0x3a2114 } ),
@@ -15,37 +15,54 @@ export const SOIL_LAYERS = Object.freeze( [
 ] );
 
 const CLOD_COUNT = 3375;
-const ROCK_COUNT = 384;
 const ROOT_SEGMENT_LIMIT = 1152;
-const DUST_COUNT = 128;
 const ROOT_DEPTH = 8.5;
 const TILE_SPAN = 26;
 const ROOT_SPACING = 5;
 const CLOD_TRIANGLES = 20;
-const ROCK_TRIANGLES = 20;
 const ROOT_TRIANGLES = 20;
 const SOIL_CARRIER_TRIANGLES = 12;
 
+export const UNDERGROUND_ARTIFACT_CATALOG = Object.freeze( {
+	rock: Object.freeze( {
+		url: '/assets/Rock.glb', capacity: 256, visibleLimit: 18, triangles: 166, stream: 20, configPrefix: 'Rock',
+	} ),
+	bone: Object.freeze( {
+		url: '/assets/Bone.glb', capacity: 64, visibleLimit: 8, triangles: 304, stream: 40, configPrefix: 'Bone',
+	} ),
+	fishBone: Object.freeze( {
+		url: '/assets/FishBone.glb', capacity: 48, visibleLimit: 7, triangles: 588, stream: 60, configPrefix: 'FishBone',
+	} ),
+} );
+
 export const UNDERGROUND_VISUAL_BUDGET = Object.freeze( {
 	clods: CLOD_COUNT,
-	rocks: ROCK_COUNT,
 	rootSegments: ROOT_SEGMENT_LIMIT,
 	rootDepth: ROOT_DEPTH,
 	tileSpan: TILE_SPAN,
-	dust: DUST_COUNT,
 	drawCalls: Object.freeze( {
 		soil: 1,
 		clods: 1,
-		rocks: 1,
 		roots: 1,
-		dust: 1,
+		rock: 1,
+		bone: 1,
+		fishBone: 1,
 	} ),
 	estimatedTriangles: SOIL_CARRIER_TRIANGLES + CLOD_COUNT * CLOD_TRIANGLES
-		+ ROCK_COUNT * ROCK_TRIANGLES
-		+ ROOT_SEGMENT_LIMIT * ROOT_TRIANGLES,
+		+ ROOT_SEGMENT_LIMIT * ROOT_TRIANGLES
+		+ Object.values( UNDERGROUND_ARTIFACT_CATALOG ).reduce(
+			( total, item ) => total + item.capacity * item.triangles, 0 ),
 } );
-
 const clamp01 = ( value ) => Math.min( 1, Math.max( 0, value ) );
+
+export function artifactScale( size, variation, rank ) {
+
+	const safeSize = Math.min( 2.5, Math.max( 0, Number.isFinite( size ) ? size : 0 ) );
+	const safeVariation = clamp01( Number.isFinite( variation ) ? variation : 0 );
+	const safeRank = clamp01( Number.isFinite( rank ) ? rank : 0.5 );
+	return Math.min( 2.5, safeSize * ( 1 + ( safeRank * 2 - 1 ) * safeVariation * 0.5 ) );
+
+}
 
 function hashUint( value ) {
 
@@ -112,15 +129,24 @@ export function isInsideUndergroundBlock( point, world, thickness ) {
 }
 
 export function isEmbeddedInExcavationShell(
-	distance, radius, relief, instanceRadius, type,
+	distance, radius, relief, instanceRadius, type, exposure = 0.72,
 ) {
 
 	if ( ! Number.isFinite( distance ) || ! Number.isFinite( radius )
 		|| ! Number.isFinite( relief ) || ! Number.isFinite( instanceRadius ) ) return false;
-	const safeSurface = Math.max( 0, radius ) * ( 1 + Math.max( 0, relief ) * 0.035 );
+	const baseSurface = Math.max( 0, radius );
+	const maximumSurface = baseSurface * ( 1 + Math.max( 0, relief ) * 0.035 );
 	const size = Math.max( 0, instanceRadius );
 	const clod = type === 'clod';
-	const inner = safeSurface + size * ( clod ? 0.82 : 0.65 );
+	const safeExposure = Number.isFinite( exposure )
+		? Math.min( 1.2, Math.max( 0, exposure ) )
+		: 0.72;
+	const preferred = baseSurface + size * ( clod ? 0.82 : - safeExposure );
+	// Cette bande ne sert qu'à choisir des candidats déterministes autour de la
+	// coque. Le runtime les reprojette ensuite vers sa face visible selon le
+	// réglage d'exposition, sans modifier le nombre d'instances ni de draws.
+	const connected = maximumSurface - size * 0.92;
+	const inner = Math.max( preferred, connected );
 	const outer = inner + ( clod ? 0.48 : 0.65 );
 	return distance >= inner && distance <= outer;
 
@@ -174,32 +200,26 @@ export function generateUndergroundVisualLayout( {
 
 	}
 
-	const rocks = new Float32Array( ROCK_COUNT * 9 );
-	for ( let index = 0; index < ROCK_COUNT; index ++ ) {
+	const artifacts = {};
+	for ( const [ key, item ] of Object.entries( UNDERGROUND_ARTIFACT_CATALOG ) ) {
 
-		const scale = 0.38 + random01( index, 23, seed ) ** 2 * 1.15;
-		writeInstance(
-			rocks,
-			index,
-			[
-				( random01( index, 20, seed ) * 2 - 1 ) * tileHalf,
-				- 0.18 - random01( index, 21, seed ) * Math.max( 0.2, safeDepth - 0.2 ),
-				( random01( index, 22, seed ) * 2 - 1 ) * tileHalf,
-			],
-			[
-				scale * ( 0.68 + random01( index, 24, seed ) * 0.65 ),
-				scale * ( 0.55 + random01( index, 25, seed ) * 0.55 ),
-				scale * ( 0.68 + random01( index, 26, seed ) * 0.65 ),
-			],
-			[
-				random01( index, 27, seed ) * Math.PI,
-				random01( index, 28, seed ) * Math.PI * 2,
-				random01( index, 29, seed ) * Math.PI,
-			],
-		);
+		const values = new Float32Array( item.capacity * 8 );
+		for ( let index = 0; index < item.capacity; index ++ ) {
+
+			const offset = index * 8;
+			values[ offset ] = ( random01( index, item.stream, seed ) * 2 - 1 ) * tileHalf;
+			values[ offset + 1 ] = - 0.15 - random01( index, item.stream + 1, seed ) * safeDepth;
+			values[ offset + 2 ] = ( random01( index, item.stream + 2, seed ) * 2 - 1 ) * tileHalf;
+			values[ offset + 3 ] = random01( index, item.stream + 3, seed ) * Math.PI * 2;
+			values[ offset + 4 ] = random01( index, item.stream + 4, seed ) * Math.PI * 2;
+			values[ offset + 5 ] = random01( index, item.stream + 5, seed ) * Math.PI * 2;
+			values[ offset + 6 ] = random01( index, item.stream + 6, seed );
+			values[ offset + 7 ] = ( index + 0.5 ) / item.capacity;
+
+		}
+		artifacts[ key ] = values;
 
 	}
-
 	const roots = new Float32Array( ROOT_SEGMENT_LIMIT * 7 );
 	const cells = Math.max( 2, Math.round( TILE_SPAN / ROOT_SPACING ) );
 	const spacing = TILE_SPAN / cells;
@@ -265,29 +285,13 @@ export function generateUndergroundVisualLayout( {
 
 	}
 
-	const dust = new Float32Array( DUST_COUNT * 4 );
-	for ( let index = 0; index < DUST_COUNT; index ++ ) {
-
-		const angle = random01( index, 60, seed ) * Math.PI * 2;
-		const z = random01( index, 61, seed ) * 2 - 1;
-		const radius = Math.cbrt( random01( index, 62, seed ) );
-		const planar = Math.sqrt( Math.max( 0, 1 - z * z ) ) * radius;
-		const offset = index * 4;
-		dust[ offset ] = Math.cos( angle ) * planar;
-		dust[ offset + 1 ] = z * radius;
-		dust[ offset + 2 ] = Math.sin( angle ) * planar;
-		dust[ offset + 3 ] = random01( index, 63, seed );
-
-	}
-
 	return Object.freeze( {
 		version: UNDERGROUND_VISUAL_VERSION,
 		tileSpan: TILE_SPAN,
 		clods,
-		rocks,
+		artifacts: Object.freeze( artifacts ),
 		roots: roots.slice( 0, rootCount * 7 ),
 		rootCount,
-		dust,
 	} );
 
 }

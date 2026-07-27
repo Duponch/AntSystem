@@ -6,13 +6,13 @@
 //
 // Une passe raymarchée fournit la couleur et une profondeur réelle :
 //   - cinq horizons géologiques ancrés dans le monde ;
-//   - relief 3D, agrégats et lumière chaude décentrée ;
+//   - relief 3D, agrégats et lumière de matière décentrée ;
 //   - continuité exacte avec les tunnels et cavités du nid.
 //
 // Trois pools instanciés bornés ajoutent mottes, roches et racines. Une tuile
 // déterministe suit la caméra sans nouvelle allocation et sans dépendre du
-// nombre de fourmis. Les objets restent derrière la coque, dont la profondeur
-// masque naturellement toute portion qui flotterait dans le vide.
+// nombre de fourmis. Les objets sont projetés vers la coque visible et masqués
+// dans le vide physique du nid.
 //
 // Le décor de surface et son fog sont coupés atomiquement dans main.js. Les
 // fourmis de la couche opposée sont masquées dans ants.js.
@@ -39,16 +39,24 @@ import {
 } from 'three/tsl';
 
 import { GRID, WORLD, gfx, params } from './config.js';
+import { loadUndergroundArtifactGeometries } from './underground-assets.js';
 import {
+	UNDERGROUND_ARTIFACT_CATALOG,
 	UNDERGROUND_VISUAL_BUDGET,
+	artifactScale,
 	generateUndergroundVisualLayout,
 	isEmbeddedInExcavationShell,
 	isInsideUndergroundBlock,
-	soilLayerAtDepth,
 	wrapPeriodicCoordinate,
 } from './underground-visual.js';
 
-export function createUnderground( { scene, layout, camera, volume } ) {
+export async function createUnderground( { scene, layout, camera, volume } ) {
+
+	const artifactGeometries = await loadUndergroundArtifactGeometries(
+		UNDERGROUND_ARTIFACT_CATALOG,
+	);
+	const artifactEntries = Object.entries( UNDERGROUND_ARTIFACT_CATALOG );
+	const artifactKeys = artifactEntries.map( ( [ key ] ) => key );
 
 	const group = new THREE.Group();
 	scene.add( group );
@@ -66,6 +74,15 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 	const uDigRelief = uniform( gfx.undergroundRelief );
 	const uDigBlend = uniform( 1 );
 	const uSoilContrast = uniform( gfx.undergroundContrast );
+	const uSoilHumus = uniform( new THREE.Color( gfx.undergroundColorHumus ) );
+	const uSoilTopsoil = uniform( new THREE.Color( gfx.undergroundColorTopsoil ) );
+	const uSoilClay = uniform( new THREE.Color( gfx.undergroundColorClay ) );
+	const uSoilOchre = uniform( new THREE.Color( gfx.undergroundColorOchre ) );
+	const uSoilBedrock = uniform( new THREE.Color( gfx.undergroundColorBedrock ) );
+	const uSoilChaos = uniform( gfx.undergroundChaos );
+	const uSoilPatchSize = uniform( gfx.undergroundPatchSize );
+	const uSoilBlend = uniform( gfx.undergroundBlend );
+	const uSoilGrain = uniform( gfx.undergroundGrain );
 	const uSurfaceCap = uniform( - 0.004 );
 
 	// --- scanner : activation binaire + impulsion (voir en-tête) ---
@@ -168,30 +185,53 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 	// ------------------------------------------------------------------
 	const soilAt = ( p, detail = p ) => {
 
-		// Les limites sont ancrées dans le monde : changer de nid ou tourner la
-		// caméra ne déplace jamais la géologie. Un macro-bruit ondule seulement
-		// les frontières, il ne remplace pas les cinq horizons lisibles.
-		const wave = mx_noise_float( p.mul( 0.09 ) ).mul( 0.018 );
-		const f = clamp(
-			p.y.negate().div( max( uSoilThickness, 1 ) ).add( wave ), 0, 1,
+		// La profondeur ne choisit plus une bande. Deux champs 3D ancrés dans le
+		// monde la déforment fortement, puis de larges transitions font cohabiter
+		// plusieurs familles minérales : aucun plan horizontal n'est perceptible.
+		const depth = clamp(
+			p.y.negate().div( max( uSoilThickness, 1 ) ), 0, 1,
 		).toVar();
-		const c = color( 0x3a2114 ).toVar();
-		c.assign( mix( c, color( 0x5a3018 ), smoothstep( 0.07, 0.09, f ) ) );
-		c.assign( mix( c, color( 0x8a441b ), smoothstep( 0.27, 0.29, f ) ) );
-		c.assign( mix( c, color( 0xc2782e ), smoothstep( 0.51, 0.53, f ) ) );
-		c.assign( mix( c, color( 0xb9996a ), smoothstep( 0.77, 0.79, f ) ) );
+		const patchPoint = p.div( max( uSoilPatchSize, 0.25 ) );
+		const macro = mx_noise_float( patchPoint ).mul( 0.5 ).add( 0.5 ).toVar();
+		const cross = mx_noise_float(
+			patchPoint.mul( 1.73 ).add( vec3( 13.7, - 8.1, 5.2 ) ),
+		).mul( 0.5 ).add( 0.5 ).toVar();
+		const f = clamp(
+			depth
+				.add( macro.sub( 0.5 ).mul( uSoilChaos ).mul( 0.48 ) )
+				.add( cross.sub( 0.5 ).mul( uSoilChaos ).mul( 0.26 ) ),
+			0, 1,
+		).toVar();
+		const blendWidth = max( uSoilBlend, 0.08 );
+		const transition = ( center ) => smoothstep(
+			float( center ).sub( blendWidth ),
+			float( center ).add( blendWidth ),
+			f,
+		);
 
-		// Deux fréquences seulement : gros agrégats, puis cassure minérale. Le
-		// détail fin s'efface avec la distance afin de ne jamais produire de moiré.
-		const aggregate = mx_noise_float( detail.mul( 0.42 ) ).mul( 0.5 ).add( 0.5 );
-		const crumb = mx_noise_float( detail.mul( 2.1 ) ).mul( 0.5 ).add( 0.5 );
+		const c = uSoilHumus.toVar();
+		c.assign( mix( c, uSoilTopsoil, transition( 0.12 ) ) );
+		c.assign( mix( c, uSoilClay, transition( 0.34 ) ) );
+		c.assign( mix( c, uSoilOchre, transition( 0.58 ) ) );
+		c.assign( mix( c, uSoilBedrock, transition( 0.82 ) ) );
+
+		// Des poches argile/ocre traversent les profondeurs et rompent encore la
+		// lecture en strates, sans bruit supplémentaire ni texture.
+		const pocket = smoothstep( 0.38, 0.88, abs( macro.sub( cross ) ) )
+			.mul( clamp( uSoilChaos.mul( 0.32 ), 0, 0.42 ) )
+			.mul( depth.mul( 0.55 ).add( 0.45 ) );
+		c.assign( mix( c, mix( uSoilClay, uSoilOchre, cross ), pocket ) );
+
+		// Une seule fréquence fine complète les deux champs macro. Elle s'efface
+		// avec la distance pour préserver une image stable et sans moiré.
+		const crumb = mx_noise_float( detail.mul( 1.9 ) ).mul( 0.5 ).add( 0.5 );
 		const fade = clamp(
 			float( 1 ).sub( length( detail.sub( cameraPosition ) ).mul( 0.035 ) ), 0, 1,
 		);
-		const matter = aggregate.sub( 0.5 ).mul( 0.30 )
-			.add( crumb.sub( 0.5 ).mul( 0.14 ).mul( fade ) ).add( 1 );
-		const shaded = c.mul( matter );
-		return mix( color( 0x68401f ), shaded, uSoilContrast );
+		const matter = macro.sub( 0.5 ).mul( 0.22 )
+			.add( crumb.sub( 0.5 ).mul( uSoilGrain ).mul( fade ) ).add( 1 );
+		const neutral = mix( uSoilHumus, uSoilBedrock, depth ).mul( 0.72 );
+		return mix( neutral, c.mul( matter ), uSoilContrast );
 
 	};
 	// ------------------------------------------------------------------
@@ -590,9 +630,8 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 
 	// ------------------------------------------------------------------
 	// Matière 3D bornée. Les positions X/Z sont une tuile monde de 26 unités
-	// recyclée autour de la caméra. Les centres restent dans une fine bande
-	// DERRIÈRE la coque ; son depthNode découpe donc naturellement chaque objet
-	// et aucun caillou ne peut flotter au milieu du vide excavé.
+	// recyclée autour de la caméra. Les candidats sont reprojetés vers la face
+	// visible de la coque ; la profondeur du raymarch compose ensuite les volumes.
 	// ------------------------------------------------------------------
 	let visualLayout = generateUndergroundVisualLayout( {
 		world: WORLD,
@@ -603,16 +642,12 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 	} );
 	clodMaterial.emissive.set( 0x120704 );
 	clodMaterial.emissiveIntensity = 0.32;
-	const rockMaterial = new THREE.MeshLambertNodeMaterial( {
-		color: 0xffffff, vertexColors: true, flatShading: true, fog: false,
-		emissive: 0x241d17, emissiveIntensity: 0.35,
-	} );
+
 	// Le depth test découpe l'excavation caméra ; ce masque supplémentaire
-	// découpe le vide réel du nid. Une motte ou une roche à l'intersection d'une
-	// galerie ne peut donc jamais devenir un objet flottant.
+	// découpe le vide réel du nid. Les objets enfouis restent donc attachés à la
+	// matière, même lorsqu'une galerie traverse leur volume.
 	const matterVisibility = sampleSDFClean( positionWorld ).greaterThanEqual( 0 );
 	clodMaterial.maskNode = matterVisibility;
-	rockMaterial.maskNode = matterVisibility;
 	const rootMaterial = new THREE.MeshLambertMaterial( {
 		color: 0xa9602d, flatShading: true, fog: false,
 		emissive: 0x30150a, emissiveIntensity: 0.35,
@@ -622,15 +657,33 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		new THREE.IcosahedronGeometry( 1, 0 ), clodMaterial,
 		UNDERGROUND_VISUAL_BUDGET.clods,
 	);
-	const rocks = new THREE.InstancedMesh(
-		new THREE.IcosahedronGeometry( 1, 0 ), rockMaterial,
-		UNDERGROUND_VISUAL_BUDGET.rocks,
-	);
 	const roots = new THREE.InstancedMesh(
 		new THREE.CylinderGeometry( 1, 0.72, 1, 5, 1, false ), rootMaterial,
 		Math.max( 1, visualLayout.rootCount ),
 	);
-	for ( const mesh of [ clods, rocks, roots ] ) {
+	const artifactMeshes = {};
+	const artifactMaterials = {};
+	for ( const [ key, item ] of artifactEntries ) {
+
+		const artifactColor = gfx[ `underground${item.configPrefix}Color` ];
+		const material = new THREE.MeshStandardNodeMaterial( {
+			color: artifactColor,
+			flatShading: true,
+			fog: false,
+			roughness: 0.72,
+			metalness: 0.02,
+			emissive: artifactColor,
+			emissiveIntensity: 0.08,
+		} );
+		material.maskNode = matterVisibility;
+		artifactMaterials[ key ] = material;
+		artifactMeshes[ key ] = new THREE.InstancedMesh(
+			artifactGeometries[ key ], material, item.capacity,
+		);
+
+	}
+
+	for ( const mesh of [ clods, roots, ...artifactKeys.map( ( key ) => artifactMeshes[ key ] ) ] ) {
 
 		mesh.count = 0;
 		mesh.frustumCulled = false;
@@ -640,42 +693,17 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		group.add( mesh );
 
 	}
-
-	const dustPositions = new Float32Array( UNDERGROUND_VISUAL_BUDGET.dust * 3 );
-	for ( let i = 0; i < UNDERGROUND_VISUAL_BUDGET.dust; i ++ ) {
-
-		dustPositions[ i * 3 ] = visualLayout.dust[ i * 4 ];
-		dustPositions[ i * 3 + 1 ] = visualLayout.dust[ i * 4 + 1 ];
-		dustPositions[ i * 3 + 2 ] = visualLayout.dust[ i * 4 + 2 ];
-
-	}
-	const dustGeometry = new THREE.BufferGeometry();
-	dustGeometry.setAttribute( 'position', new THREE.BufferAttribute( dustPositions, 3 ) );
-	const dustMaterial = new THREE.PointsMaterial( {
-		color: 0xffc37a,
-		size: 0.065,
-		sizeAttenuation: true,
-		transparent: true,
-		opacity: gfx.undergroundDust * 0.42,
-		depthWrite: false,
-		fog: false,
-		blending: THREE.AdditiveBlending,
-	} );
-	const dust = new THREE.Points( dustGeometry, dustMaterial );
-	dust.frustumCulled = false;
-	dust.renderOrder = 1;
-	dust.visible = false;
-	group.add( dust );
-
-	// Éclairage chaud autonome : les lumières de surface sont coupées par main.js.
-	const earthAmbient = new THREE.AmbientLight( 0xffbd85, 1.35 );
-	const earthLamp = new THREE.PointLight( 0xffd0a0, 36, 30, 2 );
+	// Éclairage autonome neutre : les couleurs UI restent lisibles sous terre.
+	const earthAmbient = new THREE.AmbientLight( 0xffffff, 0.85 );
+	const earthLamp = new THREE.PointLight( 0xfff2dd, 54, 34, 2 );
 	earthAmbient.visible = false;
 	earthLamp.visible = false;
 	group.add( earthAmbient, earthLamp );
 
 	const decorObject = new THREE.Object3D();
 	const decorColor = new THREE.Color();
+	const mineralColor = new THREE.Color();
+	const soilPaletteCPU = Array.from( { length: 5 }, () => new THREE.Color() );
 	const rootFrom = new THREE.Vector3();
 	const rootTo = new THREE.Vector3();
 	const rootMid = new THREE.Vector3();
@@ -683,14 +711,85 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 	const rootUp = new THREE.Vector3( 0, 1, 0 );
 	const lampOffset = new THREE.Vector3( 2.8, 3.4, 1.8 );
 	const lastDecorPosition = new THREE.Vector3( Infinity, Infinity, Infinity );
-	const rockPalette = [ 0x796f63, 0x8f806b, 0xaa875d, 0x806b58 ];
-	const decorStats = { clods: 0, rocks: 0, roots: 0 };
+	const decorStats = {
+		clods: 0,
+		roots: 0,
+		artifacts: Object.fromEntries( artifactKeys.map( ( key ) => [ key, 0 ] ) ),
+	};
+	const decorSettingKeys = [
+		'undergroundColorHumus',
+		'undergroundColorTopsoil',
+		'undergroundColorClay',
+		'undergroundColorOchre',
+		'undergroundColorBedrock',
+		'undergroundChaos',
+		'undergroundPatchSize',
+		'undergroundBlend',
+		'undergroundGrain',
+		'undergroundArtifactExposure',
+	];
+	for ( const [ , item ] of artifactEntries ) decorSettingKeys.push(
+		`underground${item.configPrefix}Frequency`,
+		`underground${item.configPrefix}Size`,
+		`underground${item.configPrefix}Variation`,
+	);
+	const lastDecorSettings = new Array( decorSettingKeys.length );
 	let lastDecorRadius = - 1;
 	let lastDecorThickness = - 1;
 	let lastDecorRelief = - 1;
 
-	function fillPeriodicInstances( mesh, data, cameraPositionCPU, radius, type ) {
+	const clampCPU = ( value, low = 0, high = 1 ) => Math.min( high, Math.max( low, value ) );
+	const smoothstepCPU = ( low, high, value ) => {
 
+		const t = clampCPU( ( value - low ) / Math.max( 1e-6, high - low ) );
+		return t * t * ( 3 - 2 * t );
+
+	};
+
+	function syncSoilPaletteCPU() {
+
+		for ( const [ index, key ] of [
+			'undergroundColorHumus',
+			'undergroundColorTopsoil',
+			'undergroundColorClay',
+			'undergroundColorOchre',
+			'undergroundColorBedrock',
+		].entries() ) soilPaletteCPU[ index ].set( gfx[ key ] );
+
+	}
+
+	function setClodColor( x, y, z, index, thickness ) {
+
+		const depth = clampCPU( - y / Math.max( 0.001, thickness ) );
+		const patchA = Math.sin( x * 0.31 + y * 0.19 + z * 0.43 + Math.sin( z * 0.17 ) );
+		const patchB = Math.sin( x * - 0.23 + y * 0.37 + z * 0.27 + 2.7 );
+		const f = clampCPU( depth
+			+ patchA * gfx.undergroundChaos * 0.24
+			+ patchB * gfx.undergroundChaos * 0.13 );
+		const width = Math.max( 0.08, gfx.undergroundBlend );
+		const transition = ( center ) => smoothstepCPU( center - width, center + width, f );
+		decorColor.copy( soilPaletteCPU[ 0 ] );
+		decorColor.lerp( soilPaletteCPU[ 1 ], transition( 0.12 ) );
+		decorColor.lerp( soilPaletteCPU[ 2 ], transition( 0.34 ) );
+		decorColor.lerp( soilPaletteCPU[ 3 ], transition( 0.58 ) );
+		decorColor.lerp( soilPaletteCPU[ 4 ], transition( 0.82 ) );
+		const pocket = smoothstepCPU( 0.38, 0.88, Math.abs( patchA - patchB ) * 0.5 )
+			* clampCPU( gfx.undergroundChaos * 0.32, 0, 0.42 )
+			* ( depth * 0.55 + 0.45 );
+		mineralColor.copy( soilPaletteCPU[ 2 ] ).lerp(
+			soilPaletteCPU[ 3 ], patchB * 0.5 + 0.5 );
+		decorColor.lerp( mineralColor, pocket );
+		decorColor.offsetHSL(
+			( index % 7 - 3 ) * 0.002,
+			0,
+			( index % 11 - 5 ) * 0.004 * gfx.undergroundGrain,
+		);
+
+	}
+
+	function fillClods( cameraPositionCPU, radius ) {
+
+		const data = visualLayout.clods;
 		const thickness = Math.max( 1, gfx.groundThickness );
 		const half = WORLD * 0.5 + 2.2;
 		let count = 0;
@@ -702,41 +801,91 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 			const z = wrapPeriodicCoordinate(
 				data[ offset + 2 ], cameraPositionCPU.z, visualLayout.tileSpan );
 			if ( Math.abs( x ) > half || Math.abs( z ) > half || y >= 0 || y < - thickness ) continue;
+			const scaleX = data[ offset + 3 ] * 0.08;
+			const scaleY = data[ offset + 4 ] * 0.08;
+			const scaleZ = data[ offset + 5 ] * 0.08;
+			const instanceRadius = Math.max( scaleX, scaleY, scaleZ );
 			const distance = Math.hypot(
 				x - cameraPositionCPU.x, y - cameraPositionCPU.y, z - cameraPositionCPU.z,
 			);
-			const visualScale = type === 'clod' ? 0.08 : 1.0;
-			const scaleX = data[ offset + 3 ] * visualScale;
-			const scaleY = data[ offset + 4 ] * visualScale;
-			const scaleZ = data[ offset + 5 ] * visualScale;
-			const instanceRadius = Math.max( scaleX, scaleY, scaleZ );
-			// Seule une calotte traverse la coque. Le prédicat partagé avec les
-			// tests garantit exactement les mêmes bandes d'ancrage en production.
 			if ( ! isEmbeddedInExcavationShell(
-				distance, radius, gfx.undergroundRelief, instanceRadius, type ) ) continue;
+				distance, radius, gfx.undergroundRelief, instanceRadius, 'clod' ) ) continue;
 
 			decorObject.position.set( x, y, z );
 			decorObject.scale.set( scaleX, scaleY, scaleZ );
 			decorObject.rotation.set( data[ offset + 6 ], data[ offset + 7 ], data[ offset + 8 ] );
 			decorObject.updateMatrix();
+			clods.setMatrixAt( count, decorObject.matrix );
+			setClodColor( x, y, z, index, thickness );
+			clods.setColorAt( count, decorColor );
+			count ++;
+
+		}
+		clods.count = count;
+		clods.instanceMatrix.needsUpdate = true;
+		if ( clods.instanceColor ) clods.instanceColor.needsUpdate = true;
+		return count;
+
+	}
+
+	function fillArtifactInstances( key, cameraPositionCPU, radius ) {
+
+		const item = UNDERGROUND_ARTIFACT_CATALOG[ key ];
+		const mesh = artifactMeshes[ key ];
+		const data = visualLayout.artifacts[ key ];
+		const prefix = item.configPrefix;
+		const frequency = gfx[ `underground${prefix}Frequency` ];
+		const size = gfx[ `underground${prefix}Size` ];
+		const variation = gfx[ `underground${prefix}Variation` ];
+		const geometryRadius = mesh.geometry.boundingSphere?.radius || 0.5;
+		const thickness = Math.max( 1, gfx.groundThickness );
+		const half = WORLD * 0.5 + 2.2;
+		let count = 0;
+		for ( let offset = 0; offset < data.length; offset += 8 ) {
+
+			if ( data[ offset + 7 ] > frequency || count >= item.visibleLimit ) break;
+			const scale = artifactScale( size, variation, data[ offset + 6 ] );
+			if ( scale <= 0 ) continue;
+			const instanceRadius = geometryRadius * scale;
+			const sourceX = wrapPeriodicCoordinate(
+				data[ offset ], cameraPositionCPU.x, visualLayout.tileSpan );
+			const sourceY = data[ offset + 1 ];
+			const sourceZ = wrapPeriodicCoordinate(
+				data[ offset + 2 ], cameraPositionCPU.z, visualLayout.tileSpan );
+			if ( Math.abs( sourceX ) > half || Math.abs( sourceZ ) > half ) continue;
+			const deltaX = sourceX - cameraPositionCPU.x;
+			const deltaY = sourceY - cameraPositionCPU.y;
+			const deltaZ = sourceZ - cameraPositionCPU.z;
+			const distance = Math.hypot( deltaX, deltaY, deltaZ );
+			if ( distance < 1e-5 ) continue;
+
+			// Les candidats gardent leur direction deterministe, mais leur centre est
+			// reprojete vers la plus petite enveloppe possible de l'excavation. Ils
+			// restent donc visibles meme au creux du relief, sans requete ni nouveau
+			// mesh. Une exposition elevee autorise le leger flottement stylistique.
+			const minimumSurface = Math.max(
+				0.8, radius * ( 1 - Math.max( 0, gfx.undergroundRelief ) * 0.035 ),
+			);
+			const presentedDistance = Math.max(
+				0.12, minimumSurface - instanceRadius * gfx.undergroundArtifactExposure,
+			);
+			const radialScale = presentedDistance / distance;
+			const x = cameraPositionCPU.x + deltaX * radialScale;
+			const y = cameraPositionCPU.y + deltaY * radialScale;
+			const z = cameraPositionCPU.z + deltaZ * radialScale;
+			if ( Math.abs( x ) > half || Math.abs( z ) > half
+				|| y + instanceRadius >= - 0.02 || y - instanceRadius < - thickness ) continue;
+
+			decorObject.position.set( x, y, z );
+			decorObject.scale.setScalar( scale );
+			decorObject.rotation.set( data[ offset + 3 ], data[ offset + 4 ], data[ offset + 5 ] );
+			decorObject.updateMatrix();
 			mesh.setMatrixAt( count, decorObject.matrix );
-			if ( type === 'clod' ) {
-
-				decorColor.setHex( soilLayerAtDepth( - y, thickness ).color );
-				decorColor.offsetHSL( ( index % 7 - 3 ) * 0.002, 0, ( index % 11 - 5 ) * 0.008 );
-
-			} else {
-
-				decorColor.setHex( rockPalette[ index % rockPalette.length ] );
-
-			}
-			mesh.setColorAt( count, decorColor );
 			count ++;
 
 		}
 		mesh.count = count;
 		mesh.instanceMatrix.needsUpdate = true;
-		if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
 		return count;
 
 	}
@@ -790,13 +939,31 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		return count;
 
 	}
+
+	function decorSettingsChanged() {
+
+		for ( let index = 0; index < decorSettingKeys.length; index ++ )
+			if ( lastDecorSettings[ index ] !== gfx[ decorSettingKeys[ index ] ] ) return true;
+		return false;
+
+	}
+
+	function rememberDecorSettings() {
+
+		for ( let index = 0; index < decorSettingKeys.length; index ++ )
+			lastDecorSettings[ index ] = gfx[ decorSettingKeys[ index ] ];
+
+	}
+
 	function refreshDecor( radius, force = false ) {
 
 		const moved = lastDecorPosition.distanceToSquared( camera.position ) > 0.0324;
 		const radiusChanged = Math.abs( radius - lastDecorRadius ) > 0.055;
 		const thicknessChanged = Math.abs( gfx.groundThickness - lastDecorThickness ) > 0.01;
 		const reliefChanged = Math.abs( gfx.undergroundRelief - lastDecorRelief ) > 0.01;
-		if ( ! force && ! moved && ! radiusChanged && ! thicknessChanged && ! reliefChanged ) return;
+		const settingsChanged = decorSettingsChanged();
+		if ( ! force && ! moved && ! radiusChanged && ! thicknessChanged
+			&& ! reliefChanged && ! settingsChanged ) return;
 		if ( thicknessChanged ) visualLayout = generateUndergroundVisualLayout( {
 			world: WORLD,
 			thickness: Math.max( 0.2, gfx.groundThickness ),
@@ -805,14 +972,14 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		lastDecorRadius = radius;
 		lastDecorThickness = gfx.groundThickness;
 		lastDecorRelief = gfx.undergroundRelief;
-		decorStats.clods = fillPeriodicInstances(
-			clods, visualLayout.clods, camera.position, radius, 'clod' );
-		decorStats.rocks = fillPeriodicInstances(
-			rocks, visualLayout.rocks, camera.position, radius, 'rock' );
+		rememberDecorSettings();
+		syncSoilPaletteCPU();
+		decorStats.clods = fillClods( camera.position, radius );
+		for ( const key of artifactKeys )
+			decorStats.artifacts[ key ] = fillArtifactInstances( key, camera.position, radius );
 		decorStats.roots = fillRoots( camera.position, radius );
 
 	}
-
 	// ------------------------------------------------------------------
 	// La boîte HOLOGRAMME : fil-de-fer du nid complet. Additive, sans écriture
 	// NI test de profondeur → visible à travers le terrain, dessinée en
@@ -868,6 +1035,22 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		uDigRadius.value = gfx.undergroundRadius;
 		uDigRelief.value = gfx.undergroundRelief;
 		uSoilContrast.value = gfx.undergroundContrast;
+		uSoilHumus.value.set( gfx.undergroundColorHumus );
+		uSoilTopsoil.value.set( gfx.undergroundColorTopsoil );
+		uSoilClay.value.set( gfx.undergroundColorClay );
+		uSoilOchre.value.set( gfx.undergroundColorOchre );
+		uSoilBedrock.value.set( gfx.undergroundColorBedrock );
+		uSoilChaos.value = gfx.undergroundChaos;
+		uSoilPatchSize.value = gfx.undergroundPatchSize;
+		uSoilBlend.value = gfx.undergroundBlend;
+		uSoilGrain.value = gfx.undergroundGrain;
+		for ( const [ key, item ] of artifactEntries ) {
+
+			const artifactColor = gfx[ `underground${item.configPrefix}Color` ];
+			artifactMaterials[ key ].color.set( artifactColor );
+			artifactMaterials[ key ].emissive.set( artifactColor );
+
+		}
 		uScan.value = gfx.nestScan;
 		uScanPulse.value = gfx.nestScanPulse;
 		uScanColor.value.set( gfx.nestScanColor );
@@ -886,22 +1069,17 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 		box.visible = dive;
 		const decorVisible = dive;
 		clods.visible = decorVisible;
-		rocks.visible = decorVisible;
 		roots.visible = decorVisible;
-		dust.visible = decorVisible && gfx.undergroundDust > 0.001;
+		for ( const key of artifactKeys ) artifactMeshes[ key ].visible = decorVisible;
+
 		earthAmbient.visible = decorVisible;
 		earthLamp.visible = decorVisible;
 		if ( dive ) {
 
 			const visualRadius = Math.max( 0.8, gfx.undergroundRadius * digBlend );
 			refreshDecor( visualRadius );
-			dust.position.copy( camera.position );
-			dust.scale.setScalar( visualRadius * 0.82 );
-			dust.rotation.y += dt * 0.045;
-			dust.rotation.x += dt * 0.012;
-			dustMaterial.opacity = gfx.undergroundDust * 0.42;
 			earthLamp.position.copy( camera.position ).add( lampOffset );
-			earthLamp.intensity = 36 * Math.max( 0, gfx.nestLight );
+			earthLamp.intensity = 54 * Math.max( 0, gfx.nestLight );
 
 		}
 
@@ -944,7 +1122,7 @@ export function createUnderground( { scene, layout, camera, volume } ) {
 
 	return {
 		group, update, box, uScanMode,
-		decor: { clods, rocks, roots, dust, stats: decorStats },
+		decor: { clods, roots, artifacts: artifactMeshes, stats: decorStats },
 		get dive() { return dive; },
 		get scanMode() { return scanOn ? 1 : 0; },
 	};

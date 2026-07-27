@@ -250,8 +250,37 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const fCut = fLife.addFolder( '🔍 Sous-sol & matière' );
 	fCut.add( gfx, 'undergroundRadius', 6, 10, 0.1 ).name( 'Rayon d\'excavation' );
 	fCut.add( gfx, 'undergroundRelief', 0, 1.8, 0.05 ).name( 'Relief de la terre' );
-	fCut.add( gfx, 'undergroundContrast', 0.6, 1.4, 0.05 ).name( 'Contraste des strates' );
-	fCut.add( gfx, 'undergroundDust', 0, 1, 0.01 ).name( 'Poussière' );
+
+	const fEarth = fCut.addFolder( '🎨 Terre organique' );
+	fEarth.addColor( gfx, 'undergroundColorHumus' ).name( 'Terre sombre' );
+	fEarth.addColor( gfx, 'undergroundColorTopsoil' ).name( 'Terre brune' );
+	fEarth.addColor( gfx, 'undergroundColorClay' ).name( 'Argile' );
+	fEarth.addColor( gfx, 'undergroundColorOchre' ).name( 'Ocre' );
+	fEarth.addColor( gfx, 'undergroundColorBedrock' ).name( 'Minéral clair' );
+	fEarth.add( gfx, 'undergroundChaos', 0.45, 2.2, 0.05 ).name( 'Chaos des couleurs' );
+	fEarth.add( gfx, 'undergroundPatchSize', 3, 18, 0.25 ).name( 'Taille des amas' );
+	fEarth.add( gfx, 'undergroundBlend', 0.1, 0.38, 0.01 ).name( 'Fusion des couleurs' );
+	fEarth.add( gfx, 'undergroundGrain', 0, 0.8, 0.02 ).name( 'Grain minéral' );
+	fEarth.add( gfx, 'undergroundContrast', 0.6, 1.4, 0.05 ).name( 'Contraste' );
+	fEarth.close();
+
+	const fBuried = fCut.addFolder( '🪨 Objets enfouis' );
+	const addBuriedControls = ( prefix, label ) => {
+
+		const folder = fBuried.addFolder( label );
+		folder.add( gfx, `underground${prefix}Frequency`, 0, 1, 0.01 ).name( 'Fréquence' );
+		folder.add( gfx, `underground${prefix}Size`, 0.1, 2.5, 0.05 ).name( 'Dimension' );
+		folder.add( gfx, `underground${prefix}Variation`, 0, 1, 0.01 ).name( 'Variation' );
+		folder.addColor( gfx, `underground${prefix}Color` ).name( 'Couleur' );
+		folder.close();
+
+	};
+	addBuriedControls( 'Rock', 'Rochers' );
+	addBuriedControls( 'Bone', 'Os' );
+	addBuriedControls( 'FishBone', 'Arêtes de poisson' );
+	fBuried.add( gfx, 'undergroundArtifactExposure', 0, 1.2, 0.01 )
+		.name( 'Exposition' );
+	fBuried.close();
 	fCut.add( gfx, 'nestLight', 0, 3, 0.05 ).name( 'Lampe frontale' );
 	fCut.add( gfx, 'nestAO', 0, 1, 0.05 ).name( 'Occlusion (relief)' );
 	fCut.add( gfx, 'nestGhost', 0, 1.5, 0.05 ).name( 'Galeries en transparence' );

@@ -3,7 +3,7 @@
   "algorithm": "sha256",
   "generator": {
     "path": "scripts/docs-sync.mjs",
-    "hash": "sha256:87ff93cf91d9db6ebdd2ebd6b392b3955e3eeeae79091b050779aa51f968c06d"
+    "hash": "sha256:3d970e607dd39478bcd0b9f6ca19549404fe5e3689d6c8808d8ce4e321c03481"
   },
   "contracts": {
     "COL-ECO": {
@@ -219,11 +219,13 @@
         "src/main.js",
         "src/ants.js",
         "src/underground.js",
+        "src/underground-assets.js",
         "src/underground-visual.js",
         "src/ui.js"
       ],
       "tests": [
         "test/underground-visual.test.js",
+        "test/underground-geology-v2.test.js",
         "test/underground-transition-source.test.js"
       ],
       "runtimeTests": [],
@@ -234,7 +236,10 @@
         "UNDERGROUND-VISUAL-004",
         "UNDERGROUND-VISUAL-005",
         "UNDERGROUND-VISUAL-006",
-        "UNDERGROUND-VISUAL-007",
+        "UNDERGROUND-VISUAL-008",
+        "UNDERGROUND-VISUAL-009",
+        "UNDERGROUND-VISUAL-010",
+        "UNDERGROUND-VISUAL-011",
         "UNDERGROUND-VISUAL-PERF-001"
       ]
     },
@@ -271,14 +276,14 @@
       "doc/guide/demarrage-naturel.md": "sha256:8b5365f9a69fbe47daaac12b1b252fe97b890862e5a6d0d1bd39ce43f3be2fe6",
       "doc/guide/inspecteur.md": "sha256:73eac7ead532ed5584f4c780865abc7d3c93878f709a540acc0195858e2783f6",
       "doc/guide/navigation-3d.md": "sha256:9e7a57574a3ddd3df5f69ae66fb1d726ad0cdff38eba4ac6bb342558b713ae27",
-      "doc/guide/vue-souterraine.md": "sha256:d22833652ac24a9950b01484ac8801a6d5bba96670534cb21be1b5a898754733",
-      "doc/index.md": "sha256:c3b711cfddfb983c1400a8c50701363cc7f8033af803044b14a7a12fc309300f",
-      "doc/qualite/matrice-contrats.md": "sha256:cc0697544e8eee0a35515c2a5f70ab1cf0f0b35e0c842f6fe6ee6cbf912bcfe4",
-      "doc/qualite/strategie-tests.md": "sha256:d81cae30d4cdff30daa8f4aeaa5e2e0b8663a3daaefc472acb1fd748d8b21617",
+      "doc/guide/vue-souterraine.md": "sha256:93e918236dbdc32f56211ab1fa09076683858d0597e3dc260749a356c6c34399",
+      "doc/index.md": "sha256:fa7c17800890d09c511ce7de74a5b847f9e8928b4bdae9bc98f95d5138721b5f",
+      "doc/qualite/matrice-contrats.md": "sha256:7d390815b7bbcb0710a3c1171c4931db4ad5ffc9c872410893ea05a520aaee18",
+      "doc/qualite/strategie-tests.md": "sha256:1ffa13105bd8b7f9b0e058563c6858c730a797b94fb31fb676b48b83e7a06b3a",
       "doc/technique/architecture.md": "sha256:322ca2b5766e3ae9a8fa506eb9c499cf33479372ff1049bb4785a65bf0eba4a5",
       "doc/technique/navigation-contact-3d.md": "sha256:c13114d8010c771c256ba9d1fc3569a3c9783b058c5d52b4b6de96092e9c0796",
-      "doc/technique/performance.md": "sha256:d4d505015600f38238b14e1198458315e95abfc62911c1291b109b19c37b3a82",
-      "doc/technique/rendu-souterrain-stylise.md": "sha256:70708532b45cf4d32293a71db798133d528e7e0ef8263fc5122a16b596d24766"
+      "doc/technique/performance.md": "sha256:b4e9c0250fc6e374bf9e8013ce1ee45cf17b57f72c6c07d74571096bdc40e022",
+      "doc/technique/rendu-souterrain-stylise.md": "sha256:94984073a85d530ba75726bce47691eab77407b29bd6168fac48442ebc79ad21"
     },
     "watched": {
       "src/ant-observer.js": "sha256:e423f384b5f2fe32bbb585188682f02d9c5f495f3d6d33802302e40970bdb994",
@@ -287,12 +292,12 @@
       "src/colony-layout.js": "sha256:021624af7c1430e126d549e65ca5b901834926a96df1df24d57a9fcf864295ee",
       "src/colony-startup.js": "sha256:aefad301a35fc341b6464e67bc4996da3818617dd30b22db1f4adf94e2c8ddf0",
       "src/colony.js": "sha256:0aaaacbf00a03c48061ba4701acde55e2ae1b439ee39ae99c30088028de7e812",
-      "src/config.js": "sha256:98b8f1ae01114e5a7041843a8c6fada27382c875935f0dc5a7a25cfa3b1d8855",
+      "src/config.js": "sha256:69d092713e339edbd9e95ad5957a4e0af58b7e3f5e292399d1d4b7c0a3aae9df",
       "src/environment.js": "sha256:9837faa76d1aeb726f65f54b0ab805873874073bb2bcca5f62e36523c65359bb",
       "src/graphics/grass.js": "sha256:ee93d0570e8aceb71b9d116513f8065fc59d78f3ba0f1858ab14416c3f27d28d",
       "src/guide.css": "sha256:51c057c6059b1f8e0676023f760451a587a9f6133a36634cc8df99adec4aabe6",
       "src/guide.js": "sha256:61b3baa76661b80f50734781ee0337ceb5a192f3700cc534125655b15bdba3bb",
-      "src/main.js": "sha256:f9aafb57aa82587ef11be6a159a7ca5013a1ef29a55c55c5879454c53b0ed1d8",
+      "src/main.js": "sha256:f7897bcbcaffd46b5be8a692a982104a86a03fce93c35c2976b9bfd369bdfb5d",
       "src/navigation/corridor-network.js": "sha256:a63ded584941bfcb0dca7d6ad651166a2d9fda21cc9eea1b3474bcfcf2309db9",
       "src/navigation/corridor-sampling-tsl.js": "sha256:817f172702f9425240141d54ceef2529b4d4bb7516eaacd3c71d82e270bcd193",
       "src/navigation/corridor-surface-parallel.js": "sha256:b7237ac9db089c9009961e5a1bf3641f2a47890191e0464176f31d863a16797a",
@@ -310,9 +315,10 @@
       "src/simulation.js": "sha256:2bc75e180e7c163936f17fe67be51471bca91e5580d28ddba3a99f5b6255d73e",
       "src/spiders.js": "sha256:07d0bff7ea83f2e73c34df16e9544cb82b18c6c41969a7709fb71b601e0ebc23",
       "src/tests.js": "sha256:d5f9aafa4a3633e52fe497c4264114706be23c7fbe4a9fbd650a2a124fd28f98",
-      "src/ui.js": "sha256:d634b0d52341aaf9c8fb152f20ef06dfee30adb21b09722816c7dc88c0f3dc1d",
-      "src/underground-visual.js": "sha256:1e7d0d9e90b8cf03382a7f30aa9c69f41283024580e607ee2aae3b48383a5bfa",
-      "src/underground.js": "sha256:9dbb8f7778bc4ef9e6d2a4f9054545b4f23fc358148b1a898af1b6a653911dbe",
+      "src/ui.js": "sha256:e8301015446b0e0b73259a9d024bb600038874945f3ebbace2b7eb02ebea1b7e",
+      "src/underground-assets.js": "sha256:9f971af69ef4860ebb099be27af126621386f209d689595fe4f6d242f39beaf8",
+      "src/underground-visual.js": "sha256:cb81ad9d01c292cf8644034549f04d912627eb426e4a821da8e89d348b44ec70",
+      "src/underground.js": "sha256:ec62f0591d7973210ebe4f17efab5e67c51805b463472338e1044efb4a87e6fd",
       "src/warden.js": "sha256:f1f4d571d0560bf77384d31ae79d6b05158fd09a532426b908b064992c76f8f4",
       "test/ant-observer.intent.test.js": "sha256:f98fa26bbcfa050458b8664e10a4887314328a12413053e40ec55018a2c5de82",
       "test/ant-observer.motion.test.js": "sha256:d60b906a9623a39aaf5cf6235d9570d2b55b89fc0cb9dbcc8b5c86ef99eefd72",
@@ -341,8 +347,9 @@
       "test/nest.organic-layout.test.js": "sha256:7dd13f134b47fb6b018ca6c40871c5f9d482815f07f049fc77fc13bf64f0dfb4",
       "test/nest.organic-registry.test.js": "sha256:c1db8603c3bae92816821766ccd60fc4fdaf12aee2c35cf44db3d106f6e2f1d2",
       "test/support-geometry.spatial-hash.test.js": "sha256:3ee702a893c804863b56fae7e4fb97fef075bf289f5b5aa4b3818ea1988180fb",
-      "test/underground-transition-source.test.js": "sha256:6888bb52fd0bade1dc1928626d80a953803c20c011a540f8570c140440b70884",
-      "test/underground-visual.test.js": "sha256:67b7325e5794ec9d41480c5f9aca6a21719f8885db2fcb801f27b7699c571346",
+      "test/underground-geology-v2.test.js": "sha256:fe3e2a59cffe1516302a5b33da45bb4186708d843ba14e785dfc496301d7883e",
+      "test/underground-transition-source.test.js": "sha256:548b982bb6f36c4835844c50fa5446cd5be0f53a9ba9bd35a020dffd27f8c063",
+      "test/underground-visual.test.js": "sha256:74c7970b573c41b32cf0b00da419aeee08ed721048be9e700f3c797a0d205c5d",
       "test/warden-verdict.test.js": "sha256:041d95ee3d34b629cebdb0a5be00d4ec13aeb96407afe26a4b85773bf14ed2cb"
     }
   }

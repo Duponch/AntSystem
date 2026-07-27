@@ -17,10 +17,12 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 | `COL-START` | Placement cohérent et activation échelonnée au démarrage ou à l’éclosion | [Démarrage naturel](./fonctionnel/demarrage-naturel.md#col-start) |
 | `NAV-SURFACE` | Contact direct, support continu et profondeur compatible avec le volume 3D | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-surface) |
 | `NAV-ENTRANCE` | Bouche physique et transition surface/tunnel partageant la même géométrie | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-entrance) |
-| `UNDERGROUND-VISUAL` | Excavation visuelle, strates et décor souterrain bornés, indépendants du nid physique | [Rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md#underground-visual--rendu-souterrain-stylisé) |
+| `UNDERGROUND-VISUAL` | Excavation visuelle, matière 3D chaotique et objets enfouis bornés, indépendants du nid physique | [Rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md#underground-visual--rendu-souterrain-stylisé) |
 | `OBS` | Intentions lisibles et distinction entre arrêt attendu et immobilité suspecte | [Intentions et arrêts](./fonctionnel/intentions-et-arrets.md#obs) |
 
 Ces identifiants sont des contrats de comportement, pas des numéros de version. Un changement qui les affecte doit mettre à jour le code, les tests et leur document canonique dans la même modification.
+
+Pour une retouche artistique pure sans incidence sur la simulation ni sur un invariant de ressources, la validation peut rester visuelle. Les tests automatisés sont exigés lorsque le changement touche un contrat fonctionnel, une borne géométrique, une transition ou un budget de performance.
 
 ## Vérification
 

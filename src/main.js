@@ -191,7 +191,7 @@ async function main() {
 	// chaque fois que le nid change de forme
 	const nestVolume = createNestVolume( { renderer, layout } );
 	nestVolume.rebuild();
-	const underground = createUnderground( { scene, layout, camera, volume: nestVolume } );
+	const underground = await createUnderground( { scene, layout, camera, volume: nestVolume } );
 
 	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
 	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
