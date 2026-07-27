@@ -276,14 +276,14 @@
       "doc/guide/demarrage-naturel.md": "sha256:8b5365f9a69fbe47daaac12b1b252fe97b890862e5a6d0d1bd39ce43f3be2fe6",
       "doc/guide/inspecteur.md": "sha256:73eac7ead532ed5584f4c780865abc7d3c93878f709a540acc0195858e2783f6",
       "doc/guide/navigation-3d.md": "sha256:9e7a57574a3ddd3df5f69ae66fb1d726ad0cdff38eba4ac6bb342558b713ae27",
-      "doc/guide/vue-souterraine.md": "sha256:93e918236dbdc32f56211ab1fa09076683858d0597e3dc260749a356c6c34399",
+      "doc/guide/vue-souterraine.md": "sha256:1d2ca6154569208dfa6ec2fc4af2ad46ce790301d08b7aacbfd30c5e6c46608b",
       "doc/index.md": "sha256:fa7c17800890d09c511ce7de74a5b847f9e8928b4bdae9bc98f95d5138721b5f",
       "doc/qualite/matrice-contrats.md": "sha256:7d390815b7bbcb0710a3c1171c4931db4ad5ffc9c872410893ea05a520aaee18",
       "doc/qualite/strategie-tests.md": "sha256:1ffa13105bd8b7f9b0e058563c6858c730a797b94fb31fb676b48b83e7a06b3a",
       "doc/technique/architecture.md": "sha256:322ca2b5766e3ae9a8fa506eb9c499cf33479372ff1049bb4785a65bf0eba4a5",
       "doc/technique/navigation-contact-3d.md": "sha256:c13114d8010c771c256ba9d1fc3569a3c9783b058c5d52b4b6de96092e9c0796",
-      "doc/technique/performance.md": "sha256:b4e9c0250fc6e374bf9e8013ce1ee45cf17b57f72c6c07d74571096bdc40e022",
-      "doc/technique/rendu-souterrain-stylise.md": "sha256:94984073a85d530ba75726bce47691eab77407b29bd6168fac48442ebc79ad21"
+      "doc/technique/performance.md": "sha256:387e1b931641fc2863e2784419fe09be3c4f89d159315d36bb16fc407dfb0e16",
+      "doc/technique/rendu-souterrain-stylise.md": "sha256:cb71685f4438883c6a00e039414651b5d3e0659a35cac9a10ebec89018fb5f1a"
     },
     "watched": {
       "src/ant-observer.js": "sha256:e423f384b5f2fe32bbb585188682f02d9c5f495f3d6d33802302e40970bdb994",
@@ -318,7 +318,7 @@
       "src/ui.js": "sha256:e8301015446b0e0b73259a9d024bb600038874945f3ebbace2b7eb02ebea1b7e",
       "src/underground-assets.js": "sha256:9f971af69ef4860ebb099be27af126621386f209d689595fe4f6d242f39beaf8",
       "src/underground-visual.js": "sha256:cb81ad9d01c292cf8644034549f04d912627eb426e4a821da8e89d348b44ec70",
-      "src/underground.js": "sha256:ec62f0591d7973210ebe4f17efab5e67c51805b463472338e1044efb4a87e6fd",
+      "src/underground.js": "sha256:ce82e09283403cc33f64533706d50ab89b2f0f6c167b59586151d48bc9b27dda",
       "src/warden.js": "sha256:f1f4d571d0560bf77384d31ae79d6b05158fd09a532426b908b064992c76f8f4",
       "test/ant-observer.intent.test.js": "sha256:f98fa26bbcfa050458b8664e10a4887314328a12413053e40ec55018a2c5de82",
       "test/ant-observer.motion.test.js": "sha256:d60b906a9623a39aaf5cf6235d9570d2b55b89fc0cb9dbcc8b5c86ef99eefd72",

@@ -668,12 +668,9 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		const artifactColor = gfx[ `underground${item.configPrefix}Color` ];
 		const material = new THREE.MeshStandardNodeMaterial( {
 			color: artifactColor,
-			flatShading: true,
 			fog: false,
 			roughness: 0.72,
 			metalness: 0.02,
-			emissive: artifactColor,
-			emissiveIntensity: 0.08,
 		} );
 		material.maskNode = matterVisibility;
 		artifactMaterials[ key ] = material;
@@ -693,12 +690,13 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		group.add( mesh );
 
 	}
-	// Éclairage autonome neutre : les couleurs UI restent lisibles sous terre.
-	const earthAmbient = new THREE.AmbientLight( 0xffffff, 0.85 );
-	const earthLamp = new THREE.PointLight( 0xfff2dd, 54, 34, 2 );
-	earthAmbient.visible = false;
-	earthLamp.visible = false;
-	group.add( earthAmbient, earthLamp );
+	// Même modelé que le décor de surface : un remplissage faible conserve les
+	// ombres, tandis qu'une clé oblique révèle les normales et les silhouettes.
+	const earthFill = new THREE.AmbientLight( 0xfff5e8, 0.55 );
+	const earthKey = new THREE.DirectionalLight( 0xffdfb8, 2.35 );
+	earthFill.visible = false;
+	earthKey.visible = false;
+	group.add( earthFill, earthKey, earthKey.target );
 
 	const decorObject = new THREE.Object3D();
 	const decorColor = new THREE.Color();
@@ -709,7 +707,9 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 	const rootMid = new THREE.Vector3();
 	const rootDirection = new THREE.Vector3();
 	const rootUp = new THREE.Vector3( 0, 1, 0 );
-	const lampOffset = new THREE.Vector3( 2.8, 3.4, 1.8 );
+	const keyLocalOffset = new THREE.Vector3( - 4.5, 5.0, 3.0 );
+	const keyWorldOffset = new THREE.Vector3();
+	const keyDirection = new THREE.Vector3();
 	const lastDecorPosition = new THREE.Vector3( Infinity, Infinity, Infinity );
 	const decorStats = {
 		clods: 0,
@@ -1048,7 +1048,6 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 			const artifactColor = gfx[ `underground${item.configPrefix}Color` ];
 			artifactMaterials[ key ].color.set( artifactColor );
-			artifactMaterials[ key ].emissive.set( artifactColor );
 
 		}
 		uScan.value = gfx.nestScan;
@@ -1072,14 +1071,17 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 		roots.visible = decorVisible;
 		for ( const key of artifactKeys ) artifactMeshes[ key ].visible = decorVisible;
 
-		earthAmbient.visible = decorVisible;
-		earthLamp.visible = decorVisible;
+		earthFill.visible = decorVisible;
+		earthKey.visible = decorVisible;
 		if ( dive ) {
 
 			const visualRadius = Math.max( 0.8, gfx.undergroundRadius * digBlend );
 			refreshDecor( visualRadius );
-			earthLamp.position.copy( camera.position ).add( lampOffset );
-			earthLamp.intensity = 54 * Math.max( 0, gfx.nestLight );
+			keyWorldOffset.copy( keyLocalOffset ).applyQuaternion( camera.quaternion );
+			camera.getWorldDirection( keyDirection );
+			earthKey.position.copy( camera.position ).add( keyWorldOffset );
+			earthKey.target.position.copy( camera.position ).addScaledVector( keyDirection, 8 );
+			earthKey.intensity = 2.35 * Math.max( 0, gfx.nestLight );
 
 		}
 
