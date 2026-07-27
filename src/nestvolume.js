@@ -38,9 +38,11 @@ import { TEXEL, NEST, GRID, WORLD, MIN_NEST_DEPTH, gfx } from './config.js';
 import { K_MAX } from './nest.js';
 import { SDF_RADIUS_SCALE } from './navigation/corridor-network.js';
 import {
-	chamberPrimitive,
+	CHAMBER_LOBES,
+	chamberPrimitives,
+	corridorCapsuleRadii,
 	corridorCapsuleSegments,
-	SDF_SEGS_PER_CORRIDOR,
+	MAX_SDF_SEGS_PER_CORRIDOR,
 } from './navigation/support-geometry.js';
 import {
 	assessNestVolumeBakeFreshness,
@@ -50,17 +52,18 @@ import {
 } from './navigation/nest-volume-probe.js';
 
 // Résolution du volume. Le nid fait ~45 unités de large pour ~20 de profondeur ;
-// à 128×64×128 un voxel vaut ~0,4 unité, soit trois voxels en travers d'un
+// à 128×68×128 un voxel reste assez fin pour trois voxels en travers d'un
 // tunnel. C'est le minimum pour que l'interpolation trilinéaire donne des
-// parois lisses. Coût mémoire : 128·64·128·4·2 = 8 Mo.
-export const VOL_X = 128, VOL_Y = 64, VOL_Z = 128;
+// parois lisses, même sous la dérive organique profonde. Coût mémoire : ~8,5 Mio.
+export const VOL_X = 128, VOL_Y = 68, VOL_Z = 128;
 
 
-// Nombre fixe de capsules par tunnel. Chaque voxel les evalue pendant le bake ;
-// seize segments bornent le cout et partagent exactement les primitives CPU.
-// +1 inclut l'entree vers le vestibule.
+// Seize capsules suffisent par tunnel depuis que chaque branche reserve une
+// portee libre entre ses colliers. Le budget est uniforme et strictement lineaire.
+// +1 corridor inclut l'entree vers le vestibule.
 const MAX_CORRIDORS = K_MAX + 1;
-const MAX_SEGS = MAX_CORRIDORS * SDF_SEGS_PER_CORRIDOR;
+const MAX_SEGS = MAX_CORRIDORS * MAX_SDF_SEGS_PER_CORRIDOR;
+const MAX_CHAMBERS = K_MAX * CHAMBER_LOBES;
 
 export function createNestVolume( { renderer, layout } ) {
 
@@ -92,8 +95,8 @@ export function createNestVolume( { renderer, layout } ) {
 
 	// primitives : allouées à la taille MAXIMALE (la longueur d'un uniformArray
 	// est figée à la compilation du shader), bornées à l'exécution par un compteur
-	const chamberA = Array.from( { length: K_MAX }, () => new THREE.Vector4() );  // xyz + demi-axe x
-	const chamberB = Array.from( { length: K_MAX }, () => new THREE.Vector4() );  // demi-axes y, z + plancher
+	const chamberA = Array.from( { length: MAX_CHAMBERS }, () => new THREE.Vector4() ); // xyz + demi-axe x
+	const chamberB = Array.from( { length: MAX_CHAMBERS }, () => new THREE.Vector4() ); // demi-axes y, z + plancher
 	const segA = Array.from( { length: MAX_SEGS }, () => new THREE.Vector4() );   // xyz + rayon
 	const segB = Array.from( { length: MAX_SEGS }, () => new THREE.Vector4() );   // xyz du 2e point
 	const uChamberA = uniformArray( chamberA );
@@ -227,9 +230,33 @@ export function createNestVolume( { renderer, layout } ) {
 
 		const units = layout.units || [];
 		const K = Math.min( layout.K || 0, K_MAX );
-		const deepestNavigationPoint = Math.min( 0,
-			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ) );
-		const radius = ( layout.radiusWorld || 20 ) + 4;
+		const navigation = layout.navigation;
+		let deepestNavigationPoint = Math.min( 0,
+			... ( navigation?.nodes || [] ).map( ( node ) => node.depth ) );
+		let corridorRadiusWorld = layout.radiusWorld || 20;
+		for ( const corridor of navigation?.corridors || [] ) {
+
+			if ( ! corridor ) continue;
+			const segments = corridorCapsuleSegments( corridor );
+			const radii = corridorCapsuleRadii(
+				corridor, TEXEL, SDF_RADIUS_SCALE, segments.length );
+			for ( let index = 0; index < segments.length; index ++ ) {
+
+				const capsuleRadius = radii[ index ];
+				for ( const point of segments[ index ] ) {
+
+					deepestNavigationPoint = Math.min(
+						deepestNavigationPoint, point.depth - capsuleRadius );
+					corridorRadiusWorld = Math.max( corridorRadiusWorld,
+						Math.abs( point.x - NEST.x ) * TEXEL + capsuleRadius,
+						Math.abs( point.y - NEST.y ) * TEXEL + capsuleRadius );
+
+				}
+
+			}
+
+		}
+		const radius = corridorRadiusWorld + 4;
 		const depth = Math.max(
 			layout.depthMax || MIN_NEST_DEPTH, - deepestNavigationPoint ) + 3;
 		const bounds = {
@@ -261,18 +288,28 @@ export function createNestVolume( { renderer, layout } ) {
 		uSize.value.set(
 			geometry.bounds.size.x, geometry.bounds.size.y, geometry.bounds.size.z );
 
-		// --- chambres : lentilles aplaties ---
+		// --- chambres : trois lobes physiques bornes par loge ---
+		let chamberIndex = 0;
 		for ( let k = 0; k < K; k ++ ) {
 
 			const u = units[ k ];
-			const primitive = chamberPrimitive( u );
-			chamberA[ k ].set(
-				( u.x / GRID - 0.5 ) * WORLD, primitive.centerDepth,
-				( u.y / GRID - 0.5 ) * WORLD, primitive.radiusX );
-			chamberB[ k ].set( primitive.radiusY, primitive.radiusZ, primitive.floorDepth, 0 );
+			for ( const primitive of chamberPrimitives( u ) ) {
+
+				if ( chamberIndex >= MAX_CHAMBERS )
+					throw new Error( `Nest chamber primitive capacity exceeded (${ MAX_CHAMBERS })` );
+				chamberA[ chamberIndex ].set(
+					( u.x / GRID - 0.5 ) * WORLD + primitive.offsetX,
+					primitive.centerDepth,
+					( u.y / GRID - 0.5 ) * WORLD + primitive.offsetZ,
+					primitive.radiusX );
+				chamberB[ chamberIndex ].set(
+					primitive.radiusY, primitive.radiusZ, primitive.floorDepth, 0 );
+				chamberIndex ++;
+
+			}
 
 		}
-		uChamberCount.value = K;
+		uChamberCount.value = chamberIndex;
 
 		// --- tunnels : capsules le long de l'arc réel ---
 		const navigation = layout.navigation;
@@ -285,14 +322,16 @@ export function createNestVolume( { renderer, layout } ) {
 		for ( const corridor of navigation.corridors ) {
 
 			if ( ! corridor ) continue;
-			const width = corridor.tunnelW ?? corridor.radius
-				?? navigation.tunnelW ?? layout.tunnelW ?? 7;
-			const tw = Math.max( 0.6, width * TEXEL * SDF_RADIUS_SCALE );
+			const segments = corridorCapsuleSegments( corridor );
+			const radii = corridorCapsuleRadii(
+				corridor, TEXEL, SDF_RADIUS_SCALE, segments.length );
 
-			for ( const [ a, b ] of corridorCapsuleSegments( corridor ) ) {
+			for ( let index = 0; index < segments.length; index ++ ) {
 
+				const [ a, b ] = segments[ index ];
 				if ( n >= MAX_SEGS ) throw new Error( `Nest corridor segment capacity exceeded (${ MAX_SEGS })` );
-				segA[ n ].set( ( a.x / GRID - 0.5 ) * WORLD, a.depth, ( a.y / GRID - 0.5 ) * WORLD, tw );
+				segA[ n ].set( ( a.x / GRID - 0.5 ) * WORLD, a.depth,
+					( a.y / GRID - 0.5 ) * WORLD, radii[ index ] );
 				segB[ n ].set( ( b.x / GRID - 0.5 ) * WORLD, b.depth, ( b.y / GRID - 0.5 ) * WORLD, 0 );
 				n ++;
 

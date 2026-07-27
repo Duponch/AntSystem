@@ -7,6 +7,8 @@
 import { sampleCorridorSurface, SDF_RADIUS_SCALE } from './corridor-network.js';
 import {
 	chamberPrimitive,
+	chamberPrimitives,
+	corridorCapsuleRadii,
 	corridorCapsuleSegments,
 	corridorContactWorld,
 	createNestSurfaceOracle,
@@ -103,15 +105,22 @@ export function nestVolumeLayoutSignature( {
 	for ( let index = 0; index < chamberCount; index ++ ) {
 
 		const unit = layout.units[ index ];
-		const primitive = chamberPrimitive( unit );
-		tokens.push( 'chamber', index );
-		for ( const [ label, value ] of [
-			[ 'x', unit.x ], [ 'z', unit.y ],
-			[ 'centerDepth', primitive.centerDepth ],
-			[ 'floorDepth', primitive.floorDepth ],
-			[ 'radiusX', primitive.radiusX ], [ 'radiusY', primitive.radiusY ],
-			[ 'radiusZ', primitive.radiusZ ],
-		] ) number( value, `chamber ${ index } ${ label }` );
+		const primitives = chamberPrimitives( unit );
+		tokens.push( 'chamber', index, primitives.length );
+		for ( let lobe = 0; lobe < primitives.length; lobe ++ ) {
+
+			const primitive = primitives[ lobe ];
+			tokens.push( 'lobe', lobe );
+			for ( const [ label, value ] of [
+				[ 'x', unit.x ], [ 'z', unit.y ],
+				[ 'offsetX', primitive.offsetX ], [ 'offsetZ', primitive.offsetZ ],
+				[ 'centerDepth', primitive.centerDepth ],
+				[ 'floorDepth', primitive.floorDepth ],
+				[ 'radiusX', primitive.radiusX ], [ 'radiusY', primitive.radiusY ],
+				[ 'radiusZ', primitive.radiusZ ],
+			] ) number( value, `chamber ${ index } lobe ${ lobe } ${ label }` );
+
+		}
 
 	}
 
@@ -125,15 +134,15 @@ export function nestVolumeLayoutSignature( {
 			continue;
 
 		}
-		const width = corridor.tunnelW ?? corridor.radius
-			?? layout.navigation.tunnelW ?? layout.tunnelW ?? 7;
-		const radius = Math.max( 0.6, width * texel * tunnelRadiusScale );
 		const segments = corridorCapsuleSegments( corridor );
+		const radii = corridorCapsuleRadii(
+			corridor, texel, tunnelRadiusScale, segments.length );
 		tokens.push( 'corridor', edge, segments.length );
-		number( radius, `corridor ${ edge } radius` );
-		for ( const [ start, end ] of segments ) {
+		for ( let index = 0; index < segments.length; index ++ ) {
 
+			const [ start, end ] = segments[ index ];
 			tokens.push( 'segment', segmentCount ++ );
+			number( radii[ index ], `corridor ${ edge } segment ${ index } radius` );
 			for ( const [ label, value ] of [
 				[ 'ax', start.x ], [ 'ay', start.depth ], [ 'az', start.y ],
 				[ 'bx', end.x ], [ 'by', end.depth ], [ 'bz', end.y ],

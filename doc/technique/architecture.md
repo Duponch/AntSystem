@@ -2,7 +2,7 @@
 
 ## Chaîne de données
 
-1. `buildNest()` produit un registre déterministe de chambres, parents, objectifs et courbes de tunnels.
+1. `buildNest()` produit un registre organique déterministe de chambres, parents, objectifs et courbes de tunnels.
 2. `buildCorridorNetworkAsync()` construit le graphe puis délègue la projection des 12 pistes de chaque corridor à une file de deux à quatre Workers exacts.
 3. `buildNestLayoutAsync()` publie atomiquement routes, axes, contacts et supports après validation complète du candidat.
 4. Le SDF du nid, la gorge d’entrée, le trou du sol et le masquage de l’herbe dérivent des mêmes primitives géométriques propres.
@@ -10,6 +10,8 @@
 6. L’inspecteur et le Warden lisent la télémétrie sans devenir des sources de décision.
 
 Le réseau compilé est la référence commune. Une représentation visuelle peut être voxelisée ou moins détaillée, mais elle ne doit inventer une autre bouche, une autre paroi contractuelle ou une autre courbe de navigation.
+
+La macro-géométrie est elle-même partagée. Le registre place les séries dans des couronnes irrégulières, alterne les virages horaires et antihoraires et mélange des bifurcations amples (70–82°) ou resserrées (102–118°). Le parentage n’est plus une chaîne fixe de quatre loges : une loge profonde choisit un parent antérieur compatible dans la strate supérieure, tandis qu’une partie des racines hautes remonte depuis la strate 1. Le graphe reste un arbre append-only mais se ramifie à toutes les profondeurs. Un oracle d’authoring rejette les candidats qui sortent du champ ou violent la marge de terre, puis publie un bake déterministe append-only : le runtime ne relance aucune recherche. Une chambre logique devient trois lobes tronqués contenus dans une enveloppe conservatrice ; chaque corridor devient seize capsules, avec axe sinueux et rayon variable sans réduction de clearance. Les 144 échantillons de chacune des 12 pistes sont compilés une fois et partagés. Le CPU de contact et le GPU de rendu consomment ces mêmes primitives.
 
 ## Textures de surface
 
@@ -53,7 +55,7 @@ Les œufs sont transportés par une abstraction logistique entre la chambre roya
 
 ## Volume physique borné
 
-Le SDF rendu occupe une texture `128 × 64 × 128`. Verticalement, elle couvre la géométrie la plus profonde, 3 unités de marge basse et 1,7 unité au-dessus de la surface. La profondeur du nid est bornée à `[19, 24]` : 19 est la première valeur où les 96 loges et toutes les largeurs 5,5..12 gardent au moins 0,4 unité de terre après routage déterministe ; à 24, le tunnel minimal garde encore trois voxels sur son diamètre.
+Le SDF rendu occupe une texture `128 × 68 × 128`. Verticalement, elle couvre la géométrie la plus profonde, 3 unités de marge basse et 1,7 unité au-dessus de la surface. La profondeur du nid est bornée à `[19, 24]` : 19 est la première valeur où les 96 loges et toutes les largeurs 5,5..12 gardent au moins 0,4 unité de terre après routage déterministe ; à 24, le tunnel minimal garde encore trois voxels sur son diamètre.
 
 L’entrée est réservée à la périphérie du registre complet par un offset fixe de 11 unités et une direction déterministe. Les corrections nécessaires restent des détours locaux bornés, validés avec toutes les structures futures avant publication du layout.
 

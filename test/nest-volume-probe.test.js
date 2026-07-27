@@ -143,13 +143,17 @@ test( 'NAV-VOLUME-GPU-005 the bake signature changes with every rendered clean p
 		layout: {
 			K: 1,
 			tunnelW: 6,
-			units: [ { x: 12, y: 18, depth: - 4, rh: 1.2, rwx: 2.4, rwz: 2.1 } ],
+			units: [ { x: 12, y: 18, depth: - 4, rh: 1.2, rwx: 2.4, rwz: 2.1,
+				k: 0, chamberYaw: 0.4, chamberBalance: 0.35 } ],
 			navigation: {
 				corridors: [ null, {
+					id: 5,
 					radius: 6,
 					capsulePoints: [
 						{ x: 10, y: 16, depth: 0 },
+						{ x: 10.5, y: 16.5, depth: - 1 },
 						{ x: 11, y: 17, depth: - 2 },
+						{ x: 11.5, y: 17.5, depth: - 3 },
 						{ x: 12, y: 18, depth: - 4 },
 					],
 				} ],
@@ -163,7 +167,7 @@ test( 'NAV-VOLUME-GPU-005 the bake signature changes with every rendered clean p
 		chamberCount: 1,
 	};
 	const signature = nestVolumeLayoutSignature( input );
-	assert.match( signature, /^nv1-[0-9a-f]{32}-c1-s2$/ );
+	assert.match( signature, /^nv1-[0-9a-f]{32}-c1-s4$/ );
 	assert.equal( nestVolumeLayoutSignature( structuredClone( input ) ), signature );
 
 	const inactive = structuredClone( input );
@@ -179,6 +183,14 @@ test( 'NAV-VOLUME-GPU-005 the bake signature changes with every rendered clean p
 	const movedChamber = structuredClone( input );
 	movedChamber.layout.units[ 0 ].rwx += 0.01;
 	assert.notEqual( nestVolumeLayoutSignature( movedChamber ), signature );
+
+	const rotatedChamber = structuredClone( input );
+	rotatedChamber.layout.units[ 0 ].chamberYaw += 0.01;
+	assert.notEqual( nestVolumeLayoutSignature( rotatedChamber ), signature );
+
+	const changedRadiusProfile = structuredClone( input );
+	changedRadiusProfile.layout.navigation.corridors[ 1 ].id ++;
+	assert.notEqual( nestVolumeLayoutSignature( changedRadiusProfile ), signature );
 
 	const changedBounds = structuredClone( input );
 	changedBounds.bounds.size.y += 0.01;

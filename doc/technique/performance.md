@@ -44,9 +44,11 @@ Le solveur analytique limite les primitives évaluées avec une grille de cellul
 
 ## Budget du volume souterrain
 
-Le volume SDF fixe mesure `128 × 64 × 128` en RGBA demi-précision, soit environ 8 Mio. Il inclut 3 unités sous la géométrie la plus profonde et une marge haute de 1,7 unité. L’intervalle `[19, 24]` combine deux budgets : faisabilité exhaustive du layout à 19, puis minimum de trois voxels verticaux dans le tunnel le plus fin à 24.
+Le volume SDF fixe mesure `128 × 68 × 128` en RGBA demi-précision, soit environ 8,5 Mio. Il inclut 3 unités sous la géométrie la plus profonde et une marge haute de 1,7 unité. Les quatre tranches verticales ajoutées par rapport à la grille 64 garantissent trois voxels dans le tunnel minimal, y compris avec la dérive organique la plus profonde. L’intervalle `[19, 24]` combine faisabilité exhaustive du layout à 19 et résolution minimale à 24.
 
 La faisabilité est payée à la construction, jamais par fourmi : le registre complet de 96 loges, les largeurs 5,5..12, l’entrée périphérique et les détours locaux bornés sont évalués avant publication. La marge contractuelle entre structures non adjacentes est de 0,4 unité monde.
+
+La forme organique suit le même budget partagé : trois lobes par chambre, seize capsules par corridor et 144 échantillons par piste sont préparés lors du bake. Ce dernier nombre remplace les 128 échantillons antérieurs (+12,5 % sur deux tables partagées de capacité fixe) afin de conserver la précision sur les galeries plus longues ; le nombre de capsules reste uniformément seize sur tout le registre. La recherche de placement et la matrice de collisions sont des oracles d’authoring et de test, jamais des traitements de frame. Chaque fourmi conserve exactement les mêmes quatre lectures interpolées et le même état compact : la naturalité n’ajoute donc aucun coût individuel ni aucune interaction entre fourmis.
 
 Accepter 200 unités avec la même grille réduirait fortement la résolution verticale et casserait ce contrat. Une telle échelle nécessite une architecture en briques, clipmap ou volume clairsemé. Augmenter simplement la profondeur logique sans changer le stockage n’est pas une optimisation acceptable.
 

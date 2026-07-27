@@ -4,7 +4,7 @@
 |---|---|---|---|
 | `COL-ECO` | Castes, ponte, développement, stocks, famine et menaces suivent la même chaîne causale ; grenier, reine et couvain conservent leur couche déclarée | `COLONY-TROUGH-001/002`, `COLONY-BROOD-001`, scénarios T2, T3, T5, T6 et T9 | Campagne colonie GPU : ponte, éclosion, livraison, famine et prédateurs |
 | `COL-START` | Colonie établie entièrement souterraine ; rôles cohérents ; éclosion au couvain ; mode surface explicite | `COL-START-001` à `COL-START-004` | T1 : démarrage naturel ; T10 : ON→OFF→ON et toggles sérialisés |
-| `NAV-SURFACE` | 12 pistes précalculées ; contact SDF direct ; supports/tangentes continus ; bake parallèle bit-identique ; mutations FIFO atomiques ; layout et volume résolus sur `[19, 24]` | `NAV-SURFACE-001` à `008`, `NAV-SURFACE-PERF-001`, `NAV-SURFACE-PAR-001` à `004`, `NAV-NEST-TXN-001` à `004`, `NAV-NEST-PAUSE-001/002`, `NAV-VOLUME-001/002`, `NAV-VOLUME-GPU-001` à `004` | Warden : cinématique, pose/support, sonde du volume réel et scénarios structurels |
+| `NAV-SURFACE` | 12 pistes × 144 échantillons précalculés ; topologie organique macroscopique et géométrie CPU/GPU communes ; contact SDF direct ; supports/tangentes continus ; bake parallèle bit-identique ; mutations FIFO atomiques ; layout et volume résolus sur `[19, 24]` | `NAV-SURFACE-001` à `008`, `NEST-ORGANIC-001` à `005`, `NAV-SURFACE-PERF-001`, `NAV-SURFACE-PAR-001` à `004`, `NAV-NEST-TXN-001` à `004`, `NAV-NEST-PAUSE-001/002`, `NAV-VOLUME-001/002`, `NAV-VOLUME-GPU-001` à `004` | Warden : cinématique, pose/support, sonde du volume réel et scénarios structurels |
 | `NAV-ENTRANCE` | Entrée périphérique ; trou physique à `y = 0` ; lèvre continue pour tout `dt` ; raccord borné ; transition conservant piste et résidu | `NAV-ENTRANCE-001` à `NAV-ENTRANCE-009` et validation exhaustive `NEST-LAYOUT` | `NAV-ENTRANCE-RUNTIME-001` force sortie+entrée ; `report.pass` exige l’aller-retour |
 | `OBS` | Intention réelle ; arrêts attendus ; immobilité suspecte ; pause vitesse×0 ; distances monde ; suivi temporel isolé | `OBS-START-001`, `OBS-PAUSE-001`, `OBS-DIST-001` et tests observer | Inspection d’un identifiant et traces Warden |
 
@@ -17,7 +17,8 @@
 | Partition, fusion bit-identique et fallback worker | `test/corridor-surface-parallel.test.js` |
 | Portails, progression, absence de warp | `test/corridor-network.continuity.test.js` |
 | Formes irrégulières, étages superposés, profondeur, append-only | `test/corridor-network.regression.test.js` |
-| Registre phyllotactique, entrée périphérique, détours et séparation sur 5,5..12 | `test/nest.phyllotactic-layout.test.js` |
+| Registre organique append-only, couronnes irrégulières, parentage ramifié multi-strates, détours et matrice exhaustive de séparation | `test/nest.organic-registry.test.js` |
+| Non-répétitivité, chambres multilobées, sinuosité, rayons variables et strates | `test/nest.organic-layout.test.js` |
 | Profondeur bornée et résolution verticale minimale | `test/nest.depth-resolution.test.js` |
 | Contact propre, support, convergence, stretch et continuité K96 × 12 | `test/corridor-network.surface-contact.test.js`, `test/chamber-surface.test.js` |
 | Clé spatiale numérique exacte et bornée | `test/support-geometry.spatial-hash.test.js` |
@@ -38,7 +39,7 @@ Pour `C` capacités de corridors, `S` échantillons et 12 pistes :
 
 Chaque pas d’une fourmi lit deux texels voisins de chaque table. La projection SDF est interdite dans le kernel de déplacement et dans la passe de pose. Le hash spatial et les workers n’existent que pendant le bake partagé : ils ne changent pas ce coût individuel.
 
-Le volume rendu reste `128 × 64 × 128`, avec 3 unités de marge basse et 1,7 unité de marge haute. `NAV-VOLUME-001` protège la première profondeur géométriquement faisable, 19 ; `NAV-VOLUME-002` exige au moins trois voxels verticaux dans le diamètre minimal à 24. La campagne Warden complète l’oracle analytique en lisant réellement le canal G demi-précision de ce volume sur trois corridors et deux chambres.
+Le volume rendu reste `128 × 68 × 128`, avec 3 unités de marge basse et 1,7 unité de marge haute. `NAV-VOLUME-001` protège la première profondeur géométriquement faisable, 19 ; `NAV-VOLUME-002` exige au moins trois voxels verticaux dans le diamètre minimal à 24. La campagne Warden complète l’oracle analytique en lisant réellement le canal G demi-précision de ce volume sur trois corridors et deux chambres.
 
 ## Critère de livraison
 

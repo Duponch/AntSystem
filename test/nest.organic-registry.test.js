@@ -8,7 +8,9 @@ import {
 } from '../src/navigation/corridor-network.js';
 import {
 	SDF_SEGS_PER_CORRIDOR,
+	corridorSdfSegmentCount,
 	chamberPrimitive,
+	corridorCapsuleRadii,
 	corridorCapsuleSegments,
 } from '../src/navigation/support-geometry.js';
 import {
@@ -21,11 +23,12 @@ import {
 
 const DEPTH = 19;
 const TUNNEL_WIDTH = 6;
-const COLLISION_DEPTHS = [ 19, 20, 22, 24 ];
-const COLLISION_WIDTHS = [ 5.5, 6, 12 ];
+const COLLISION_DEPTHS = process.env.NEST_TEST_DEPTH
+	? [ Number( process.env.NEST_TEST_DEPTH ) ] : [ 19, 20, 22, 24 ];
+const COLLISION_WIDTHS = process.env.NEST_TEST_WIDTH
+	? [ Number( process.env.NEST_TEST_WIDTH ) ] : [ 5.5, 6, 12 ];
 const COLLISION_NETWORK_SAMPLES = 8;
-const BRANCH_TARGET = 12.5;
-const BRANCH_MAX = BRANCH_TARGET * 1.5;
+const BRANCH_MAX = 22;
 const CHAMBER_MARGIN = 0.5;
 const TUNNEL_CHAMBER_MARGIN = 0.4;
 const TUNNEL_TUNNEL_MARGIN = 0.4;
@@ -273,7 +276,7 @@ const SEPARATING_DIRECTIONS = Array.from( { length: 512 }, ( _, index ) => {
 
 } );
 
-describe( 'deterministic phyllotactic nest registry', () => {
+describe( 'deterministic organic nest registry', () => {
 
 	test( 'NEST-LAYOUT-001 is deterministic and append-only for every active prefix', () => {
 
@@ -295,34 +298,43 @@ describe( 'deterministic phyllotactic nest registry', () => {
 		assert.deepEqual( full.units.slice( 0, 4 ).map( ( unit ) => unit.type ), [
 			ROOM.GARDE, ROOM.GRENIER, ROOM.CRECHE, ROOM.ROYALE,
 		] );
-		assert.equal( full.parents[ 12 ], 4 );
-		assert.equal( full.parents[ 20 ], 0 );
-		assert.equal( full.parents[ 32 ], 20 );
-		assert.equal( full.parents[ 52 ], 32 );
-		assert.equal( full.parents[ 72 ], 20 );
 
+		let crossSeriesParents = 0;
+		let rootsFromBelow = 0;
 		for ( let k = 0; k < K_MAX; k ++ ) {
 
 			const unit = full.units[ k ];
 			const parent = full.parents[ k ];
 			assert.ok( parent < k && parent >= - 1, `invalid parent ${ parent } for ${ k }` );
-			if ( unit.level > 0 ) {
+			if ( unit.q === 0 ) {
 
-				assert.equal( parent, k - 1, `series ${ unit.q } level ${ unit.level }` );
-				const previous = full.units[ parent ];
-				const distance = Math.hypot( unit.x - previous.x, unit.y - previous.y ) * TEXEL;
-				assert.ok( Math.abs( distance - BRANCH_TARGET ) < 1e-10 );
-
-			} else if ( parent >= 0 ) {
-
-				const previous = full.units[ parent ];
-				assert.equal( previous.level, 0 );
-				const distance = Math.hypot( unit.x - previous.x, unit.y - previous.y ) * TEXEL;
-				assert.ok( distance <= BRANCH_MAX + EPS, `branch ${ k } is ${ distance } world units long` );
+				assert.equal( parent, k === 0 ? - 1 : k - 1,
+					`founding series must expose all four biological strata` );
+				continue;
 
 			}
+			const previous = full.units[ parent ];
+			if ( unit.level === 0 ) {
+
+				assert.ok( previous.level === 0 || previous.level === 1,
+					`root ${ k } attached below the shallow service strata` );
+				if ( previous.level === 1 ) rootsFromBelow ++;
+
+			} else assert.equal( previous.level, unit.level - 1,
+				`room ${ k } attached to level ${ previous.level }, expected ${ unit.level - 1 }` );
+			const distance = Math.hypot(
+				( unit.x - previous.x ) * TEXEL,
+				unit.depth - previous.depth,
+				( unit.y - previous.y ) * TEXEL );
+			assert.ok( distance <= BRANCH_MAX + EPS,
+				`organic edge ${ k } is ${ distance } world units long` );
+			if ( previous.q !== unit.q ) crossSeriesParents ++;
 
 		}
+		assert.ok( crossSeriesParents >= 36,
+			`only ${ crossSeriesParents } rooms escape the repeated four-room ladder` );
+		assert.ok( rootsFromBelow >= 5,
+			`only ${ rootsFromBelow } shallow roots grow from the stratum below` );
 
 	} );
 
@@ -386,6 +398,17 @@ describe( 'deterministic phyllotactic nest registry', () => {
 
 		let refinedPairs = 0;
 		let entryPairs = 0;
+		const violationByPair = new Map();
+		const recordViolation = ( key, clearance, depth, width ) => {
+
+			const previous = violationByPair.get( key );
+			if ( previous && previous.clearance <= clearance ) return;
+			violationByPair.set( key, {
+				clearance,
+				message: `D${ depth } W${ width }: ${ key } has ${ clearance.toFixed( 6 ) }u of soil`,
+			} );
+
+		};
 
 		for ( const depth of COLLISION_DEPTHS ) for ( const width of COLLISION_WIDTHS ) {
 
@@ -393,13 +416,24 @@ describe( 'deterministic phyllotactic nest registry', () => {
 			const network = buildCorridorNetwork( nest, {
 				samples: COLLISION_NETWORK_SAMPLES,
 				maxNodes: 128,
+				deferSurface: true,
 			} );
 			const chambers = nest.units.map( renderedChamberOf );
-			const corridors = network.corridors.filter( Boolean ).map( ( corridor ) => ( {
-				...corridor,
-				radiusWorld: corridor.radius * TEXEL * SDF_RADIUS_SCALE,
-				capsules: worldCapsulesOf( corridor ),
-			} ) );
+			const corridors = network.corridors.filter( Boolean ).map( ( corridor ) => {
+
+				const segments = worldCapsulesOf( corridor );
+				const radii = corridorCapsuleRadii(
+					corridor, TEXEL, SDF_RADIUS_SCALE, segments.length );
+				return {
+					...corridor,
+					radiusWorld: Math.max( ...radii ),
+					capsules: segments.map( ( segment, index ) => ( {
+						segment,
+						radiusWorld: radii[ index ],
+					} ) ),
+				};
+
+			} );
 			const halfFieldWorld = DEPTH_SIZE * TEXEL * 0.5;
 			const centerWorld = [ NEST.x * TEXEL, NEST.y * TEXEL ];
 			const entrance = corridors.find( ( corridor ) => corridor.id === 1 );
@@ -408,16 +442,19 @@ describe( 'deterministic phyllotactic nest registry', () => {
 
 			for ( const corridor of corridors ) {
 
-				assert.equal( corridor.capsules.length, SDF_SEGS_PER_CORRIDOR,
+				assert.equal( corridor.capsules.length, corridorSdfSegmentCount( corridor ),
 					`edge ${ corridor.id } does not use rendered capsule count` );
-				for ( const [ start, end ] of corridor.capsules ) {
+				for ( const capsule of corridor.capsules ) {
 
+					const [ start, end ] = capsule.segment;
 					for ( const point of [ start, end ] ) {
 
-						assert.ok( Math.abs( point[ 0 ] - centerWorld[ 0 ] ) + corridor.radiusWorld
-							<= halfFieldWorld - FIELD_MARGIN );
-						assert.ok( Math.abs( point[ 2 ] - centerWorld[ 1 ] ) + corridor.radiusWorld
-							<= halfFieldWorld - FIELD_MARGIN );
+						assert.ok( Math.abs( point[ 0 ] - centerWorld[ 0 ] ) + capsule.radiusWorld
+							<= halfFieldWorld - FIELD_MARGIN,
+							`edge ${ corridor.id } leaves the X field at D${ depth } W${ width }` );
+						assert.ok( Math.abs( point[ 2 ] - centerWorld[ 1 ] ) + capsule.radiusWorld
+							<= halfFieldWorld - FIELD_MARGIN,
+							`edge ${ corridor.id } leaves the Z field at D${ depth } W${ width }` );
 
 					}
 					for ( let chamberIndex = 0; chamberIndex < chambers.length; chamberIndex ++ ) {
@@ -426,13 +463,13 @@ describe( 'deterministic phyllotactic nest registry', () => {
 						if ( chamberNode === corridor.from || chamberNode === corridor.to ) continue;
 						const chamber = chambers[ chamberIndex ];
 						const broadRadii = chamber.radii.map( ( radius ) =>
-							radius + corridor.radiusWorld + TUNNEL_CHAMBER_MARGIN );
+							radius + capsule.radiusWorld + TUNNEL_CHAMBER_MARGIN );
 						if ( ! segmentIntersectsAabb( start, end, chamber.center, broadRadii ) ) continue;
 						refinedPairs ++;
 						if ( corridor.id <= 2 ) entryPairs ++;
 						const distance = segmentChamberDistance( start, end, chamber );
-						assert.ok( distance >= corridor.radiusWorld + TUNNEL_CHAMBER_MARGIN - EPS,
-							`D${ depth } W${ width }: edge ${ corridor.id } / chamber ${ chamberIndex } has ${ ( distance - corridor.radiusWorld ).toFixed( 6 ) }u of soil` );
+						if ( distance < capsule.radiusWorld + TUNNEL_CHAMBER_MARGIN - EPS )
+							recordViolation( `edge ${ corridor.id } / chamber ${ chamberIndex }`, distance - capsule.radiusWorld, depth, width );
 
 					}
 
@@ -447,17 +484,19 @@ describe( 'deterministic phyllotactic nest registry', () => {
 					const corridorA = corridors[ first ];
 					const corridorB = corridors[ second ];
 					if ( shareNode( corridorA, corridorB ) ) continue;
-					let distance = Infinity;
+					let clearance = Infinity;
 					for ( const capsuleA of corridorA.capsules ) {
 
-						for ( const capsuleB of corridorB.capsules ) distance = Math.min( distance,
-							segmentSegmentDistance( capsuleA[ 0 ], capsuleA[ 1 ], capsuleB[ 0 ], capsuleB[ 1 ] ) );
+						for ( const capsuleB of corridorB.capsules ) clearance = Math.min( clearance,
+							segmentSegmentDistance(
+								capsuleA.segment[ 0 ], capsuleA.segment[ 1 ],
+								capsuleB.segment[ 0 ], capsuleB.segment[ 1 ],
+							) - capsuleA.radiusWorld - capsuleB.radiusWorld );
 
 					}
 					if ( corridorA.id <= 2 || corridorB.id <= 2 ) entryPairs ++;
-					const required = corridorA.radiusWorld + corridorB.radiusWorld + TUNNEL_TUNNEL_MARGIN;
-					assert.ok( distance >= required - EPS,
-						`D${ depth } W${ width }: edges ${ corridorA.id }/${ corridorB.id } have ${ ( distance - corridorA.radiusWorld - corridorB.radiusWorld ).toFixed( 6 ) }u of soil` );
+					if ( clearance < TUNNEL_TUNNEL_MARGIN - EPS )
+						recordViolation( `edges ${ corridorA.id }/${ corridorB.id }`, clearance, depth, width );
 
 				}
 
@@ -466,6 +505,8 @@ describe( 'deterministic phyllotactic nest registry', () => {
 		}
 		assert.ok( refinedPairs > 0, 'clipped-ellipsoid oracle was not exercised' );
 		assert.ok( entryPairs > 0, 'entrance corridors were not checked against the K96 registry' );
+		const violations = [ ...violationByPair.values() ].map( ( entry ) => entry.message );
+		assert.deepEqual( violations, [], violations.join( '\n' ) );
 
 	} );
 

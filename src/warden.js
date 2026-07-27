@@ -34,7 +34,10 @@ import {
 } from 'three/tsl';
 
 import { params, gfx, WORLD, TEXEL, MAX_ANTS, MIN_NEST_DEPTH, MAX_NEST_DEPTH } from './config.js';
-import { nestUnit, buildNest, K_MAX, MIN_TUNNEL_WIDTH } from './nest.js';
+import {
+	MAX_NEST_DEPTH_DRIFT_WORLD,
+	nestUnit, buildNest, K_MAX, MIN_TUNNEL_WIDTH,
+} from './nest.js';
 import {
 	corridorSurfaceLengthTSL,
 	sampleCorridorSurfaceTSL,
@@ -676,8 +679,11 @@ export function createWarden( { sim, colony, ants, cones, renderer, nestVolume }
 
 		renderer.compute( [ kWatchReset, kCountersReset, kCursorReset ] );
 		if ( ! preserveClock ) simClock = 0;
+		const navigationPoints = ( layout.navigation?.corridors || [] ).flatMap(
+			( corridor ) => corridor?.axisPoints || [] );
 		const deepest = Math.min( 0,
-			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ) );
+			... ( layout.navigation?.nodes || [] ).map( ( node ) => node.depth ),
+			... navigationPoints.map( ( point ) => point.depth ) );
 		uDepthMax.value = Math.max( layout.depthMax || MIN_NEST_DEPTH, - deepest );
 
 		uLaneStretch.value = layout.navigation?.maxLaneStretch || 1;
@@ -900,10 +906,10 @@ export function createWarden( { sim, colony, ants, cones, renderer, nestVolume }
 			ok( 'registre append-only', moved === 0, `${ moved } loge(s) déplacée(s) en grandissant 10→20` );
 
 		}
-		// bornes physiques du registre complet. La profondeur d'une loge est
-		// −depthMax·zf·(0,94+0,12·vdc) : le jitter la pousse jusqu'à
-		// −depthMax·1,06 — EN DESSOUS du depthMax nominal, mais la marge +3 du
-		// volume baké (nestvolume.js) la couvre. La garde est donc à 1,06.
+		// Bornes physiques du registre complet. depthMax est la cote nominale
+		// de la strate royale ; sa dérive organique bornée peut descendre de
+		// MAX_NEST_DEPTH_DRIFT_WORLD. Le volume baké suit toujours le point réel.
+		const registryDepthBound = MIN_NEST_DEPTH + MAX_NEST_DEPTH_DRIFT_WORLD;
 		{
 
 			let badDepth = 0, badLayer = 0, badParent = 0;
@@ -911,7 +917,7 @@ export function createWarden( { sim, colony, ants, cones, renderer, nestVolume }
 
 			for ( const uN of nAll.units ) {
 
-				if ( uN.depth > 0.01 || uN.depth < - MIN_NEST_DEPTH * 1.06 - 0.01 ) badDepth ++;
+				if ( uN.depth > 0.01 || uN.depth < - registryDepthBound - 0.01 ) badDepth ++;
 				if ( uN.layer < 0 || uN.layer > 3 ) badLayer ++;
 
 			}
@@ -919,7 +925,7 @@ export function createWarden( { sim, colony, ants, cones, renderer, nestVolume }
 			for ( let k = 0; k < K_MAX; k ++ ) if ( nAll.parents[ k ] >= k || nAll.parents[ k ] < - 1 ) badParent ++;
 			ok( 'bornes du registre (profondeur, nappe, parent)',
 				badDepth === 0 && badLayer === 0 && badParent === 0,
-				`profondeur hors [-${ ( MIN_NEST_DEPTH * 1.06 ).toFixed( 1 ) }, 0]=${ badDepth }, nappe hors 0..3=${ badLayer }, parents invalides=${ badParent }` );
+				`profondeur hors [-${ registryDepthBound.toFixed( 1 ) }, 0]=${ badDepth }, nappe hors 0..3=${ badLayer }, parents invalides=${ badParent }` );
 
 		}
 		// connexité : chaque nœud retombe sur la racine (parent −1 = puits)

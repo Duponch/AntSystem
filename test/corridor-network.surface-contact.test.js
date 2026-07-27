@@ -428,15 +428,17 @@ test( 'NAV-SURFACE-008 K96 baked tracks have continuous GPU tangents and support
 
 			for ( let index = 1; index < segments.length; index ++ ) {
 
-				assert.ok( angle( segments[ index - 1 ], segments[ index ] ) <= maxRawTurn,
-					`edge ${ corridor.id }, track ${ track }, raw tangent ${ index + 1 }` );
+				const rawTurn = angle( segments[ index - 1 ], segments[ index ] );
+				assert.ok( rawTurn <= maxRawTurn,
+					`edge ${ corridor.id }, track ${ track }, raw tangent ${ index + 1 } = ${ ( rawTurn * 180 / Math.PI ).toFixed( 3 ) }°` );
 				const support = unit( supportAt( index ), 'junction support' );
 				const gpuBefore = projectOnSupport(
 					segments[ index - 1 ], support, 'previous GPU tangent' );
 				const gpuAfter = projectOnSupport(
 					segments[ index ], support, 'next GPU tangent' );
-				assert.ok( angle( gpuBefore, gpuAfter ) <= maxGpuTurn,
-					`edge ${ corridor.id }, track ${ track }, GPU tangent ${ index + 1 }` );
+				const gpuTurn = angle( gpuBefore, gpuAfter );
+				assert.ok( gpuTurn <= maxGpuTurn,
+					`edge ${ corridor.id }, track ${ track }, GPU tangent ${ index + 1 } = ${ ( gpuTurn * 180 / Math.PI ).toFixed( 3 ) }°` );
 
 			}
 

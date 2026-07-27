@@ -17,14 +17,14 @@ import {
 import {
 	compileCorridorSurfaceTracks,
 	CORRIDOR_SURFACE_TRACKS,
-	SDF_SEGS_PER_CORRIDOR,
+	corridorSdfSegmentCount,
 	sampleCompiledSurfaceTrack,
 } from './support-geometry.js';
 import { compileCorridorSurfaceTracksParallel } from './corridor-surface-parallel.js';
 
 export { CORRIDOR_SURFACE_TRACKS };
 
-export const CORRIDOR_SAMPLES = 128;
+export const CORRIDOR_SAMPLES = 144;
 export const ENTRY_EDGE_SEED = K_MAX + 0x51;
 export const ENDPOINT_FADE = 0.35;
 export const SDF_RADIUS_SCALE = 0.85;
@@ -155,6 +155,58 @@ function resampleByArcLength( raw, count, texel ) {
 
 }
 
+function resampleCapsulesWithPortalBoundaries(
+	raw, startIndex, endIndex, segmentCount, texel
+) {
+
+	const regions = [
+		raw.slice( 0, startIndex + 1 ),
+		raw.slice( startIndex, endIndex + 1 ),
+		raw.slice( endIndex ),
+	];
+	const lengths = regions.map( ( region ) => {
+
+		let length = 0;
+		for ( let index = 1; index < region.length; index ++ )
+			length += pointDistance( region[ index - 1 ], region[ index ], texel );
+		return length;
+
+	} );
+	const totalWeight = lengths.reduce( ( sum, length ) => sum + length, 0 );
+	const counts = lengths.map( ( length ) => length > EPS ? 1 : 0 );
+	let remaining = segmentCount - counts.reduce( ( sum, count ) => sum + count, 0 );
+	const ideal = lengths.map( ( length ) => length / totalWeight * segmentCount );
+	while ( remaining -- > 0 ) {
+
+		let selected = 0, largestDeficit = - Infinity;
+		for ( let index = 0; index < counts.length; index ++ ) {
+
+			if ( lengths[ index ] <= EPS ) continue;
+			const deficit = ideal[ index ] - counts[ index ];
+			if ( deficit > largestDeficit ) {
+
+				largestDeficit = deficit;
+				selected = index;
+
+			}
+
+		}
+		counts[ selected ] ++;
+
+	}
+	const points = [];
+	for ( let index = 0; index < regions.length; index ++ ) {
+
+		if ( counts[ index ] === 0 ) continue;
+		const sampled = resampleByArcLength( regions[ index ], counts[ index ] + 1, texel ).points;
+		points.push( ... ( points.length === 0 ? sampled : sampled.slice( 1 ) ) );
+
+	}
+	if ( points.length !== segmentCount + 1 )
+		throw new Error( `Capsule partition produced ${ points.length - 1 } segments instead of ${ segmentCount }` );
+	return points;
+
+}
 function parentNodeOf( nest, childNode ) {
 
 	if ( childNode === 1 ) return 0;
@@ -355,6 +407,9 @@ function buildAxisGeometry( floorPath, child, from, nest, axisLiftWorld, texel, 
 	let endIndex = stableClearanceIndex( raw, texel, clearanceWorld, false, false );
 	if ( child !== 1 ) startIndex = Math.max( startIndex, chamberBoundary( from, true ) );
 	endIndex = Math.min( endIndex, chamberBoundary( child, false ) );
+	// La dernière grande branche a besoin d'un vestibule plus long : son fort
+	// dénivelé est ainsi amorcé avant le bord de chambre, sans changer ses nœuds.
+	if ( child >= 95 ) startIndex = Math.max( 1, startIndex - Math.round( last * 0.05 ) );
 
 	if ( startIndex >= endIndex ) {
 
@@ -369,16 +424,22 @@ function buildAxisGeometry( floorPath, child, from, nest, axisLiftWorld, texel, 
 		const startDepth = raw[ 0 ].depth;
 		const endDepth = raw[ last ].depth;
 		for ( let index = 0; index <= startIndex; index ++ ) raw[ index ].depth = startDepth;
+		const routedUnit = child >= NODE_CHAMBER0
+			? nest.units?.[ child - NODE_CHAMBER0 ] : null;
+		const verticalBulgeWorld = routedUnit?.organicRoute?.verticalBulgeWorld ?? 0;
 		for ( let index = startIndex + 1; index < endIndex; index ++ ) {
 
 			const u = ( index - startIndex ) / ( endIndex - startIndex );
 			const eased = u * u * u * ( u * ( u * 6 - 15 ) + 10 );
 			raw[ index ].depth = lerpPoint(
 				{ x: 0, y: 0, depth: startDepth },
-				{ x: 0, y: 0, depth: endDepth }, eased ).depth;
+				{ x: 0, y: 0, depth: endDepth }, eased ).depth
+				+ verticalBulgeWorld * Math.sin( Math.PI * u ) ** 2;
 
 		}
-
+		// The underpass is authored only across the free span. Its sin² envelope
+		// has zero position and slope at both collars, so no portal kink can make a
+		// surface track loop or move backwards.
 	}
 	for ( let index = endIndex; index <= last; index ++ )
 		raw[ index ].depth = raw[ last ].depth;
@@ -388,8 +449,11 @@ function buildAxisGeometry( floorPath, child, from, nest, axisLiftWorld, texel, 
 	// de support accrochaient une paroi distante. Les ruptures de collier restent
 	// garanties par la profondeur plane de `raw`; la repartition uniforme borne
 	// en plus l'erreur de corde sur l'ensemble du corridor.
-	const capsulePoints = resampleByArcLength(
-		raw, SDF_SEGS_PER_CORRIDOR + 1, texel ).points;
+	const capsuleSegmentCount = corridorSdfSegmentCount( child );
+	const capsulePoints = child === 1
+		? resampleByArcLength( raw, capsuleSegmentCount + 1, texel ).points
+		: resampleCapsulesWithPortalBoundaries(
+			raw, startIndex, endIndex, capsuleSegmentCount, texel );
 	const sampled = resampleByArcLength( raw, samples, texel );
 	return { raw, sampled, capsulePoints, startIndex, endIndex, clearanceWorld };
 

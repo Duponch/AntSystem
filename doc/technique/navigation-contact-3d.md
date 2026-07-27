@@ -11,6 +11,14 @@ La géométrie de route et la géométrie de contact sont liées mais distinctes
 
 Chaque corridor possède exactement 12 pistes stables réparties autour de son volume. L’identifiant d’une fourmi sélectionne une piste de façon déterministe ; ce choix ne change ni son objectif, ni son corridor, ni le sens de son trajet.
 
+### Morphologie organique autoritative
+
+Le graphe reste un registre déterministe et append-only, mais sa silhouette physique n’est plus une répétition de chambres ovales et de tubes réguliers. Les racines de série suivent des couronnes irrégulières plutôt qu’une grille ; leurs quatre niveaux alternent une orientation horaire ou antihoraire et des virages tirés dans deux familles, 70–82° et 102–118°. Les loges profondes choisissent un parent antérieur compatible dans la strate supérieure au lieu de rester systématiquement dans leur série ; certaines racines hautes remontent depuis la strate 1. Le choix reste à distance bornée, sans cycle ni référence future. Les étages gardent leur ordre biologique tout en dérivant vers le bas à l’intérieur de bandes séparées.
+
+Une chambre logique est creusée par l’union de trois ellipsoïdes tronqués, asymétriques et contenus dans une enveloppe conservatrice. Un tunnel emploie un axe à plusieurs harmoniques de basse fréquence et un rayon qui varie doucement sur seize capsules. Des détours latéraux et, exceptionnellement, verticaux sont contenus entre les collerettes des chambres afin de contourner une structure étrangère sans créer de boucle. Les extrémités restent exactement celles du graphe, la position et la pente des collerettes restent nulles, et le rayon ne descend jamais sous la clearance minimale.
+
+Cette macro-morphologie est la géométrie propre partagée par le compilateur CPU, les pistes de contact, l’oracle analytique et le bake GPU. Le bruit visuel plus fin peut enrichir la terre loin des contacts, mais il ne remplace jamais ces primitives physiques.
+
 ### Compilation CPU
 
 La compilation effectue le travail géométrique coûteux une seule fois lors de la construction ou de la mutation du nid :
@@ -90,7 +98,7 @@ Le modèle décoratif `Anthill.glb` n’est donc plus nécessaire. Un rayon lanc
 
 ## Accord avec le volume rendu
 
-Le compilateur de pistes et le bake volumique partagent les primitives propres du corridor. La projection CPU sert d’oracle analytique ; le volume GPU en est une représentation échantillonnée pour le rendu. Le relief organique peut enrichir les zones libres des cavités, mais il est neutralisé sous les contacts contractuels afin de ne jamais retirer la surface située sous les pattes.
+Le compilateur de pistes et le bake volumique partagent la même macro-géométrie organique propre : trois lobes tronqués par chambre, axe sinueux et rayon variable par capsule. La projection CPU sert d’oracle analytique ; le volume GPU en est la représentation échantillonnée. Seul le bruit de détail non contractuel est neutralisé sous les contacts afin de ne jamais retirer la surface située sous les pattes.
 
 L’oracle Node évalue la surface propre indépendamment du rendu voxelisé. Le Warden complète ce contrôle en vérifiant la transformation effectivement produite après la passe de pose.
 
@@ -100,7 +108,7 @@ Chaque bake capture un `bakeRevision` croissant, le `layoutRevision` publié et 
 
 ## Résolution physique et profondeur
 
-Le volume souterrain est une grille monolithique fixe de `128 × 64 × 128` voxels. Sa borne basse suit le point de navigation le plus profond avec une marge de 3 unités monde ; sa borne haute dépasse la surface de 1,7 unité. La taille verticale d’un voxel dépend donc directement de la profondeur demandée.
+Le volume souterrain est une grille monolithique fixe de `128 × 68 × 128` voxels. Sa borne basse suit le point de navigation le plus profond avec une marge de 3 unités monde ; sa borne haute dépasse la surface de 1,7 unité. La taille verticale d’un voxel dépend donc directement de la profondeur demandée.
 
 La profondeur configurable est bornée entre 19 et 24 unités monde pour deux raisons différentes. La borne basse 19 est la première profondeur où le routage déterministe du registre complet de 96 loges reste constructible pour toutes les largeurs de tunnel de 5,5 à 12 : chambres étrangères et tunnels non adjacents conservent au moins 0,4 unité monde de terre, y compris après les détours locaux bornés. Une valeur plus faible ne garantit plus cette séparation exhaustive.
 
@@ -126,6 +134,7 @@ Une profondeur de 200 unités n’est pas compatible avec ce volume fixe : chaqu
 - `NAV-NEST-TXN-001` à `NAV-NEST-TXN-004` vérifient la FIFO, le rejet intact avant publication, le commit unique et l’équivalence binaire du candidat Worker pendant une vraie croissance ou reconstruction.
 - `NAV-NEST-PAUSE-001/002` vérifient que le bake laisse la simulation active, puis que la seule barrière de commit restaure toujours l’état de pause, y compris après une erreur GPU.
 - `NEST-LAYOUT-001` à `NEST-LAYOUT-004` vérifient un registre déterministe et append-only, des parents bornés, puis exhaustivement les 96 loges, les largeurs 5,5..12, l’entrée périphérique, les détours bornés et la marge de terre minimale de 0,4.
+- `NEST-ORGANIC-001` à `NEST-ORGANIC-005` protègent le non-répétitif déterministe des branches, les trois lobes bornés, la sinuosité visible mais limitée, les profils de rayon lisses sans rétrécissement et la variation verticale des quatre strates.
 - `NAV-VOLUME-001` vérifie l’intervalle physique 19..24 et le rejet explicite de toute profondeur invalide, dont 200.
 - `NAV-VOLUME-002` vérifie qu’à la profondeur maximale le tunnel minimal conserve au moins trois voxels verticaux, avec la marge haute de 1,7.
 - `NAV-VOLUME-GPU-001` à `NAV-VOLUME-GPU-004` protègent l’adressage 3D, le décodage RGBA16F, l’interpolation et les signes ; `005` signe toutes les primitives et bornes du volume propre ; `006` invalide les révisions ou signatures périmées ; `007` impose les sept preuves Warden fraîches et distinctes. `NAV-VOLUME-GPU-001` désigne aussi la sonde Warden bloquante exécutée sur le volume réel.

@@ -6,6 +6,8 @@
 
 export const CORRIDOR_SURFACE_TRACKS = 12;
 export const SDF_SEGS_PER_CORRIDOR = 16;
+export const MAX_SDF_SEGS_PER_CORRIDOR = SDF_SEGS_PER_CORRIDOR;
+export const CHAMBER_LOBES = 3;
 
 const EPS = 1e-9;
 const TAU = Math.PI * 2;
@@ -79,11 +81,76 @@ export function chamberPrimitive( unit ) {
 		radiusX: unit.rwx,
 		radiusY: unit.rh * 1.5,
 		radiusZ: unit.rwz,
+		offsetX: 0,
+		offsetZ: 0,
 	};
 
 }
 
-export function corridorCapsuleSegments( corridor, count = SDF_SEGS_PER_CORRIDOR ) {
+// A chamber is compiled from three clipped ellipsoids contained by the
+// conservative chamberPrimitive() envelope. This changes the physical clean
+// SDF (and therefore the shared ant contacts), while keeping collision proofs
+// cheap: the historical envelope remains a safe broad phase.
+export function chamberPrimitives( unit ) {
+
+	const envelope = chamberPrimitive( unit );
+	const seed = Number.isInteger( unit.k ) ? unit.k : 0;
+	const yaw = Number.isFinite( unit.chamberYaw )
+		? unit.chamberYaw
+		: ( seed * 2.399963229728653 ) % ( Math.PI * 2 );
+	const balance = Number.isFinite( unit.chamberBalance )
+		? unit.chamberBalance
+		: 0.5;
+	const cos = Math.cos( yaw ), sin = Math.sin( yaw );
+	const along = 0.25 + balance * 0.08;
+	const across = 0.20 + ( 1 - balance ) * 0.07;
+	const make = ( offsetX, offsetZ, radiusX, radiusY, radiusZ, depthOffset = 0 ) => ( {
+		centerDepth: envelope.centerDepth + depthOffset,
+		floorDepth: envelope.floorDepth,
+		offsetX,
+		offsetZ,
+		radiusX,
+		radiusY,
+		radiusZ,
+	} );
+
+	return [
+		make(
+			- cos * envelope.radiusX * 0.05,
+			- sin * envelope.radiusZ * 0.05,
+			envelope.radiusX * 0.78,
+			envelope.radiusY * 0.84,
+			envelope.radiusZ * 0.76,
+		),
+		make(
+			cos * envelope.radiusX * along,
+			sin * envelope.radiusZ * along,
+			envelope.radiusX * ( 0.62 - Math.abs( cos ) * along * 0.05 ),
+			envelope.radiusY * ( 0.68 + balance * 0.10 ),
+			envelope.radiusZ * ( 0.50 - Math.abs( sin ) * along * 0.05 ),
+			unit.rh * 0.035,
+		),
+		make(
+			- sin * envelope.radiusX * across,
+			cos * envelope.radiusZ * across,
+			envelope.radiusX * ( 0.49 - Math.abs( sin ) * across * 0.04 ),
+			envelope.radiusY * ( 0.66 + ( 1 - balance ) * 0.11 ),
+			envelope.radiusZ * ( 0.61 - Math.abs( cos ) * across * 0.05 ),
+			- unit.rh * 0.025,
+		),
+	];
+
+}
+
+export function corridorSdfSegmentCount( corridorOrId ) {
+
+	return SDF_SEGS_PER_CORRIDOR;
+
+}
+
+export function corridorCapsuleSegments(
+	corridor, count = corridorSdfSegmentCount( corridor )
+) {
 
 	if ( Array.isArray( corridor?.capsulePoints ) && corridor.capsulePoints.length >= 2 )
 		return corridor.capsulePoints.slice( 0, count + 1 ).map(
@@ -99,6 +166,53 @@ export function corridorCapsuleSegments( corridor, count = SDF_SEGS_PER_CORRIDOR
 		points[ indexAt( index ) ],
 		points[ indexAt( index + 1 ) ],
 	] );
+
+}
+
+// Radius is evaluated once per shared capsule, never per ant. The base radius
+// remains the guaranteed clearance; low-frequency positive bulges make the
+// tunnel wall physical and non-cylindrical without narrowing the passage.
+export function corridorCapsuleRadii(
+	corridor,
+	texel,
+	tunnelRadiusScale = 0.85,
+	count = corridorCapsuleSegments( corridor ).length,
+) {
+
+	if ( ! Number.isInteger( count ) || count < 1 ) return [];
+	const width = corridor?.tunnelW ?? corridor?.radius;
+	if ( ! Number.isFinite( width ) || width <= 0 )
+		throw new Error( 'Corridor radius profile requires a positive width' );
+	const base = Math.max( 0.6, width * texel * tunnelRadiusScale );
+	const edge = Number.isInteger( corridor?.id ) ? corridor.id : 0;
+	if ( edge === 1 || count === 1 ) return new Float32Array( count ).fill( base );
+	const phase = edge * 2.399963229728653 + 0.731;
+	const bulge = Math.min( 0.095, base * 0.145 );
+	const radii = new Float32Array( count );
+	for ( let index = 0; index < count; index ++ ) {
+
+		const t = index / ( count - 1 );
+		const weightF = t * Math.max( 0, ( corridor.wallWeights?.length ?? 1 ) - 1 );
+		const weightI = Math.floor( weightF );
+		const wallWeight = Array.isArray( corridor.wallWeights )
+			? lerp(
+				corridor.wallWeights[ weightI ],
+				corridor.wallWeights[ Math.min( corridor.wallWeights.length - 1, weightI + 1 ) ],
+				weightF - weightI,
+			) : 1;
+		// Radius noise is disabled inside chamber collars. Otherwise an enlarged
+		// capsule adjacent to a portal can dig below the chamber's flat floor.
+		const envelope = Math.sin( Math.PI * t ) ** 2
+			* smoothStep( 0.05, 0.45, wallWeight );
+		const wave = 0.55
+			+ 0.30 * Math.sin( Math.PI * 2 * t + phase )
+			+ 0.15 * Math.sin( Math.PI * 4 * t - phase * 0.41 );
+		radii[ index ] = base + bulge * envelope * Math.max( 0.08, wave );
+
+	}
+	radii[ 0 ] = base;
+	radii[ count - 1 ] = base;
+	return radii;
 
 }
 
@@ -159,26 +273,36 @@ function buildCleanPrimitives( nest, corridors, texel, tunnelRadiusScale ) {
 	for ( let index = 0; index < activeChambers; index ++ ) {
 
 		const unit = nest.units[ index ];
-		const chamber = chamberPrimitive( unit );
-		const center = vector( unit.x * texel, chamber.centerDepth, unit.y * texel );
-		const radii = vector( chamber.radiusX, chamber.radiusY, chamber.radiusZ );
-		primitives.push( {
-			bounds: {
-				min: vector( center.x - radii.x, chamber.floorDepth, center.z - radii.z ),
-				max: add( center, radii ),
-			},
-			distance: ( point ) => Math.max(
-				sdEllipsoid( point, center, radii ), chamber.floorDepth - point.y ),
-		} );
+		for ( const chamber of chamberPrimitives( unit ) ) {
+
+			const center = vector(
+				unit.x * texel + chamber.offsetX,
+				chamber.centerDepth,
+				unit.y * texel + chamber.offsetZ,
+			);
+			const radii = vector( chamber.radiusX, chamber.radiusY, chamber.radiusZ );
+			primitives.push( {
+				bounds: {
+					min: vector( center.x - radii.x, chamber.floorDepth, center.z - radii.z ),
+					max: add( center, radii ),
+				},
+				distance: ( point ) => Math.max(
+					sdEllipsoid( point, center, radii ), chamber.floorDepth - point.y ),
+			} );
+
+		}
 
 	}
-
 	for ( const corridor of corridors ) {
 
 		if ( ! corridor ) continue;
-		const radius = corridor.radius * texel * tunnelRadiusScale;
-		for ( const [ start, end ] of corridorCapsuleSegments( corridor ) ) {
+		const segments = corridorCapsuleSegments( corridor );
+		const radii = corridorCapsuleRadii(
+			corridor, texel, tunnelRadiusScale, segments.length );
+		for ( let index = 0; index < segments.length; index ++ ) {
 
+			const [ start, end ] = segments[ index ];
+			const radius = radii[ index ];
 			const a = pointWorld( start, texel );
 			const b = pointWorld( end, texel );
 			primitives.push( {
@@ -234,9 +358,13 @@ function spatialSdf( primitives ) {
 			|| z < HASH_COORD_MIN || z > HASH_COORD_MAX )
 			return HASH_PADDING_WORLD;
 		const list = buckets.get( uncheckedSpatialHashCellKey( x, y, z ) );
-		if ( ! list ) return HASH_PADDING_WORLD;
-		let distance = HASH_PADDING_WORLD;
-		for ( const primitive of list ) distance = Math.min( distance, primitive.distance( point ) );
+		// Positive distances must retain a gradient too. Clamping empty/outside
+		// cells to HASH_PADDING_WORLD made closest-point fairing stall at 0.03u.
+		// The exact fallback is rare and runs only in the shared offline bake.
+		const candidates = list ?? primitives;
+		let distance = Infinity;
+		for ( const primitive of candidates )
+			distance = Math.min( distance, primitive.distance( point ) );
 		return distance;
 	};
 	sdf.primitiveCount = primitives.length;

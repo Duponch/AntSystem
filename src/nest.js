@@ -1,4 +1,4 @@
-// LE NID — registre de loges déterministe, en NAPPES SUPERPOSÉES.
+// LE NID — registre organique déterministe, en NAPPES SUPERPOSÉES.
 //
 // Deux problèmes fondamentaux étaient à régler d'un coup.
 //
@@ -46,25 +46,36 @@ export const DEPTH_SIZE = 640;           // côté de la carte de profondeur (te
 // angulaire reste bonne pour N'IMPORTE QUEL préfixe
 const GOLD = 2.399963229728653;
 const SERIES_CORE_WORLD = 3;
-const SERIES_PITCH_WORLD = 7.5;
-const LAYER_HALF_STEP_WORLD = 6.25;
+const LEVEL_DEPTH_SPREAD_WORLD = [ 2, 1.8, 3, 4 ];
+export const MAX_NEST_DEPTH_DRIFT_WORLD = Math.max( ... LEVEL_DEPTH_SPREAD_WORLD );
+const SERIES_PITCH_WORLD = 7.2;
+const BRANCH_ORBIT_WORLD = 10.2;
 const LAYOUT_ROTATION = 3.427;
 const BRANCH_TARGET_WORLD = 12.5;
-const BRANCH_MAX_WORLD = BRANCH_TARGET_WORLD * 1.5;
+const BRANCH_MAX_WORLD = 22;
+const ORGANIC_LAYOUT_PROBE_DEPTH = 19;
+const ORGANIC_FIELD_MARGIN_WORLD = 2;
+const ORGANIC_CHAMBER_MARGIN_WORLD = 0.5;
+const ORGANIC_PLACEMENT_ATTEMPTS = 256;
 export const ENTRANCE_PORTAL_OFFSET_WORLD = 11;
 export const ENTRANCE_PORTAL_ANGLE_RAD = 230 * Math.PI / 180;
 export const ENTRANCE_CONNECTOR_BULGE_WORLD = 3;
-const CORRIDOR_BULGE_OVERRIDE_WORLD = new Map( [
-	[ 21, - 1 ],
-	[ 41, 2.5 ],
+// Rare detours discovered by the exhaustive capsule oracle live here. The
+// organic registry starts without exceptions; entries are justified only by a
+// named failing geometry contract, never by visual hand-tuning.
+const CORRIDOR_CURVATURE_SCALE_OVERRIDE = new Map();
+const CORRIDOR_BULGE_OVERRIDE_WORLD = new Map();
+const SERIES_CENTER_OVERRIDE_WORLD = new Map( [
+	[ 5, { x: 3, y: 0 } ],
+	[ 17, { x: 2, y: 0 } ],
+	[ 22, { x: 0, y: 3 } ],
 ] );
-const BRANCH_PARENT_OVERRIDE = new Map( [
-	[ 12, 4 ],
-	[ 20, 0 ],
-	[ 32, 20 ],
-	[ 52, 32 ],
-	[ 72, 20 ],
-] );
+// These six rising roots intersect the entrance or a foreign branch in the
+// exhaustive W12 oracle; they retain a level-0 parent in every valid preset.
+const ROOT_SHALLOW_ONLY_SERIES = new Set( [ 3, 7, 11, 12, 19, 22 ] );
+// Unit 87 remains on its own branch: the alternative cross-series descent
+// violates the exhaustive K96 tangent oracle even after safe route fairing.
+const SAME_SERIES_ONLY_UNITS = new Set( [ 87 ] );
 
 // ---------------------------------------------------------------------------
 // NIVEAUX — profondeur, taille des chambres, vocation.
@@ -145,89 +156,165 @@ export const quantK = ( K ) => Math.max( LAYERS, Math.round( K / LAYERS ) * LAYE
 // ---------------------------------------------------------------------------
 // LA fonction pure : tout ce qui définit la loge k
 // ---------------------------------------------------------------------------
-export function nestUnit( k, depthMax ) {
+function organicHash( value ) {
+
+	let hash = ( value ^ 0x9e3779b9 ) >>> 0;
+	hash = Math.imul( hash ^ ( hash >>> 16 ), 0x21f0aaad ) >>> 0;
+	hash = Math.imul( hash ^ ( hash >>> 15 ), 0x735a2d97 ) >>> 0;
+	return ( ( hash ^ ( hash >>> 15 ) ) >>> 0 ) / 0x100000000;
+
+}
+
+function unitMorphology( k, depthMax ) {
 
 	const { q, s } = EMISSION[ k ];
-	const L = LEVEL[ s ];
-
-	// demi-axes de la lentille : varies mais deterministes, et ANISOTROPES
-	// (une chambre reelle n'est jamais un disque parfait)
-	const g = 0.78 + 0.44 * vdc( k + 1, 5 );
-	const rwx = L.rw * g * ( 0.85 + 0.30 * vdc( k + 1, 11 ) );
-	const rwz = L.rw * g * ( 0.85 + 0.30 * vdc( k + 2, 11 ) );
-	const rh = L.rh * g;
-	const R = ( ( rwx + rwz ) * 0.5 ) / TEXEL;      // rayon equivalent, en texels
-
-	// IMPLANTATION APPEND-ONLY EN BRANCHES. Chaque serie q occupe une cellule
-	// phyllotaxique, puis ses quatre niveaux dessinent un carre de 12,5 unites.
-	// Deux benefices sont structurels : les chambres ne se recouvrent plus et
-	// chaque descente dispose d'assez de longueur horizontale pour rester douce.
-	// Le rayon sqrt(q) fait grandir naturellement l'emprise avec la colonie sans
-	// jamais deplacer un prefixe deja construit.
-	const seriesRadius = Math.sqrt(
-		SERIES_CORE_WORLD * SERIES_CORE_WORLD
-		+ SERIES_PITCH_WORLD * SERIES_PITCH_WORLD * q );
-	const seriesAngle = GOLD * q;
-	const cell = [
-		[ - LAYER_HALF_STEP_WORLD, - LAYER_HALF_STEP_WORLD ],
-		[ LAYER_HALF_STEP_WORLD, - LAYER_HALF_STEP_WORLD ],
-		[ LAYER_HALF_STEP_WORLD, LAYER_HALF_STEP_WORLD ],
-		[ - LAYER_HALF_STEP_WORLD, LAYER_HALF_STEP_WORLD ],
-	][ s ];
-	const localX = Math.cos( seriesAngle ) * seriesRadius + cell[ 0 ];
-	const localY = Math.sin( seriesAngle ) * seriesRadius + cell[ 1 ];
-	const worldX = Math.cos( LAYOUT_ROTATION ) * localX - Math.sin( LAYOUT_ROTATION ) * localY;
-	const worldY = Math.sin( LAYOUT_ROTATION ) * localX + Math.cos( LAYOUT_ROTATION ) * localY;
-
-	// `depth` est desormais le PLANCHER physique, pas le centre de la cavite.
-	// La premiere strate est abaissee si necessaire pour que son plafond reste
-	// sous la surface.
-	const stratifiedDepth = - depthMax * L.zf * ( 0.94 + 0.12 * vdc( k + 1, 7 ) );
-	const depth = Math.min( stratifiedDepth, - ( rh * 2 + 0.65 ) );
+	const level = LEVEL[ s ];
+	const growth = 0.78 + 0.44 * vdc( k + 1, 5 );
+	const rwx = level.rw * growth * ( 0.85 + 0.30 * vdc( k + 1, 11 ) );
+	const rwz = level.rw * growth * ( 0.85 + 0.30 * vdc( k + 2, 11 ) );
+	const rh = level.rh * growth;
+	const stratifiedDepth = - depthMax * level.zf
+		- LEVEL_DEPTH_SPREAD_WORLD[ s ] * vdc( k + 1, 7 );
+	const roofClearance = rh * 2 + 0.65 + 0.35 * vdc( k + 1, 41 );
 	return {
-		k, q, level: s, layer: s,
-		R,                                          // rayon equivalent (texels)
-		rwx, rwz, rh,                               // demi-axes de la lentille (monde)
-		x: NEST.x + worldX / TEXEL,
-		y: NEST.y + worldY / TEXEL,
-		depth,
-		type: L.rooms[ q % L.rooms.length ],
+		q, s, level, rwx, rwz, rh,
+		depth: Math.min( stratifiedDepth, - roofClearance ),
 	};
 
 }
 
-// PARENTAGE APPEND-ONLY. Les niveaux 1..3 descendent dans leur propre serie :
-// leur parent est donc exactement k - 1. Une nouvelle tete de serie (niveau 0)
-// rejoint une tete plus ancienne, jamais un noeud futur. Les candidats trop
-// lointains sont exclus, les branches trop courtes sont penalisees deux fois
-// plus que les legeres surlongueurs, puis l'indice tranche toute egalite.
-// Les cinq substitutions du registre sont les premiers parents valides trouves
-// par l'oracle conservateur chambre/capsules sur les 96 loges finales.
+function organicBranchCandidate( q, attempt ) {
+
+	const seriesRadius = Math.sqrt(
+		SERIES_CORE_WORLD * SERIES_CORE_WORLD
+		+ SERIES_PITCH_WORLD * SERIES_PITCH_WORLD * q );
+	const seriesAngle = GOLD * q + LAYOUT_ROTATION;
+	let centerX = Math.cos( seriesAngle ) * seriesRadius;
+	let centerY = Math.sin( seriesAngle ) * seriesRadius;
+	// Rejected candidates may slide inside a small local crown. This avoids
+	// imposing a repeated ring lattice while keeping every accepted branch
+	// spatially bounded and every registry prefix immutable after baking.
+	if ( attempt > 0 ) {
+
+		const tangentX = - Math.sin( seriesAngle );
+		const tangentY = Math.cos( seriesAngle );
+		const radial = ( organicHash( q * 911 + attempt * 43 ) - 0.5 ) * 8;
+		const tangential = ( organicHash( q * 577 + attempt * 79 ) - 0.5 ) * 8;
+		centerX += Math.cos( seriesAngle ) * radial + tangentX * tangential;
+		centerY += Math.sin( seriesAngle ) * radial + tangentY * tangential;
+
+	}
+	const centerOverride = SERIES_CENTER_OVERRIDE_WORLD.get( q );
+	if ( centerOverride ) {
+
+		centerX += centerOverride.x;
+		centerY += centerOverride.y;
+
+	}
+	let angle = GOLD * ( q + attempt * 3 + 1 ) + LAYOUT_ROTATION
+		+ 0.8 * ( organicHash( q + attempt * 101 ) - 0.5 );
+	const handedness = organicHash( q + attempt * 13 + 701 ) < 0.5 ? - 1 : 1;
+	// Half the roots meander gently, half fold more tightly. Keeping a branch
+	// inside a bounded local crown prevents a natural silhouette from becoming
+	// an unbounded random walk or pushing the SDF outside its fixed field.
+	const tight = organicHash( q + 301 ) < 0.5;
+	const minimumTurn = ( tight ? 102 : 70 ) * Math.PI / 180;
+	const turnSpan = ( tight ? 16 : 12 ) * Math.PI / 180;
+	const points = [];
+	for ( let level = 0; level < LAYERS; level ++ ) {
+
+		if ( level > 0 ) angle += handedness * (
+			minimumTurn + turnSpan * organicHash(
+				q * 11 + attempt * 101 + level * 97 ) );
+		points.push( {
+			x: centerX + Math.cos( angle ) * BRANCH_ORBIT_WORLD,
+			y: centerY + Math.sin( angle ) * BRANCH_ORBIT_WORLD,
+		} );
+
+	}
+	return points;
+
+}
+
+let ORGANIC_PLACEMENT;
+let ORGANIC_ROUTES;
+
+// The pure registry entry: morphology and placement depend only on k. Growing
+// the colony still activates an immutable prefix. The expensive rejection
+// search is an offline authoring oracle; runtime consumes its reviewed bake.
+export function nestUnit( k, depthMax ) {
+
+	const morphology = unitMorphology( k, depthMax );
+	const { q, s, level, rwx, rwz, rh, depth } = morphology;
+	const placement = ORGANIC_PLACEMENT[ k ];
+	const neighbour = ORGANIC_PLACEMENT[ s < LAYERS - 1 ? k + 1 : k - 1 ];
+	const chamberYaw = Math.atan2(
+		neighbour.y - placement.y, neighbour.x - placement.x )
+		+ ( vdc( k + 1, 31 ) - 0.5 ) * 0.18;
+	const chamberBalance = 0.18 + 0.64 * vdc( k + 1, 37 );
+	return {
+		k, q, level: s, layer: s,
+		R: ( ( rwx + rwz ) * 0.5 ) / TEXEL,
+		rwx, rwz, rh,
+		chamberYaw, chamberBalance,
+		organicRoute: ORGANIC_ROUTES[ k ] ?? null,
+		x: NEST.x + placement.x / TEXEL,
+		y: NEST.y + placement.y / TEXEL,
+		depth,
+		type: level.rooms[ q % level.rooms.length ],
+	};
+
+}
+// PARENTAGE APPEND-ONLY. La serie fondatrice garantit les quatre fonctions
+// biologiques initiales. Ensuite, une loge profonde choisit une loge ANTERIEURE
+// de l'etage juste au-dessus, sans obligation d'appartenir a la meme serie.
+// Certaines nouvelles salles hautes germent depuis l'etage 1 : le reseau ne
+// forme plus une ligne de service portant des echelles identiques. Les autres
+// rejoignent une racine haute ; aucun choix ne consulte un noeud futur.
 export function parentOf( k, U ) {
 
 	const child = U[ k ];
-	if ( child.level > 0 ) return k - 1;
-	if ( child.q === 0 ) return - 1;
+	if ( child.q === 0 ) return k === 0 ? - 1 : k - 1;
 
-	// Le reseau de service peu profond relie chaque nouvelle tete de branche a
-	// une tete plus ancienne situee pres du pas geometrique de 12,5 unites. Le
-	// choix ne consulte que j < k : la croissance reste strictement append-only.
-	const override = BRANCH_PARENT_OVERRIDE.get( k );
-	if ( override !== undefined ) return override;
-
+	// Organic growth is not a bundle of identical four-room ladders. Deep rooms
+	// attach to a compatible older room one stratum above; selected shallow roots
+	// may rise from stratum 1. The result remains an append-only rooted tree.
+	const rootGrowsFromBelow = child.level === 0
+		&& organicHash( k * 193 + child.q * 53 + 17 ) < 0.58
+		&& ! ROOT_SHALLOW_ONLY_SERIES.has( child.q );
+	const desiredLevel = child.level === 0
+		? ( rootGrowsFromBelow ? 1 : 0 ) : child.level - 1;
+	const allowCrossSeries = child.level === 0
+		|| ( ! SAME_SERIES_ONLY_UNITS.has( k ) && organicHash( k * 193 + child.q * 53 + 901 ) < 0.7 );
+	const targetDistance = child.level === 0 ? BRANCH_TARGET_WORLD : 13.5;
 	const candidates = [];
 	for ( let j = 0; j < k; j ++ ) {
 
-		if ( U[ j ].level !== 0 ) continue;
-		const distanceWorld = Math.hypot(
-			U[ j ].x - child.x, U[ j ].y - child.y ) * TEXEL;
+		const previous = U[ j ];
+		if ( child.level === 0 ) {
+
+			if ( rootGrowsFromBelow ? previous.level > 1 : previous.level !== 0 ) continue;
+
+		} else {
+
+			if ( previous.level !== child.level - 1 ) continue;
+			if ( ! allowCrossSeries && previous.q !== child.q ) continue;
+
+		}
+		const dx = ( previous.x - child.x ) * TEXEL;
+		const dz = ( previous.y - child.y ) * TEXEL;
+		const dy = Number.isFinite( previous.depth ) && Number.isFinite( child.depth )
+			? previous.depth - child.depth : 0;
+		const distanceWorld = Math.hypot( dx, dy, dz );
 		if ( distanceWorld > BRANCH_MAX_WORLD ) continue;
-		const shortfall = Math.max( 0, BRANCH_TARGET_WORLD - distanceWorld );
-		const overshoot = Math.max( 0, distanceWorld - BRANCH_TARGET_WORLD );
+		const shortfall = Math.max( 0, targetDistance - distanceWorld );
+		const overshoot = Math.max( 0, distanceWorld - targetDistance );
+		const levelPenalty = Math.abs( previous.level - desiredLevel ) * 1.8;
+		const ageJitter = organicHash( k * 1009 + j * 313 ) * 0.22;
 		candidates.push( {
 			j,
-			distanceDelta: Math.abs( distanceWorld - BRANCH_TARGET_WORLD ),
-			score: shortfall * 2 + overshoot,
+			distanceDelta: Math.abs( distanceWorld - targetDistance ),
+			score: shortfall * 1.7 + overshoot + levelPenalty + ageJitter,
 		} );
 
 	}
@@ -241,7 +328,362 @@ export function parentOf( k, U ) {
 	return candidates[ 0 ].j;
 
 }
+const ROUTE_TUNNEL_RADIUS_WORLD = 12 * TEXEL * 0.85 + 0.095;
+const ROUTE_SOIL_MARGIN_WORLD = 0.4;
+const ROUTE_FIELD_LIMIT_WORLD = DEPTH_SIZE * TEXEL * 0.5
+	- ORGANIC_FIELD_MARGIN_WORLD;
+export const MAX_ROUTE_VERTICAL_DRIFT_WORLD = 10;
+const ROUTE_VERTICAL_LIMIT_WORLD = MAX_ROUTE_VERTICAL_DRIFT_WORLD;
 
+function routeSegmentDistance( firstStart, firstEnd, secondStart, secondEnd ) {
+
+	const subtract = ( a, b ) => a.map( ( value, axis ) => value - b[ axis ] );
+	const dot = ( a, b ) => a.reduce( ( sum, value, axis ) => sum + value * b[ axis ], 0 );
+	const u = subtract( firstEnd, firstStart );
+	const v = subtract( secondEnd, secondStart );
+	const w = subtract( firstStart, secondStart );
+	const a = dot( u, u ), b = dot( u, v ), c = dot( v, v );
+	const d = dot( u, w ), e = dot( v, w );
+	const denominator = a * c - b * b;
+	let sNumerator, sDenominator = denominator;
+	let tNumerator, tDenominator = denominator;
+	if ( denominator < 1e-12 ) {
+
+		sNumerator = 0;
+		sDenominator = 1;
+		tNumerator = e;
+		tDenominator = c;
+
+	} else {
+
+		sNumerator = b * e - c * d;
+		tNumerator = a * e - b * d;
+		if ( sNumerator < 0 ) {
+
+			sNumerator = 0;
+			tNumerator = e;
+			tDenominator = c;
+
+		} else if ( sNumerator > sDenominator ) {
+
+			sNumerator = sDenominator;
+			tNumerator = e + b;
+			tDenominator = c;
+
+		}
+
+	}
+	if ( tNumerator < 0 ) {
+
+		tNumerator = 0;
+		if ( - d < 0 ) sNumerator = 0;
+		else if ( - d > a ) sNumerator = sDenominator;
+		else { sNumerator = - d; sDenominator = a; }
+
+	} else if ( tNumerator > tDenominator ) {
+
+		tNumerator = tDenominator;
+		if ( - d + b < 0 ) sNumerator = 0;
+		else if ( - d + b > a ) sNumerator = sDenominator;
+		else { sNumerator = - d + b; sDenominator = a; }
+
+	}
+	const s = Math.abs( sNumerator ) < 1e-12 ? 0 : sNumerator / sDenominator;
+	const t = Math.abs( tNumerator ) < 1e-12 ? 0 : tNumerator / tDenominator;
+	return Math.hypot( ... w.map( ( value, axis ) =>
+		value + s * u[ axis ] - t * v[ axis ] ) );
+
+}
+
+function conservativePointChamberDistance( point, chamber ) {
+
+	const relative = point.map( ( value, axis ) => value - chamber.center[ axis ] );
+	const absolute = relative.map( Math.abs );
+	const normalizedSquared = absolute.reduce( ( sum, value, axis ) =>
+		sum + ( value / chamber.radii[ axis ] ) ** 2, 0 );
+	if ( normalizedSquared <= 1 ) return 0;
+	const equation = ( lambda ) => absolute.reduce( ( sum, value, axis ) => {
+
+		const radius = chamber.radii[ axis ];
+		return sum + ( radius * value / ( lambda + radius * radius ) ) ** 2;
+
+	}, 0 ) - 1;
+	let low = 0, high = 1;
+	while ( equation( high ) > 0 ) high *= 2;
+	for ( let iteration = 0; iteration < 28; iteration ++ ) {
+
+		const middle = ( low + high ) * 0.5;
+		if ( equation( middle ) > 0 ) low = middle; else high = middle;
+
+	}
+	const lambda = ( low + high ) * 0.5;
+	return Math.hypot( ... absolute.map( ( value, axis ) => {
+
+		const radius = chamber.radii[ axis ];
+		const surface = radius * radius * value / ( lambda + radius * radius );
+		return value - surface;
+
+	} ) );
+
+}
+function routeCandidateTable( seed ) {
+
+	const routes = [ { lateralBulgeWorld: 0, verticalBulgeWorld: 0 } ];
+	for ( let lateral = - 26; lateral <= 26; lateral += 2 ) {
+
+		for ( const vertical of [ 0, - 2.5, 2.5, - 5, 5, - 7.5, 7.5, - 10 ] ) {
+
+			if ( lateral === 0 && vertical === 0 ) continue;
+			routes.push( { lateralBulgeWorld: lateral, verticalBulgeWorld: vertical } );
+
+		}
+
+	}
+	return routes.sort( ( first, second ) => {
+
+		const firstCost = Math.hypot(
+			first.lateralBulgeWorld, first.verticalBulgeWorld * 1.4 );
+		const secondCost = Math.hypot(
+			second.lateralBulgeWorld, second.verticalBulgeWorld * 1.4 );
+		return firstCost - secondCost
+			|| organicHash( seed * 409 + first.lateralBulgeWorld * 17
+				+ first.verticalBulgeWorld * 31 )
+			- organicHash( seed * 409 + second.lateralBulgeWorld * 17
+				+ second.verticalBulgeWorld * 31 );
+
+	} );
+
+}
+
+function routeIsClear( path, child, parent, chambers, accepted ) {
+
+	// The rendered capsule axis is one tunnel radius above the carved floor.
+	// Collision planning must therefore validate that physical axis, not the
+	// floor curve below it.
+	const points = path.map( ( point ) => [
+		point.x * TEXEL, point.depth + ROUTE_TUNNEL_RADIUS_WORLD, point.y * TEXEL,
+	] );
+	const requiredChamberDistance = ROUTE_TUNNEL_RADIUS_WORLD
+		+ ROUTE_SOIL_MARGIN_WORLD;
+	const requiredTunnelDistance = ROUTE_TUNNEL_RADIUS_WORLD * 2
+		+ ROUTE_SOIL_MARGIN_WORLD;
+	const centerWorldX = NEST.x * TEXEL, centerWorldZ = NEST.y * TEXEL;
+	for ( const point of points ) {
+
+		if ( Math.abs( point[ 0 ] - centerWorldX ) + ROUTE_TUNNEL_RADIUS_WORLD
+			> ROUTE_FIELD_LIMIT_WORLD
+			|| Math.abs( point[ 2 ] - centerWorldZ ) + ROUTE_TUNNEL_RADIUS_WORLD
+			> ROUTE_FIELD_LIMIT_WORLD
+			|| point[ 1 ] > - 0.45
+			|| point[ 1 ] < - ( MAX_NEST_DEPTH
+				+ MAX_NEST_DEPTH_DRIFT_WORLD + ROUTE_VERTICAL_LIMIT_WORLD ) ) return false;
+
+	}
+	for ( const chamber of chambers ) {
+
+		if ( chamber.k === child || chamber.k === parent ) continue;
+		for ( let index = 0; index < points.length - 1; index ++ ) {
+
+			const start = points[ index ], end = points[ index + 1 ];
+			const middle = start.map( ( value, axis ) => ( value + end[ axis ] ) * 0.5 );
+			const halfSampleGap = Math.hypot( ... start.map(
+				( value, axis ) => value - middle[ axis ] ) );
+			const lowerBound = Math.min(
+				conservativePointChamberDistance( start, chamber ),
+				conservativePointChamberDistance( middle, chamber ),
+				conservativePointChamberDistance( end, chamber ),
+			) - halfSampleGap;
+			if ( lowerBound < requiredChamberDistance ) return false;
+
+		}
+
+	}
+	for ( const previous of accepted ) {
+
+		if ( previous.child === parent || previous.parent === parent
+			|| previous.child === child || previous.parent === child ) continue;
+		for ( let first = 0; first < points.length - 1; first ++ ) {
+
+			for ( let second = 0; second < previous.points.length - 1; second ++ )
+				if ( routeSegmentDistance(
+					points[ first ], points[ first + 1 ],
+					previous.points[ second ], previous.points[ second + 1 ],
+				) < requiredTunnelDistance ) return false;
+
+		}
+
+	}
+	return true;
+
+}
+
+function routeClearsChamber( points, chamber ) {
+
+	const requiredDistance = ROUTE_TUNNEL_RADIUS_WORLD + ROUTE_SOIL_MARGIN_WORLD;
+	for ( let index = 0; index < points.length - 1; index ++ ) {
+
+		const start = points[ index ], end = points[ index + 1 ];
+		const middle = start.map( ( value, axis ) => ( value + end[ axis ] ) * 0.5 );
+		const halfSampleGap = Math.hypot( ... start.map(
+			( value, axis ) => value - middle[ axis ] ) );
+		const lowerBound = Math.min(
+			conservativePointChamberDistance( start, chamber ),
+			conservativePointChamberDistance( middle, chamber ),
+			conservativePointChamberDistance( end, chamber ),
+		) - halfSampleGap;
+		if ( lowerBound < requiredDistance ) return false;
+
+	}
+	return true;
+
+}
+
+function organicUnitAt( k, point ) {
+
+	const morphology = unitMorphology( k, ORGANIC_LAYOUT_PROBE_DEPTH );
+	return {
+		k, q: morphology.q, level: morphology.s, layer: morphology.s,
+		x: NEST.x + point.x / TEXEL,
+		y: NEST.y + point.y / TEXEL,
+		depth: morphology.depth,
+		rwx: morphology.rwx, rwz: morphology.rwz, rh: morphology.rh,
+	};
+
+}
+
+function organicChamberOf( unit ) {
+
+	return {
+		k: unit.k,
+		center: [ unit.x * TEXEL, unit.depth + unit.rh * 0.5, unit.y * TEXEL ],
+		radii: [ unit.rwx, unit.rh * 1.5, unit.rwz ],
+	};
+
+}
+
+function organicChambersAreSeparated( first, second ) {
+
+	const verticalSeparation = Math.abs( first.depth + first.rh
+		- second.depth - second.rh ) - first.rh - second.rh;
+	if ( verticalSeparation >= ORGANIC_CHAMBER_MARGIN_WORLD ) return true;
+	const horizontalSeparation = Math.hypot(
+		( first.x - second.x ) * TEXEL,
+		( first.y - second.y ) * TEXEL,
+	) - Math.max( first.rwx, first.rwz )
+		- Math.max( second.rwx, second.rwz );
+	return horizontalSeparation >= ORGANIC_CHAMBER_MARGIN_WORLD;
+
+}
+
+function buildOrganicRegistry() {
+
+	const placements = new Array( K_MAX );
+	const routes = new Array( K_MAX ).fill( null );
+	const units = [];
+	const chambers = [];
+	const acceptedRoutes = [];
+	const halfFieldWorld = DEPTH_SIZE * TEXEL * 0.5
+		- ORGANIC_FIELD_MARGIN_WORLD;
+	for ( let q = 0; q < K_MAX / LAYERS; q ++ ) {
+
+		const firstIndex = q * LAYERS;
+		let acceptedSeries = null;
+		for ( let attempt = 0; attempt < ORGANIC_PLACEMENT_ATTEMPTS; attempt ++ ) {
+
+			const candidate = organicBranchCandidate( q, attempt );
+			const proposedUnits = candidate.map( ( point, level ) =>
+				organicUnitAt( firstIndex + level, point ) );
+			let valid = proposedUnits.every( ( unit ) =>
+				Math.abs( ( unit.x - NEST.x ) * TEXEL ) + unit.rwx <= halfFieldWorld
+				&& Math.abs( ( unit.y - NEST.y ) * TEXEL ) + unit.rwz <= halfFieldWorld );
+			for ( let index = 0; index < proposedUnits.length && valid; index ++ ) {
+
+				for ( const previous of [ ... units, ... proposedUnits.slice( 0, index ) ] )
+					if ( ! organicChambersAreSeparated( proposedUnits[ index ], previous ) ) {
+
+						valid = false;
+						break;
+
+					}
+
+			}
+			const proposedChambers = proposedUnits.map( organicChamberOf );
+			for ( const previousRoute of acceptedRoutes ) {
+
+				for ( const chamber of proposedChambers ) {
+
+					if ( previousRoute.child === chamber.k
+						|| previousRoute.parent === chamber.k ) continue;
+					if ( ! routeClearsChamber( previousRoute.points, chamber ) ) valid = false;
+
+				}
+
+			}
+			if ( ! valid ) continue;
+			const combinedUnits = [ ... units, ... proposedUnits ];
+			const combinedChambers = [ ... chambers, ... proposedChambers ];
+			const proposedRoutes = [];
+			const proposedRouteParams = [];
+			const firstRoute = q === 0 ? firstIndex + 1 : firstIndex;
+			for ( let child = firstRoute;
+				child < firstIndex + LAYERS && valid; child ++ ) {
+
+				let parent;
+				try { parent = parentOf( child, combinedUnits ); } catch { valid = false; break; }
+				const start = combinedUnits[ parent ];
+				const end = combinedUnits[ child ];
+				let selected = null, selectedPath = null;
+				for ( const route of routeCandidateTable( child + attempt * K_MAX ) ) {
+
+					const path = tunnelPathWithRoute( start, end, child, 48, route );
+					if ( ! routeIsClear( path, child, parent, combinedChambers,
+						[ ... acceptedRoutes, ... proposedRoutes ] ) ) continue;
+					selected = route;
+					selectedPath = path;
+					break;
+
+				}
+				if ( ! selected ) { valid = false; break; }
+				const accepted = {
+					child, parent,
+					points: selectedPath.map( ( point ) => [
+						point.x * TEXEL,
+						point.depth + ROUTE_TUNNEL_RADIUS_WORLD,
+						point.y * TEXEL,
+					] ),
+				};
+				proposedRoutes.push( accepted );
+				proposedRouteParams.push( [ child, selected ] );
+
+			}
+			if ( valid ) acceptedSeries = {
+				candidate, proposedUnits, proposedChambers,
+				proposedRoutes, proposedRouteParams,
+			};
+			if ( acceptedSeries ) break;
+
+		}
+		if ( ! acceptedSeries ) throw new Error(
+			`No collision-free organic series and routes for ${ q }` );
+		for ( let level = 0; level < LAYERS; level ++ )
+			placements[ firstIndex + level ] = acceptedSeries.candidate[ level ];
+		units.push( ... acceptedSeries.proposedUnits );
+		chambers.push( ... acceptedSeries.proposedChambers );
+		acceptedRoutes.push( ... acceptedSeries.proposedRoutes );
+		for ( const [ child, route ] of acceptedSeries.proposedRouteParams )
+			routes[ child ] = route;
+
+	}
+	return { placements, routes };
+
+}
+
+const BAKED_ORGANIC_PLACEMENT = [[5.856733955190994,-6.110879171789633],[-6.4492788066616145,-10.399253686105144],[-12.846710094351831,1.3181312422636777],[-2.5821285474937636,9.351044271157939],[0.09809385665819903,2.058028759219209],[5.453397788156909,-9.738330874706088],[18.02312627274294,-6.817528678122741],[18.028448198495504,5.644461713077208],[-10.76428115529359,2.3702515316425092],[1.647398503672186,1.304964698927293],[5.740793586948065,13.308359026820554],[-5.848765988316284,19.891154190268296],[-1.2371594909352357,-23.550112275538872],[-14.218312920341441,-22.203602484429663],[-15.038980287055683,-8.906251469095615],[-2.274555990567113,-5.997799024240253],[16.170058890725134,-2.520090709172539],[26.43349879246538,5.128289927826391],[21.231707708174536,16.737764615392937],[8.960169376588919,14.480286174977916],[-13.633302594411608,14.190764142781685],[-1.851632344137914,11.417168904463875],[-1.250217191273208,-1.0123414666681727],[-13.364090805468674,-4.6777489893572115],[18.752380815346974,-19.043473069223317],[7.1953720284035665,-24.19260588434969],[-0.43708697718571266,-15.270252576361314],[6.0881288894363035,-4.77692312660616],[4.004159069455039,10.954783977161144],[12.563389141005038,20.4087099814303],[6.325409425473813,30.43186782974587],[-6.082326664379938,26.716613403338833],[-22.832947729582383,-7.019640145045168],[-28.424256999325266,-17.911767233752137],[-18.526516226926322,-26.390423703263792],[-8.505126728705621,-18.78341675181424],[30.10948583386453,5.092993676757407],[33.53144746448961,-6.940012063718029],[22.947366447846964,-13.265310545131058],[13.977773604707654,-4.600698602279367],[-22.262715609137608,29.13797839650603],[-7.499660579277924,22.151673489665693],[-19.884492494856513,10.204360637578647],[-26.366887553740582,25.15418252607766],[10.278981038612578,-32.65474017872328],[-2.1072877170739623,-37.50799634841949],[-8.81980266439334,-26.35125847177318],[0.1460780695910111,-17.74303688600244],[17.560456958143416,10.209381227172946],[25.99918602862926,19.60735299445504],[18.103718468840224,30.200882603163045],[7.150723559942762,25.634037503652877],[-23.766306151864445,3.677133267642513],[-39.46809393127661,-3.5444015770516533],[-26.213056081738273,-14.561630764976684],[-20.818816914879932,0.7296317701800614],[27.78791265271951,-9.945197222279191],[32.30614605492168,-20.89776597060341],[22.162456106858958,-28.785875190495048],[12.706609943249802,-21.84953056393244],[-14.804924967477039,36.19197235731729],[1.1431414189658646,31.897573051549934],[-7.187522159019789,18.134523176428818],[-18.542845175636913,29.218028377866112],[-9.694453524403682,-28.394044042959173],[-20.914639550590255,-33.52888206187811],[-28.868363519039764,-23.000087274303333],[-20.077218389161363,-13.471154999336662],[43.23861276664253,11.678510005151267],[41.56298758205861,-1.0587513049273811],[29.687508617850465,-2.625690450740695],[24.942170635468116,9.781629740961439],[-31.515167327147942,24.310876218517414],[-39.6501491557081,14.711535399668774],[-31.746990517618116,4.380787157943416],[-20.718286287048798,9.060930877647895],[18.221759186064002,-37.199847197762665],[21.095580420591318,-25.435603050634924],[10.753737592781377,-19.21243503370344],[1.7385855375945098,-27.108941441145056],[0.5536707285150868,32.44148832583063],[7.8022468434201535,42.2796523466983],[18.938275757950038,38.6025983105949],[18.74978654371832,26.183626626709614],[-23.692059848111132,-22.313132346556635],[-27.15752829998467,-6.745485893460813],[-41.83187706853663,-16.05194362673733],[-29.191406278454522,-25.814768476206044],[42.59125307544874,-5.825573037632136],[39.962030512268235,-18.516917228222393],[27.174183700336137,-18.524169023800535],[24.58870223102945,-5.726588149094582],[-28.651088047909813,37.383829978757184],[-24.67660912658306,21.59511322422133],[-10.519852176122297,31.55730959395292],[-23.97546504923556,40.650877235647535]];
+const BAKED_ORGANIC_ROUTES = [null,[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[-4,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[4,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[6,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[2,0],[0,0],[0,0],[0,0],[0,0],[-2,0],[0,0],[0,0],[-2,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[4,0],[0,0],[-6,-2.5],[2,2.5],[0,0],[0,0],[0,0],[-4,0],[-4,-2.5],[0,0],[-2,-2.5],[0,0],[0,0]];
+ORGANIC_PLACEMENT = BAKED_ORGANIC_PLACEMENT.map( ( [ x, y ] ) => ( { x, y } ) );
+ORGANIC_ROUTES = BAKED_ORGANIC_ROUTES.map( ( route ) => route ? ( {
+	lateralBulgeWorld: route[ 0 ], verticalBulgeWorld: route[ 1 ],
+} ) : null );
 // TRACE D'UN TUNNEL.
 //
 // La courbe est une BEZIER QUADRATIQUE, et ce choix n'est pas esthetique : les
@@ -258,7 +700,7 @@ export function parentOf( k, U ) {
 // longueur laissait passer des portions a 40 degres au coeur du tunnel. La
 // pente maximale decroit strictement avec le bombement, donc la dichotomie
 // converge ; vingt-deux tours, une fois par tunnel et par reconstruction.
-export function tunnelPath( a, b, seed, steps = 10 ) {
+function tunnelPathWithRoute( a, b, seed, steps = 10, route = {} ) {
 
 	if ( ! a || ! b ) throw new Error( 'tunnelPath expects two endpoints' );
 	if ( ! Number.isInteger( steps ) || steps < 2 )
@@ -268,11 +710,13 @@ export function tunnelPath( a, b, seed, steps = 10 ) {
 	const chord = Math.hypot( dx, dy );
 	const nx = chord > 1e-9 ? - dy / chord : 0;
 	const ny = chord > 1e-9 ? dx / chord : 0;
-	// Sinuosite volontairement BORNEE en unites monde. L'ancien Bezier pouvait
-	// reboucler deux branches issues du meme noeud; cette enveloppe inferieure a
-	// 0,28 u preserve plus d'une unite de sol dans le pire cas du registre final.
-	const amplitude = ( 0.18 + 0.10 * vdc( seed + 1, 7 ) ) / TEXEL;
-	const collisionAvoidance = ( CORRIDOR_BULGE_OVERRIDE_WORLD.get( seed ) ?? 0 ) / TEXEL;
+	// Sinuosite organique a basse frequence, bornee et nulle aux portails. Elle
+	// est partagee par le creusage, le SDF et les pistes : aucun bruit visuel ne
+	// peut desynchroniser les pattes de la paroi physique.
+	const curvatureScale = CORRIDOR_CURVATURE_SCALE_OVERRIDE.get( seed ) ?? 1;
+	const amplitude = ( 0.64 + 0.48 * vdc( seed + 1, 7 ) ) * curvatureScale / TEXEL;
+	const collisionAvoidance = ( ( CORRIDOR_BULGE_OVERRIDE_WORLD.get( seed ) ?? 0 )
+		+ ( route.lateralBulgeWorld ?? 0 ) ) / TEXEL;
 	const phase = GOLD * ( seed + 1 );
 	const points = [];
 
@@ -281,20 +725,30 @@ export function tunnelPath( a, b, seed, steps = 10 ) {
 		const t = index / steps;
 		const envelope = Math.sin( Math.PI * t ) ** 2;
 		const wiggle = amplitude * envelope * (
-			0.72 * Math.sin( Math.PI * 2 * t + phase )
-			+ 0.28 * Math.sin( Math.PI * 4 * t - phase * 0.37 ) )
+			0.58 * Math.sin( Math.PI * 2 * t + phase )
+			+ 0.27 * Math.sin( Math.PI * 4 * t - phase * 0.37 )
+			+ 0.15 * Math.sin( Math.PI * 6 * t + phase * 0.19 ) )
 			+ collisionAvoidance * envelope;
 		const eased = t * t * t * ( t * ( t * 6 - 15 ) + 10 );
 		points.push( {
 			x: a.x + dx * t + nx * wiggle,
 			y: a.y + dy * t + ny * wiggle,
-			depth: a.depth + ( b.depth - a.depth ) * eased,
+			depth: a.depth + ( b.depth - a.depth ) * eased
+				+ ( route.verticalBulgeWorld ?? 0 ) * envelope,
 		} );
 
 	}
 	points[ 0 ] = { x: a.x, y: a.y, depth: a.depth };
 	points[ points.length - 1 ] = { x: b.x, y: b.y, depth: b.depth };
 	return points;
+
+}
+export function tunnelPath( a, b, seed, steps = 10 ) {
+
+	// Route exceptions belong to the baked child unit, not to the numeric seed.
+	// Synthetic fixtures can reuse a seed without inheriting an unrelated nest
+	// underpass, while every production consumer still reads the same geometry.
+	return tunnelPathWithRoute( a, b, seed, steps, b?.organicRoute ?? {} );
 
 }
 // Raccord d'entrée commun au creusage, au SDF et à la navigation. La première

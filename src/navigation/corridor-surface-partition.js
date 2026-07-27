@@ -45,12 +45,15 @@ function cloneCorridor( corridor ) {
 function cloneUnit( unit ) {
 
 	return {
+		k: unit.k,
 		x: unit.x,
 		y: unit.y,
 		depth: unit.depth,
 		rwx: unit.rwx,
 		rwz: unit.rwz,
 		rh: unit.rh,
+		chamberYaw: unit.chamberYaw,
+		chamberBalance: unit.chamberBalance,
 	};
 
 }
