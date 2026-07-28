@@ -381,13 +381,14 @@ test( 'POLLINATOR-007 all pollinator rendering is masked below ground', async ()
 	assert.ok( visibilityAssignments.length >= 2 );
 	assert.match(
 		beeSource,
-		/function update\(\s*dt,\s*isSurfaceVisible = true\s*\)\s*\{[\s\S]*?surfaceVisible = isSurfaceVisible;[\s\S]*?group\.visible = !! gfx\.pollinators && surfaceVisible;/u,
+		/function renderFrame\(\s*renderDt = 0,\s*isSurfaceVisible = true\s*\)\s*\{[\s\S]*?surfaceVisible = isSurfaceVisible;[\s\S]*?group\.visible = !! gfx\.pollinators && surfaceVisible;/u,
 	);
 	assert.match(
 		beeSource,
 		/function setSurfaceVisible\(\s*visible\s*\)\s*\{[\s\S]*?surfaceVisible = visible;[\s\S]*?group\.visible = !! gfx\.pollinators && surfaceVisible;/u,
 	);
-	assert.match( mainSource, /bees\.update\(\s*simDt,\s*!\s*dived\s*\)/u );
+	assert.match( mainSource, /bees\.stepSimulation\(\s*fixedDt\s*\)/u );
+	assert.match( mainSource, /bees\.renderFrame\(\s*rawDt,\s*!\s*dived\s*\)/u );
 	assert.match( mainSource, /bees\.setSurfaceVisible\(\s*!\s*dived\s*\)/u );
 
 } );

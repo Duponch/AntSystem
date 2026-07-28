@@ -15,6 +15,7 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 |---|---|---|
 | `COL-ECO` | Castes, reproduction, ressources, attentes et menaces cohérentes | [Colonie](./fonctionnel/colonie.md#col-eco) |
 | `COL-START` | Placement cohérent et activation échelonnée au démarrage ou à l’éclosion | [Démarrage naturel](./fonctionnel/demarrage-naturel.md#col-start) |
+| `TIME-SCALE` | Même état au même temps simulé, indépendamment du FPS et du multiplicateur demandé | [Architecture](./technique/architecture.md#time-scale--horloge-déterministe-et-changement-de-vitesse) |
 | `NAV-SURFACE` | Contact direct, support continu et profondeur compatible avec le volume 3D | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-surface) |
 | `NAV-ENTRANCE` | Bouche physique et transition surface/tunnel partageant la même géométrie | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-entrance) |
 | `BEE-SIM` | Butinage déterministe, démographie agrégée, météo, ressources et coût borné | [Abeilles et pollinisateurs](./technique/pollinisateurs.md#bee-sim--abeilles-et-pollinisateurs) |

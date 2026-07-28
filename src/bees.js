@@ -500,8 +500,10 @@ export function createBees( { scene, props, assets } ) {
 
 		flowerStockAccumulator += dt;
 		if ( flowerStockAccumulator < 0.5 ) return;
-		const elapsed = flowerStockAccumulator;
-		flowerStockAccumulator = 0;
+		const elapsed = Math.floor( ( flowerStockAccumulator + 1e-12 ) / 0.5 ) * 0.5;
+		flowerStockAccumulator -= elapsed;
+		if ( flowerStockAccumulator < 0 && flowerStockAccumulator > - 1e-10 )
+			flowerStockAccumulator = 0;
 		const refill = elapsed * 0.12;
 		for ( let i = 0; i < flowerContext.count; i ++ ) {
 
@@ -628,33 +630,66 @@ export function createBees( { scene, props, assets } ) {
 
 	}
 
-	function update( dt, isSurfaceVisible = true ) {
+	function syncSimulationInputs() {
 
-		surfaceVisible = isSurfaceVisible;
-		group.visible = !! gfx.pollinators && surfaceVisible;
-		if ( ! gfx.pollinators ) return simulation.getTelemetry();
-
-		refreshHiveAnchor();
-		refreshFlowerLayoutIfNeeded();
-		if ( ! hiveAvailable ) {
-
-			beeRenderer.geometry.instanceCount = 0;
-			return simulation.getTelemetry();
-
-		}
 		context.daylight = gfx.beeDaylight;
 		context.weather.temperatureC = gfx.beeTemperature;
 		context.weather.rain = gfx.beeRain;
 		context.weather.windSpeed = gfx.beeWind;
 		simulation.flightSpeed = gfx.beeSpeed;
 		simulation.forageDurationSeconds = gfx.beeForageDuration;
-		flowerRenderer.uTime.value += dt;
-		flowerRenderer.uWind.value = gfx.flowerWind;
-		updateStocks( dt );
 
-		if ( dt > 0 ) simulation.update( dt, context );
-		writeBeeInstances( dt );
+	}
+
+	// Hot logical path: the fixed-step scheduler may call it many times before
+	// one rendered frame. It deliberately performs no GLB traversal, instance
+	// upload, matrix rebuild or visibility mutation.
+	function stepSimulation( dt ) {
+
+		if ( ! Number.isFinite( dt ) || dt < 0 )
+			throw new RangeError( 'dt must be a finite non-negative number' );
+		if ( ! gfx.pollinators || dt === 0 || ! hiveAvailable )
+			return simulation.getTelemetry();
+		syncSimulationInputs();
+		updateStocks( dt );
+		flowerRenderer.uTime.value += dt;
+		simulation.update( dt, context );
 		return simulation.getTelemetry();
+
+	}
+
+	// Cold visual path: exactly one upload per browser frame, independently of
+	// the requested simulation multiplier.
+	function renderFrame( renderDt = 0, isSurfaceVisible = true ) {
+
+		if ( ! Number.isFinite( renderDt ) || renderDt < 0 )
+			throw new RangeError( 'renderDt must be a finite non-negative number' );
+		surfaceVisible = isSurfaceVisible;
+		group.visible = !! gfx.pollinators && surfaceVisible;
+		if ( ! gfx.pollinators ) return simulation.getTelemetry();
+
+		refreshHiveAnchor();
+		refreshFlowerLayoutIfNeeded();
+		flowerRenderer.uWind.value = gfx.flowerWind;
+		if ( ! hiveAvailable ) {
+
+			beeRenderer.geometry.instanceCount = 0;
+			return simulation.getTelemetry();
+
+		}
+		writeBeeInstances( renderDt );
+		return simulation.getTelemetry();
+
+	}
+
+	// Backward-compatible single-step facade used by isolated demos/tests.
+	function update( dt, isSurfaceVisible = true ) {
+
+		refreshHiveAnchor();
+		refreshFlowerLayoutIfNeeded();
+		const telemetry = stepSimulation( dt );
+		renderFrame( dt, isSurfaceVisible );
+		return telemetry;
 
 	}
 
@@ -773,6 +808,8 @@ export function createBees( { scene, props, assets } ) {
 		uFlowerStemColor: flowerRenderer.uStemColor,
 		uBeeTint: beeRenderer.uBeeTint,
 		uWingColor: beeRenderer.uWingColor,
+		stepSimulation,
+		renderFrame,
 		update,
 		reset,
 		setBeeCount,

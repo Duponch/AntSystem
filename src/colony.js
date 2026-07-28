@@ -39,6 +39,56 @@ import { colonyTroughSnapshot, troughRenderDepth } from './colony-layout.js';
 
 const TEXEL = WORLD / GRID;
 
+export function colonyEggRandom01( seed, ordinal, stream ) {
+
+	let value = (
+		( seed | 0 )
+		^ Math.imul( ( ordinal | 0 ) + 1, 0x9E3779B9 )
+		^ Math.imul( ( stream | 0 ) + 1, 0x85EBCA6B )
+	) >>> 0;
+	value ^= value >>> 16;
+	value = Math.imul( value, 0x7FEB352D ) >>> 0;
+	value ^= value >>> 15;
+	value = Math.imul( value, 0x846CA68B ) >>> 0;
+	value ^= value >>> 16;
+	return value / 0x100000000;
+
+}
+
+export function planHatchActivation( { hatched, activatedHatch, antCount, maxPopulation } ) {
+
+	const normalizedHatched = Math.max( 0, Math.floor( Number( hatched ) || 0 ) );
+	const normalizedActivated = Math.max( 0, Math.floor( Number( activatedHatch ) || 0 ) );
+	const pendingHatch = Math.max( 0, normalizedHatched - normalizedActivated );
+	const availableSlots = Math.max(
+		0,
+		Math.floor( Number( maxPopulation ) || 0 ) - Math.max( 0, Math.floor( Number( antCount ) || 0 ) ),
+	);
+	return {
+		activateCount: Math.min( pendingHatch, availableSlots ),
+		pendingHatch,
+	};
+
+}
+
+export function validateHatchActivationResult( requested, activated ) {
+
+	const requestedCount = Math.max( 0, Math.floor( Number( requested ) || 0 ) );
+	if (
+		! Number.isSafeInteger( activated )
+		|| activated < 0
+		|| activated > requestedCount
+	) {
+
+		throw new RangeError(
+			`activateAnts must resolve to an integer between 0 and ${ requestedCount }`,
+		);
+
+	}
+	return activated;
+
+}
+
 // région couverte par la carte de profondeur (voir nest.js)
 export const DEPTH_SIZE = NEST_DEPTH_SIZE;
 export { LAYERS };
@@ -787,20 +837,27 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	let activatedHatch = 0;     // fourmis activées (vs stats[5] = éclosions)
 	let eggRing = 0;
 	let pollAccum = 0;
+	let diagnosticEpoch = 0;
 	let manualTick = false;
 	const demo = { eggs: 0, larvae: 0, pupae: 0 };   // démographie du couvain (overlay)
+	let lastReconcileTick = null;
 
 	const pendingEggs = [];     // positions (texels) en attente de semis
 
-	function queueEggs( n ) {
+	function queueEggs( n, startOrdinal = spawnedEggs ) {
 
 		const q = layout.chambers.queen;
 
 		for ( let i = 0; i < n; i ++ ) {
 
-			const a = Math.random() * Math.PI * 2;
-			const r = Math.sqrt( Math.random() ) * 10;
-			pendingEggs.push( { x: q.x + Math.cos( a ) * r, y: q.y + Math.sin( a ) * r } );
+			const ordinal = startOrdinal + i;
+			const seed = sim.u.seed.value | 0;
+			const angle = colonyEggRandom01( seed, ordinal, 0 ) * Math.PI * 2;
+			const radius = Math.sqrt( colonyEggRandom01( seed, ordinal, 1 ) ) * 10;
+			pendingEggs.push( {
+				x: q.x + Math.cos( angle ) * radius,
+				y: q.y + Math.sin( angle ) * radius,
+			} );
 
 		}
 
@@ -832,11 +889,13 @@ export function createColony( { scene, sim, renderer, layout } ) {
 	// deux getArrayBufferAsync concurrents se corrompent mutuellement
 	async function pollBrood() {
 
+		const epoch = diagnosticEpoch;
 		if ( ! tryAcquireReadback() ) return;
 
 		try {
 
 			const buf = await renderer.getArrayBufferAsync( broodState.value );
+			if ( epoch !== diagnosticEpoch ) return;
 			const st = new Uint32Array( buf );
 			let e = 0, l = 0, p = 0;
 
@@ -859,48 +918,61 @@ export function createColony( { scene, sim, renderer, layout } ) {
 
 	}
 
-	// appliqué aux stats déjà lues par la boucle principale (1×/30 frames) :
-	// zéro readback supplémentaire pour la ponte/éclosion
-	function onStats( stats, hooks ) {
+	async function reconcileStatsAtTick( stats, tick, hooks ) {
 
-		if ( ! params.colony ) return;
+		if ( ! stats || typeof stats !== 'object' )
+			throw new TypeError( 'stats must be an object' );
+		if ( ! params.colony ) return { spawnedEggs, activatedHatch, pendingHatch: 0 };
 
-		// pontes → œufs à semer
-		const laid = stats.laid || 0;
+		const boundaryTick = tick === null || tick === undefined ? null : BigInt( tick );
+		if ( boundaryTick !== null && lastReconcileTick !== null && boundaryTick < lastReconcileTick )
+			throw new RangeError( 'colony reconciliation ticks must be monotonic' );
 
+		const laid = Math.max( 0, Math.floor( Number( stats.laid ) || 0 ) );
 		if ( laid > spawnedEggs ) {
 
-			queueEggs( laid - spawnedEggs );
+			queueEggs( laid - spawnedEggs, spawnedEggs );
 			spawnedEggs = laid;
 
 		}
 
-		// éclosions → activer de nouvelles fourmis (bornées par le plafond)
-		const hatched = stats.hatched || 0;
+		const hatched = Math.max( 0, Math.floor( Number( stats.hatched ) || 0 ) );
+		const hatchPlan = planHatchActivation( {
+			hatched,
+			activatedHatch,
+			antCount: params.antCount,
+			maxPopulation: params.maxPopulation,
+		} );
+		const { pendingHatch, activateCount: room } = hatchPlan;
 
-		if ( hatched > activatedHatch ) {
+		if ( room > 0 && hooks?.activateAnts ) {
 
-			const room = Math.min(
-				hatched - activatedHatch,
-				Math.max( 0, Math.floor( params.maxPopulation ) - params.antCount ),
+			const activated = validateHatchActivationResult(
+				room,
+				await hooks.activateAnts( room, boundaryTick ),
 			);
-
-			if ( room > 0 && hooks && hooks.activateAnts ) {
-
-				hooks.activateAnts( room );
-
-			}
-
-			activatedHatch = hatched;   // les éclosions au-delà du plafond sont perdues (assumé)
+			activatedHatch += activated;
 
 		}
 
 		u.hatchBlocked.value = params.antCount >= params.maxPopulation ? 1 : 0;
 		u.nursesExist.value = params.nurseRatio > 0.001 ? 1 : 0;
+		if ( boundaryTick !== null ) lastReconcileTick = boundaryTick;
+		return {
+			spawnedEggs,
+			activatedHatch,
+			pendingHatch: Math.max( 0, hatched - activatedHatch ),
+		};
 
 	}
 
-	function step( dt ) {
+	function onStats( stats, hooks ) {
+
+		return reconcileStatsAtTick( stats, null, hooks );
+
+	}
+
+	function stepSimulation( dt ) {
 
 		if ( ! params.colony ) return;
 
@@ -908,24 +980,30 @@ export function createColony( { scene, sim, renderer, layout } ) {
 		renderer.compute( kBrood );
 		drainEggs();
 
-		pollAccum += dt;
 
-		if ( ! manualTick && pollAccum > 1.1 ) {
+	}
+	function serviceDiagnostics( wallDt ) {
 
-			pollAccum = 0;
-			pollBrood();
-
-		}
+		if ( ! Number.isFinite( wallDt ) || wallDt < 0 )
+			throw new RangeError( 'wallDt must be a finite non-negative number' );
+		if ( manualTick || ! params.colony ) return;
+		pollAccum += wallDt;
+		if ( pollAccum < 1.1 ) return;
+		pollAccum %= 1.1;
+		void pollBrood();
 
 	}
 
 	async function reset() {
 
+		diagnosticEpoch ++;
 		spawnedEggs = 0;
 		activatedHatch = 0;
 		eggRing = 0;
 		pendingEggs.length = 0;
 		demo.eggs = demo.larvae = demo.pupae = 0;
+		pollAccum = 0;
+		lastReconcileTick = null;
 		await renderer.computeAsync( kClear );
 
 	}
@@ -935,7 +1013,9 @@ export function createColony( { scene, sim, renderer, layout } ) {
 		uEggColor, uLarvaColor, uPupaColor,
 		uScanFx, uScanBroodColor, uScanFoodColor,
 		broodMesh, piles,
-		step, reset, onStats, refreshLayout: refreshLayoutAnchors,
+		step: stepSimulation, stepSimulation, serviceDiagnostics,
+		reset, onStats, reconcileStatsAtTick,
+		refreshLayout: refreshLayoutAnchors,
 		disposeLayoutBinding: () => stopLayoutRefresh?.(),
 		setVisible( v ) {
 

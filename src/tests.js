@@ -147,13 +147,14 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 
 				const from = params.antCount;
 				const target = Math.min( 65536, from + k );
-				if ( target <= from ) return;
+				if ( target <= from ) return 0;
 				sim.spawnHatched( from );
 				params.antCount = target;
 				sim.u.antCount.value = target;
 				ants.setCount( target );
 				cones.setCount( target );
 
+				return target - from;
 			},
 		};
 
@@ -162,7 +163,7 @@ export function createColonyTests( { sim, colony, spiders, ants, cones, renderer
 	async function tick() {
 
 		const st = await sim.readStatsDirect();
-		colony.onStats( st, hooks() );
+		await colony.onStats( st, hooks() );
 		await colony._dbg.pollBrood();
 		return st;
 

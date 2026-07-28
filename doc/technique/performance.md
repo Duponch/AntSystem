@@ -91,3 +91,19 @@ Une affirmation de performance publiable doit préciser au minimum : commit, nav
 - Le volume SDF et les pistes sont reconstruits lors des changements de forme ; cette opération n’est pas un coût de frame normal.
 - La profondeur monolithique est limitée à 24 unités ; une profondeur beaucoup plus grande exige des briques ou une clipmap.
 - Le modèle CPU conserve la distance résiduelle à travers plusieurs arêtes et est invariant au découpage temporel ; les transitions GPU entrée/sortie consomment également le résidu mesuré, mais un très grand `dt` artificiel reste à couvrir par une campagne GPU dédiée.
+
+## Coût de l’horloge hybride
+
+En mode `fluid`, `×1` suit un fast-path GPU-first : un seul pas logique court par `requestAnimationFrame`, puis un seul submit groupé pour la pose finale et le classement LOD. Les araignées et pollinisateurs avancent une fois, le ragdoll et les uploads d’instances restent une fois par image, et aucun readback opportuniste ne bloque cette cadence. Le travail redevient régulier sur un écran 240 Hz au lieu d’alterner une image avec pose et une image sans pose.
+
+Ce fast-path est rétabli au début de chaque session : `timingMode` n’est ni restauré ni sauvegardé. Seul `?timing=strict` demande explicitement un démarrage strict ; le budget `maxGpuSubsteps` reste persistant, car il borne le coût sans changer de profil temporel.
+
+Au-delà de `×1`, le planificateur fluide exécute par défaut entre un et huit sous-pas de `1/30 s` au maximum. Les passes logiques sont multipliées dans cette borne, mais pose, LOD et rendu ne le sont pas. Lorsque huit sous-pas ne suffisent plus, le surplus est déclaré comme temps non simulé et la vitesse effective diminue ; aucune dette ne vient ensuite dégrader `×1`. Le seuil perceptible dépend donc du GPU, de la population et des prédateurs, mais le coût par image reste plafonné.
+
+Le mode `strict` est un profil distinct destiné aux tests et replays : 120 ticks par seconde simulée, jusqu’à 64 ticks par image, barrières autoritatives exactes et dette conservée. Il peut coûter davantage ou atteindre une vitesse murale inférieure, en échange d’un état bit-identique au même tick.
+
+La bascule vers ce profil paie une transaction ponctuelle, pas un surcoût permanent du mode fluide : les pas sont arrêtés, les readbacks engagés sont drainés et tous les systèmes autoritatifs sont réinitialisés avant reprise. Aucun état fluide partiellement réconcilié n’entre ainsi dans un replay strict.
+
+La frontière des araignées réutilise un `ReadbackBuffer` préalloué de **48 KiB** pendant toute la vie du système. À une échéance combinée, les données de proies, dégâts, alarmes, compteurs de morts et victime élue sont copiées dans un seul snapshot puis acquittées par un seul mapping, au lieu de plusieurs mappings et allocations de staging successifs. En mode fluide, ces copies partent après l’image visible, peuvent avoir une frame de retard, et une tentative occupée est coalescée puis retentée sans bloquer ; en mode strict, le même snapshot devient une barrière FIFO. Le buffer est libéré après lecture mais pas réalloué, et sa capacité reste indépendante du nombre de fourmis actives.
+
+Les tests `HYBRID-TIME` protègent le pas unique à `×1`, le découpage `×4/×15/×22`, le plafond fixe à `×100`, la conservation `temps consommé + temps non simulé = temps demandé` et le submit pose/LOD groupé. Les scénarios `TIME-SCALE-ECO` conservent l’oracle bit à bit du mode strict sous plusieurs FPS et avec jitter. Le mutex de readback vérifie à la fois le refus opportuniste, le FIFO strict et la libération après erreur.

@@ -53,6 +53,8 @@ export const params = {
 	// Colonie
 	antCount: 869,                     // clin d'œil à la vidéo
 	simSpeed: 1,
+	timingMode: 'fluid',                 // fluid = GPU/rAF, strict = pas fixes + replay
+	maxGpuSubsteps: 8,                   // plafond de travail accelere par image
 	paused: false,
 
 	// Comportement — config « D » validée au banc d'essai :
@@ -375,7 +377,9 @@ if ( saved ) {
 
 	for ( const [ k, v ] of Object.entries( saved.params || {} ) ) {
 
-		if ( k in params && typeof v === typeof params[ k ] ) params[ k ] = v;
+		// Le mode temporel est volontairement limité à la session : une ancienne
+		// sauvegarde stricte ne doit jamais dégrader silencieusement le jeu suivant.
+		if ( k !== 'timingMode' && k in params && typeof v === typeof params[ k ] ) params[ k ] = v;
 
 	}
 
@@ -407,6 +411,11 @@ params.nestDepth = Math.min( MAX_NEST_DEPTH, Math.max( MIN_NEST_DEPTH, params.ne
 const clampSetting = ( value, low, high ) => Number.isFinite( value )
 	? Math.min( high, Math.max( low, value ) )
 	: low;
+// Le mode fluide est toujours le point de départ. Seule la surcharge d'URL
+// appliquée plus bas peut ouvrir explicitement une session stricte.
+params.timingMode = 'fluid';
+params.maxGpuSubsteps = Math.round( clampSetting( params.maxGpuSubsteps, 1, 16 ) );
+
 gfx.undergroundRadius = clampSetting( gfx.undergroundRadius, 6, 10 );
 gfx.undergroundRelief = clampSetting( gfx.undergroundRelief, 0, 1.8 );
 gfx.undergroundContrast = clampSetting( gfx.undergroundContrast, 0.6, 1.4 );
@@ -464,13 +473,20 @@ gfx.chameleonAttackCooldown = clampSetting( gfx.chameleonAttackCooldown, 0.3, 6 
 	const q = new URLSearchParams( typeof location === 'undefined' ? '' : location.search );
 	if ( q.has( 'physics' ) ) params.physics = q.get( 'physics' ) !== '0';
 	if ( q.has( 'perf' ) ) gfx.perfHud = q.get( 'perf' ) !== '0';
+	if ( q.has( 'timing' ) ) params.timingMode = q.get( 'timing' ) === 'strict' ? 'strict' : 'fluid';
+
 
 }
 
 export function saveSettings() {
 
-	if ( typeof localStorage !== 'undefined' )
-		localStorage.setItem( STORAGE_KEY, JSON.stringify( { params, gfx } ) );
+	if ( typeof localStorage !== 'undefined' ) {
+
+		const persistentParams = { ...params };
+		delete persistentParams.timingMode;
+		localStorage.setItem( STORAGE_KEY, JSON.stringify( { params: persistentParams, gfx } ) );
+
+	}
 
 }
 

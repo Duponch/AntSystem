@@ -136,6 +136,57 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 
 	}
 
+	function syncEnabledTransitions() {
+
+		const chameleonEnabled = !! gfx.chameleonEnabled;
+		if ( ! chameleonEnabled && chameleonWasEnabled && chameleonSystem ) {
+
+			releaseCapturedButterfly();
+			chameleonSystem.reset();
+
+		}
+		chameleonWasEnabled = chameleonEnabled;
+
+	}
+
+	function stepSimulation( dt ) {
+
+		if ( ! Number.isFinite( dt ) || dt < 0 )
+			throw new RangeError( 'dt must be a finite non-negative number' );
+		let telemetry = null;
+		if ( system ) telemetry = system.stepSimulation( dt );
+		if ( butterflySystem ) butterflySystem.stepSimulation( dt );
+		syncEnabledTransitions();
+		if ( chameleonSystem ) chameleonSystem.stepSimulation( dt );
+		return telemetry;
+
+	}
+
+	function renderFrame( renderDt = 0, visible = true ) {
+
+		if ( ! Number.isFinite( renderDt ) || renderDt < 0 )
+			throw new RangeError( 'renderDt must be a finite non-negative number' );
+		surfaceVisible = visible;
+		let telemetry = null;
+		if ( system ) telemetry = system.renderFrame( renderDt, visible );
+		else if ( gfx.pollinators ) void ensureLoaded();
+
+		if ( butterflySystem ) butterflySystem.renderFrame( visible );
+		else if ( gfx.pollinators && gfx.butterflies ) void ensureButterflies();
+
+		if ( chameleonSystem ) chameleonSystem.renderFrame( renderDt, visible );
+		else if ( gfx.chameleonEnabled ) void ensureChameleon();
+		return telemetry;
+
+	}
+
+	function update( dt, visible = true ) {
+
+		const telemetry = stepSimulation( dt );
+		renderFrame( dt, visible );
+		return telemetry;
+
+	}
 	return {
 		preload() {
 
@@ -146,30 +197,9 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			] );
 
 		},
-		update( dt, visible = true ) {
-
-			surfaceVisible = visible;
-			let telemetry = null;
-			if ( system ) telemetry = system.update( dt, visible );
-			else if ( gfx.pollinators ) void ensureLoaded();
-
-			if ( butterflySystem ) butterflySystem.update( dt, visible );
-			else if ( gfx.pollinators && gfx.butterflies ) void ensureButterflies();
-
-			const chameleonEnabled = !! gfx.chameleonEnabled;
-			if ( ! chameleonEnabled && chameleonWasEnabled && chameleonSystem ) {
-
-				releaseCapturedButterfly();
-				chameleonSystem.reset();
-
-			}
-			chameleonWasEnabled = chameleonEnabled;
-			if ( chameleonSystem ) chameleonSystem.update( dt );
-			else if ( chameleonEnabled ) void ensureChameleon();
-			if ( butterflySystem ) butterflySystem.flushPredationRender();
-			return telemetry;
-
-		},
+		stepSimulation,
+		renderFrame,
+		update,
 		reset() {
 
 			const beeReset = system

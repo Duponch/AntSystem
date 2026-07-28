@@ -16,7 +16,7 @@ import { createNestCommitPause } from './nest-mutation-ui.js';
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, bees, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, bees, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume, onReset, onSetColonyEnabled } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -36,7 +36,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	// restent toujours synchronisés.
 	let antCountCtrl = null;
 
-	function setPopulation( v ) {
+	function applyPopulation( v ) {
 
 		v = Math.round( Math.min( MAX_ANTS, Math.max( 10, v ) ) );
 		params.antCount = v;
@@ -46,7 +46,28 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		applyAntShadows();
 		if ( antCountCtrl ) antCountCtrl.updateDisplay();
 
+		return v;
+	}
+	function setPopulation( v ) {
+
+		const next = applyPopulation( v );
 		scheduleNestGrowth();
+		return next;
+
+	}
+
+	async function setPopulationFromSimulation( v ) {
+
+		const next = applyPopulation( v );
+		clearTimeout( growTimer );
+		if ( params.nestGrow && params.colony ) {
+
+			const target = quantK( nestBudget( params.antCount, params.nestScale ) );
+			await commitNestGrowth( target );
+
+		}
+		return next;
+
 	}
 
 	antCountCtrl = fColony.add( params, 'antCount', 10, MAX_ANTS, 1 ).name( 'Fourmis' ).onChange( ( v ) => {
@@ -59,6 +80,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	} );
 	fColony.add( params, 'simSpeed', 0, 100, 0.1 ).name( 'Vitesse ×' );
+	fColony.add( params, 'timingMode', {
+		'Fluide GPU (recommandé)': 'fluid',
+		'Strict / replay exact (nouvelle partie)': 'strict',
+	} ).name( 'Horloge' );
+	fColony.add( params, 'maxGpuSubsteps', 1, 16, 1 ).name( 'Sous-pas GPU max' );
 	fColony.add( params, 'paused' ).name( 'Pause' );
 	fColony.add( { reset: onReset }, 'reset' ).name( '🔄 Réinitialiser' );
 
@@ -73,13 +99,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		const requested = Boolean( v );
 		const migration = colonyToggleTail.then( async () => {
 
-			const migrated = await sim.setColonyEnabled( requested );
-			if ( migrated ) {
-
-				spiders?.reset();
-				await colony.reset();
-
-			}
+			await onSetColonyEnabled( requested );
 			const visibleUnderground = requested && ants.uDive.value > 0.5;
 			ants.queen.visible = visibleUnderground;
 			colony.setVisible( visibleUnderground );
@@ -1100,15 +1120,45 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 		}
 
+		let clockLine = '';
+		if ( perf?.clock ) {
+
+			const clock = perf.clock;
+			const mode = clock.mode === 'strict' ? 'strict 120 Hz' : 'GPU fluide';
+			if ( clock.requestedMultiplier <= 0 ) {
+
+				clockLine = `⏸ simulation en pause · ${mode}<br>`;
+
+			} else {
+
+				const requested = clock.requestedMultiplier.toLocaleString( 'fr-FR', { maximumFractionDigits: 2 } );
+				const effective = clock.effectiveMultiplier.toLocaleString( 'fr-FR', { maximumFractionDigits: 2 } );
+				let timingWarning = '';
+				if ( clock.mode === 'strict' && clock.backlog > 0.05 ) {
+
+					timingWarning = ` · rattrapage ${clock.backlog.toFixed( 2 )} s${clock.budgetLimited ? ' ⚠️' : ''}`;
+
+				} else if ( clock.mode === 'fluid' && clock.dropped > 0.01 ) {
+
+					timingWarning = ` ? plafond GPU : ${clock.dropped.toFixed( 2 )} s hors budget sur 0,25 s ??`;
+
+				}
+				clockLine = `⏩ ×${requested} demandé · ×${effective} effectif · ${mode}${timingWarning}<br>`;
+
+			}
+
+		}
+
 		overlay.innerHTML =
 			`🍎 <b>${stats.delivered}</b> récoltées · ` +
 			`🐜 ${carrying} en transport · ` +
 			( params.spiderCount > 0 ? `🕷 ${eaten} mortes (${devoured} dévorées) · ` : '' ) +
 			`${aliveCount.toLocaleString( 'fr-FR' )} fourmis · ${fps} ips` +
 			( perf && perf.compute ? ` · ⏱ compute ${perf.compute.toFixed( 2 )} ms` +
-				` / rendu ${perf.render.toFixed( 2 )} ms (${perf.computeCalls} passes)` : '' ) +
+				` / rendu ${perf.render.toFixed( 2 )} ms (${perf.computeCalls} lots compute)` : '' ) +
 			` · ⚙️ ${params.physics ? 'physique' : 'cinématique'}<br>` +
 			colonyLine +
+			clockLine +
 			`<span style="opacity:.65">${params.brushMode ? 'Clic gauche : ' + params.tool : 'B : mode pinceau'} · ` +
 			`Clic droit : orbite · Clic molette : déplacer · Molette : zoom · ` +
 			`Espace : pause · 1/2/3 : outils</span>`;
@@ -1118,6 +1168,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	return {
 		updateOverlay,
 		setPopulation,
+		setPopulationFromSimulation,
 		consumePaintFlag() {
 
 			const p = paintedThisFrame;

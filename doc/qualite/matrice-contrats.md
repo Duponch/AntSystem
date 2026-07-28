@@ -61,3 +61,19 @@ Une modification d’un des huit contrats est livrable lorsque :
 - les tests GPU pertinents ont été exécutés pour tout changement de kernel, texture, pose, SDF, cycle biologique ou transition surface/sous-sol.
 
 Toute modification de la simulation doit mettre à jour dans la même livraison les tests qui prouvent le comportement et la documentation technique et fonctionnelle qui l’explique. Un changement uniquement documentaire doit également exécuter `docs:sync`, car le hash du document fait partie du manifeste.
+
+## Invariant transversal TIME-SCALE
+
+| Garantie | Preuve automatisée |
+|---|---|
+| Mode fluide GPU-first au début de chaque session : non restauré/non sauvegardé, sauf override explicite `?timing=strict` ; à `0 < vitesse ≤ 1`, un pas frais par image et pose+LOD groupés | `test/config-timing-session.test.js`, `HYBRID-TIME-002`, `HYBRID-TIME-RUNTIME-001` |
+| Accélération fluide bornée à huit sous-pas de `1/30 s` maximum ; `consommé + non simulé = demandé`, sans dette | `HYBRID-TIME-004` à `HYBRID-TIME-006` |
+| Pause `×0` sans pas ni vieillissement ; long frame clampé et perte rendue explicite | `HYBRID-TIME-001`, `HYBRID-TIME-003`, `SIM-CLOCK-006` |
+| Readbacks diagnostiques soumis après l’image visible, opportunistes, coalescés et potentiellement en retard d’une frame en fluide ; FIFO frais et barrières exactes en strict | `TIME-SCALE-RUNTIME-003`, `test/readback.test.js`, `test/simulation-synchronization.test.js` (`SIM-SYNC-001`, `SIM-STATS-001`) |
+| Snapshot araignées autoritatif `uvec4` de 48 KiB, un seul mapping aux barrières coïncidentes et verrou toujours libéré | `test/spider-authority-readback.test.js` (`TIME-SCALE-RUNTIME-005`) |
+| Victime d’araignée élue par `atomicMin`, plus petit slot déterministe et remise au sentinel à chaque intervalle | `test/spider-kill-election.test.js` (`SPIDER-AUTHORITY-002`) |
+| Toggle « Colonie vivante » sérialisé, epoch invalidé, lecture en cours attendue et pas bloqués pendant la mutation | `test/time-scale-runtime.test.js` (`TIME-SCALE-RUNTIME-006`) |
+| Transition `fluid → strict` : invalidation d’epoch, attente des lectures, blocage des pas et reset transactionnel complet avant reprise | `test/time-scale-runtime.test.js` (`TIME-SCALE-RUNTIME-003`), `test/simulation-synchronization.test.js` (`SIM-SYNC-001`, `SIM-STATS-001`) |
+| Mode strict à 120 Hz : dette conservée et même état au même tick sous FPS, jitter et multiplicateurs différents | `test/simulation-clock.test.js`, `test/time-scale-ecosystem.test.js`, `test/spider-time.test.js` |
+
+Cet invariant s’applique à tous les contrats biologiques. Le mode strict protège l’identité au tick ; le mode fluide protège le coût par image, l’ordre causal et l’honnêteté de la télémétrie. Une approximation fluide peut réduire la vitesse effective, mais ne peut ni cacher le temps non simulé ni déclencher un rattrapage ultérieur.

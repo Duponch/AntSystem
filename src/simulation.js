@@ -28,12 +28,12 @@ import {
 	Fn, If, Loop, uniform, uniformArray, instancedArray, instanceIndex,
 	float, int, uint, vec2, vec3, vec4, ivec2, uvec2,
 	exp, cos, sin, sqrt, floor, ceil, fract, pow, abs, atan, max, min, clamp, mix, length, select,
-	atomicAdd, atomicSub, atomicLoad, atomicStore, atomicMax,
+	atomicAdd, atomicSub, atomicLoad, atomicStore, atomicMax, atomicMin,
 	textureLoad, textureStore, hash, frameId, PI, PI2,
 } from 'three/tsl';
 
 import { GRID, WORLD, TEXEL, MAX_ANTS, MAX_SPIDERS, FIXED, NEST, params, gfx } from './config.js';
-import { tryAcquireReadback, releaseReadback } from './readback.js';
+import { tryAcquireReadback, releaseReadback, withReadback } from './readback.js';
 import { STARTUP_DELAY } from './colony-startup.js';
 import {
 	corridorSurfaceLengthTSL,
@@ -62,6 +62,15 @@ function random01( seed, serial, stream ) {
 	x = Math.imul( x, 0x846CA68B ) >>> 0;
 	x ^= x >>> 16;
 	return x / 0x100000000;
+
+}
+
+function mapStatsData( data ) {
+
+	return {
+		delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ], devoured: data[ 3 ],
+		laid: data[ 4 ], hatched: data[ 5 ], granary: data[ 6 ], queenEnergy: data[ 7 ] / 1000,
+	};
 
 }
 
@@ -210,9 +219,9 @@ export class AntSimulation {
 		// dévoration). Cumulés, relus par delta côté CPU comme spiderDamage.
 		this.spiderAlarm = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
 		this.spiderKills = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
-		// position (grille) de la dernière proie tuée par CHAQUE araignée → le
-		// prédateur va s'y placer pour dévorer le cadavre (dernier écrivain gagne)
-		this.spiderKillPos = instancedArray( MAX_SPIDERS, 'vec2' );
+		// Deterministic victim selected between authority barriers. atomicMin on the
+		// ant slot removes the former GPU last-writer race on the kill position.
+		this.spiderKillAnt = instancedArray( MAX_SPIDERS, 'uint' ).toAtomic();
 
 		// obstacles du décor (bûches, souches, troncs…) rasterisés dans la grille de murs
 		// A = (cx, cy, demi-longueur, demi-largeur) en texels ; B = (axe.x, axe.y, type, 0)
@@ -271,6 +280,9 @@ export class AntSimulation {
 		// [4] œufs pondus, [5] éclosions, [6] stock du grenier (instantané),
 		// [7] énergie de la reine ×1000 (instantané, mono-écrivain)
 		this.stats = instancedArray( 8, 'uint' ).toAtomic();
+		// Jeton privé : sa seule mutation matérialise une frontière de queue GPU.
+		this._syncSentinel = instancedArray( 1, 'uint' );
+
 
 		// --- textures ping-pong du champ de phéromones ---
 		this.textures = [ 0, 1 ].map( () => {
@@ -291,6 +303,7 @@ export class AntSimulation {
 
 		this._brushQueue = [];
 		this._regenAccum = 0;
+		this._statsEpoch = 0;
 		this.statsData = { delivered: 0, picked: 0, eaten: 0, devoured: 0, laid: 0, hatched: 0, granary: 0, queenEnergy: 1 };
 
 		// nœuds TSL texture(...) qui affichent le champ (sol, herbe…) :
@@ -314,10 +327,17 @@ export class AntSimulation {
 	_buildKernels() {
 
 		const u = this.u;
-		const { antData, antState, antVital, antDyn, deposit, alarm, food, wall, stats, spiderDamage, spiderAlarm, spiderKills, spiderKillPos } = this;
+		const { antData, antState, antVital, antDyn, deposit, alarm, food, wall, stats, spiderDamage, spiderAlarm, spiderKills, spiderKillAnt, _syncSentinel } = this;
 		const layout = this.layout;
 
 		const cellIndex = ( c ) => c.y.mul( GRID ).add( c.x );
+		this.kSynchronize = Fn( () => {
+
+			const token = _syncSentinel.element( instanceIndex );
+			token.assign( token.add( uint( 1 ) ) );
+
+		} )().compute( 1 );
+
 
 		// --- tables du nid, lues en texture ---
 		// nodeAt : (x, y en texels, rayon d'arrivee, nappe)
@@ -570,6 +590,13 @@ export class AntSimulation {
 			atomicStore( spiderDamage.element( instanceIndex ), uint( 0 ) );
 			atomicStore( spiderAlarm.element( instanceIndex ), uint( 0 ) );
 			atomicStore( spiderKills.element( instanceIndex ), uint( 0 ) );
+			atomicStore( spiderKillAnt.element( instanceIndex ), uint( MAX_ANTS ) );
+
+		} )().compute( MAX_SPIDERS );
+
+		this.kClearSpiderKillAnt = Fn( () => {
+
+			atomicStore( spiderKillAnt.element( instanceIndex ), uint( MAX_ANTS ) );
 
 		} )().compute( MAX_SPIDERS );
 
@@ -901,10 +928,7 @@ export class AntSimulation {
 
 										} );
 
-										const flightT = u.deathPop.mul( 2 ).div( max( u.gravity, 1 ) );
-										spiderKillPos.element( spiderId ).assign(
-											pos.add( kick.mul( u.deathFling ).mul( flightT ).mul( select( phys, 1, 0 ) ) ),
-										);
+										atomicMin( spiderKillAnt.element( spiderId ), instanceIndex );
 
 									} );
 
@@ -1072,7 +1096,7 @@ export class AntSimulation {
 
 						atomicAdd( stats.element( 4 ), uint( 1 ) );
 						energy.subAssign( u.queenLayCost );
-						timer.assign( 0 );
+						timer.subAssign( u.queenLayInterval );
 
 					} );
 
@@ -2069,6 +2093,14 @@ export class AntSimulation {
 		const [ tA, tB ] = this.textures;
 		this.kAnt = [ makeAntKernel( tA ), makeAntKernel( tB ) ];
 		this.kGrid = [ makeGridKernel( tA, tB ), makeGridKernel( tB, tA ) ];
+		// Tableaux stables : en mode normal Three encode chaque tick dans un seul
+		// command buffer WebGPU, sans allocation ni soumission intermédiaire.
+		this.kStep = [
+			[ this.kAnt[ 0 ], this.kGrid[ 0 ] ],
+			[ this.kAnt[ 1 ], this.kGrid[ 1 ] ],
+		];
+		this.kStepWithSpiders = this.kStep.map( ( passes ) => [ this.kClearSpiderAlarm, ...passes ] );
+
 
 		// ------------------------------------------------------------------
 		// Pinceau : nourriture / mur / gomme dans un disque
@@ -2206,6 +2238,10 @@ export class AntSimulation {
 
 	async reset() {
 
+		// Invalide immédiatement toute lecture GPU lancée avant ce reset.
+		// Une copie peut terminer pendant init(), sans republier l'ancien run.
+		this._statsEpoch = ( this._statsEpoch || 0 ) + 1;
+
 		this.cur = 0;
 		this._clock = 0;
 		this._tick = 0;
@@ -2228,9 +2264,23 @@ export class AntSimulation {
 	// déjà soumises avant de remplacer les textures partagées.
 	async synchronize() {
 
-		// computeAsync force d'abord la soumission de l'encodeur interne Three.js,
-		// puis attend sa fin. onSubmittedWorkDone() seul ne vide pas cet encodeur.
-		await this.renderer.computeAsync( this.kClearSpiderAlarm );
+		// computeAsync force d'abord la soumission de l'encodeur interne Three.js.
+		// La barrière de queue couvre ensuite toutes les commandes déjà soumises,
+		// y compris celles encodées avant cette sentinelle. Sans GPUQueue public,
+		// le fallback lit les quatre octets de la sentinelle sous le verrou global.
+		await this.renderer.computeAsync( this.kSynchronize );
+		const queue = this.renderer?.backend?.device?.queue;
+		if ( typeof queue?.onSubmittedWorkDone === 'function' ) {
+
+			await queue.onSubmittedWorkDone();
+
+		} else if ( typeof this.renderer?.getArrayBufferAsync === 'function' ) {
+
+			// Un readback de la sentinelle est une barrière portable et rare.
+			await withReadback( () => this.renderer.getArrayBufferAsync(
+				this._syncSentinel.value, null, 0, 4 ) );
+
+		} else throw new Error( 'Aucune primitive de synchronisation GPU disponible.' );
 
 	}
 
@@ -2319,9 +2369,11 @@ export class AntSimulation {
 		this.u.simTime.value = this._clock;
 		// alarme ressentie par les araignées : instantanée → on la vide avant le
 		// noyau fourmis, qui la re-remplit selon la panique locale de cette frame
-		if ( this.u.spiderCount.value > 0 ) this.renderer.compute( this.kClearSpiderAlarm );
-		this.renderer.compute( this.kAnt[ this.cur ] );
-		this.renderer.compute( this.kGrid[ this.cur ] );
+		const passes = this.u.spiderCount.value > 0
+			? this.kStepWithSpiders[ this.cur ]
+			: this.kStep[ this.cur ];
+		if ( gfx.perfHud ) for ( const pass of passes ) this.renderer.compute( pass );
+		else this.renderer.compute( passes );
 		this.cur ^= 1;
 
 		// RÉGÉNÉRATION des gisements (colonie) : l'économie d'énergie consomme
@@ -2331,9 +2383,10 @@ export class AntSimulation {
 
 			this._regenAccum += dt;
 
-			if ( this._regenAccum > 60 / params.foodRegen ) {
+			const regenInterval = 60 / params.foodRegen;
+			if ( this._regenAccum >= regenInterval ) {
 
-				this._regenAccum = 0;
+				this._regenAccum -= regenInterval;
 				const serial = this._regenSerial ++;
 				const seed = this.u.seed.value | 0;
 				const angle = random01( seed, serial, 0 ) * Math.PI * 2;
@@ -2496,14 +2549,33 @@ export class AntSimulation {
 	// ----------------------------------------------------------------------
 
 	// lecture directe, sans garde de concurrence (banc d'essai)
-	async readStatsDirect() {
+	async _readStatsFresh() {
 
 		const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
-		const data = new Uint32Array( buffer );
-		return {
-			delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ], devoured: data[ 3 ],
-			laid: data[ 4 ], hatched: data[ 5 ], granary: data[ 6 ], queenEnergy: data[ 7 ] / 1000,
-		};
+		return mapStatsData( new Uint32Array( buffer ) );
+
+	}
+
+	// lecture directe, sans garde de concurrence (banc d'essai)
+	async readStatsDirect() {
+
+		return this._readStatsFresh();
+
+	}
+
+	// Barriere autoritaire : attend son tour FIFO et retourne obligatoirement
+	// une valeur GPU fraiche. Contrairement a readStats(), cette lecture ne
+	// saute jamais un echantillon lorsque le verrou est occupe.
+	async readStatsAuthoritative() {
+
+		const epoch = this._statsEpoch;
+		return withReadback( async () => {
+
+			const fresh = await this._readStatsFresh();
+			if ( epoch === this._statsEpoch ) this.statsData = fresh;
+			return this.statsData;
+
+		} );
 
 	}
 
@@ -2513,14 +2585,11 @@ export class AntSimulation {
 		// deux getArrayBufferAsync concurrents se corrompent mutuellement
 		if ( ! tryAcquireReadback() ) return this.statsData;
 
+		const epoch = this._statsEpoch;
 		try {
 
-			const buffer = await this.renderer.getArrayBufferAsync( this.stats.value );
-			const data = new Uint32Array( buffer );
-			this.statsData = {
-				delivered: data[ 0 ], picked: data[ 1 ], eaten: data[ 2 ], devoured: data[ 3 ],
-				laid: data[ 4 ], hatched: data[ 5 ], granary: data[ 6 ], queenEnergy: data[ 7 ] / 1000,
-			};
+			const fresh = await this._readStatsFresh();
+			if ( epoch === this._statsEpoch ) this.statsData = fresh;
 
 		} finally {
 

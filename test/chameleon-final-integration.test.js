@@ -57,11 +57,12 @@ test( 'CHAMELEON-SIM-026 pollinator facade owns lazy chameleon lifecycle and sha
 
 } );
 
-test( 'CHAMELEON-SIM-027 renderer bridge is stable and flushes capture after predator update', async () => {
+test( 'CHAMELEON-SIM-027 deterministic predator steps are separated from renderer uploads', async () => {
 
-	const [ butterflies, pollinators ] = await Promise.all( [
+	const [ butterflies, pollinators, chameleons ] = await Promise.all( [
 		readSource( '../src/butterflies.js' ),
 		readSource( '../src/pollinators.js' ),
+		readSource( '../src/chameleons.js' ),
 	] );
 
 	assert.match(
@@ -84,16 +85,24 @@ test( 'CHAMELEON-SIM-027 renderer bridge is stable and flushes capture after pre
 	assert.match( butterflies, /getPredationContext:\s*\(\)\s*=>/u );
 	assert.match( butterflies, /flushPredationRender/u );
 
-	const updateStart = pollinators.indexOf( '\n\t\tupdate( dt, visible = true ) {' );
-	const updateEnd = pollinators.indexOf( '\n\t\treset() {', updateStart );
-	assert.ok( updateStart >= 0 && updateEnd > updateStart );
-	const updateBody = pollinators.slice( updateStart, updateEnd );
-	const butterflyUpdate = updateBody.indexOf( 'butterflySystem.update' );
-	const chameleonUpdate = updateBody.indexOf( 'chameleonSystem.update' );
-	const renderFlush = updateBody.indexOf( 'flushPredationRender' );
+	const stepStart = pollinators.indexOf( '\n\tfunction stepSimulation( dt ) {' );
+	const renderStart = pollinators.indexOf( '\n\tfunction renderFrame( renderDt = 0, visible = true ) {' );
+	const updateStart = pollinators.indexOf( '\n\tfunction update( dt, visible = true ) {' );
+	assert.ok( stepStart >= 0 && renderStart > stepStart && updateStart > renderStart );
+	const stepBody = pollinators.slice( stepStart, renderStart );
+	const butterflyStep = stepBody.indexOf( 'butterflySystem.stepSimulation' );
+	const chameleonStep = stepBody.indexOf( 'chameleonSystem.stepSimulation' );
+	assert.ok( butterflyStep >= 0, 'butterfly logical step is absent' );
+	assert.ok( chameleonStep > butterflyStep, 'predator must scan post-butterfly logical positions' );
 
-	assert.ok( butterflyUpdate >= 0, 'butterfly simulation update is absent' );
-	assert.ok( chameleonUpdate > butterflyUpdate, 'predator must scan post-butterfly positions' );
-	assert.ok( renderFlush > chameleonUpdate, 'captured position must flush after predator callbacks' );
+	const renderBody = pollinators.slice( renderStart, updateStart );
+	assert.ok( renderBody.indexOf( 'butterflySystem.renderFrame' ) >= 0 );
+	assert.ok( renderBody.indexOf( 'chameleonSystem.renderFrame' ) >= 0 );
+	assert.doesNotMatch( renderBody, /stepSimulation|\.update\(\s*renderDt/u );
+
+	const rendererStart = chameleons.indexOf( '\n\tfunction renderFrame( renderDt = 0, visible = surfaceVisible ) {' );
+	const rendererEnd = chameleons.indexOf( '\n\tfunction update( dt ) {', rendererStart );
+	assert.ok( rendererStart >= 0 && rendererEnd > rendererStart );
+	assert.doesNotMatch( chameleons.slice( rendererStart, rendererEnd ), /setCapturedPosition/u );
 
 } );

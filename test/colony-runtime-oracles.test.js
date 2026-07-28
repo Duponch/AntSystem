@@ -2,6 +2,39 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { undergroundConfinementIssue } from '../src/tests.js';
+import {
+	planHatchActivation,
+	validateHatchActivationResult,
+} from '../src/colony.js';
+
+test( 'COL-HATCH-001 partial async activation keeps the unaccepted hatchlings pending', () => {
+
+	const accepted = validateHatchActivationResult( 7, 3 );
+	assert.equal( accepted, 3 );
+	assert.deepEqual(
+		planHatchActivation( {
+			hatched: 7,
+			activatedHatch: accepted,
+			antCount: 13,
+			maxPopulation: 20,
+		} ),
+		{ activateCount: 4, pendingHatch: 4 },
+	);
+
+} );
+
+test( 'COL-HATCH-002 activation hooks must report an exact bounded integer', () => {
+
+	for ( const invalid of [ undefined, NaN, - 1, 2.5, 5 ] ) {
+
+		assert.throws(
+			() => validateHatchActivationResult( 4, invalid ),
+			RangeError,
+		);
+
+	}
+
+} );
 
 function nodeState( node ) {
 

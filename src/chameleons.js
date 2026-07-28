@@ -279,20 +279,6 @@ export async function createChameleons( {
 				authoredMouth.z - view.mouthZ,
 			).multiplyScalar( correctionWeight );
 			visualTongueTip.add( mouthCorrection );
-			const prey = typeof getButterflyPredationContext === 'function'
-				? getButterflyPredationContext()
-				: null;
-			const index = view.capturedIndex;
-			if ( prey?.setCapturedPosition && prey.x && prey.y && prey.z ) {
-
-				prey.setCapturedPosition(
-					index,
-					prey.x[ index ] + mouthCorrection.x,
-					prey.y[ index ] + mouthCorrection.y,
-					prey.z[ index ] + mouthCorrection.z,
-				);
-
-			}
 
 		}
 		tongueDirection.set(
@@ -360,7 +346,7 @@ export async function createChameleons( {
 
 	}
 
-	function syncRuntimeSettings() {
+	function syncSimulationSettings() {
 
 		simulation.setAttackDistance(
 			setting( settings, 'chameleonAttackDistance', simulation.attackDistance ),
@@ -378,6 +364,11 @@ export async function createChameleons( {
 			0,
 			setting( settings, 'chameleonAttackCooldown', simulation.cooldownDuration ),
 		);
+
+	}
+
+	function syncVisualSettings() {
+
 		const nextCast = !! setting( settings, 'chameleonCastShadow', castShadow );
 		const nextReceive = !! setting( settings, 'chameleonReceiveShadow', receiveShadow );
 		if ( nextCast !== castShadow ) setCastShadow( nextCast );
@@ -386,12 +377,33 @@ export async function createChameleons( {
 
 	}
 
-	function update( dt ) {
+	function stepSimulation( dt ) {
 
-		if ( disposed ) return;
+		if ( ! Number.isFinite( dt ) || dt < 0 )
+			throw new RangeError( 'dt must be a finite non-negative number' );
+		if ( disposed ) return simulation.getView();
 		applyVisualScale();
 		rebuildTrack();
-		syncRuntimeSettings();
+		syncSimulationSettings();
+		const enabled = setting( settings, 'chameleonEnabled', true ) !== false
+			&& !! track;
+		if ( ! enabled ) return simulation.getView();
+		const prey = typeof getButterflyPredationContext === 'function'
+			? getButterflyPredationContext() || EMPTY_PREY
+			: EMPTY_PREY;
+		return simulation.update( dt, prey );
+
+	}
+
+	function renderFrame( renderDt = 0, visible = surfaceVisible ) {
+
+		if ( ! Number.isFinite( renderDt ) || renderDt < 0 )
+			throw new RangeError( 'renderDt must be a finite non-negative number' );
+		if ( disposed ) return simulation.getView();
+		surfaceVisible = !! visible;
+		applyVisualScale();
+		rebuildTrack();
+		syncVisualSettings();
 		const enabled = surfaceVisible
 			&& setting( settings, 'chameleonEnabled', true ) !== false
 			&& !! track;
@@ -399,18 +411,25 @@ export async function createChameleons( {
 		if ( ! enabled ) {
 
 			tongue.visible = false;
-			return;
+			return simulation.getView();
 
 		}
-		const prey = typeof getButterflyPredationContext === 'function'
-			? getButterflyPredationContext() || EMPTY_PREY
-			: EMPTY_PREY;
-		const view = simulation.update( dt, prey );
+		const view = simulation.getView();
 		orientBody( view );
-		updateAnimation( dt, view );
+		updateAnimation( renderDt, view );
 		updateTongue( view );
+		return view;
 
 	}
+
+	function update( dt ) {
+
+		const view = stepSimulation( dt );
+		renderFrame( dt, surfaceVisible );
+		return view;
+
+	}
+
 
 	function reset() {
 
@@ -460,6 +479,8 @@ export async function createChameleons( {
 		tongueTube,
 		tonguePad,
 		update,
+		stepSimulation,
+		renderFrame,
 		reset,
 		dispose,
 		setSurfaceVisible,

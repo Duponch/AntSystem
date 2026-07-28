@@ -53,3 +53,11 @@ Une attente expliquée par l’activation, le repos, un stock vide ou un état t
 Le placement initial est défini par le contrat [`COL-START`](./demarrage-naturel.md#col-start). Les raisons d’un déplacement ou d’un arrêt sont définies par [`OBS`](./intentions-et-arrets.md#obs).
 
 Les preuves runtime T2, T3, T5, T6 et T9 couvrent respectivement la ponte, la croissance, la livraison, la famine et la sélection des proies de surface. Les tests Warden gardent leur propre fenêtre longue pour détecter les anomalies structurelles.
+
+## Modes temporels
+
+Toutes les durées fonctionnelles — déplacement, repos, faim, ponte, développement du couvain, butinage, métamorphose et prédation — consomment le même temps simulé effectif. En mode fluide par défaut, ce temps suit l’image à `×1`, puis est découpé au-dessus de `×1` en un à huit sous-pas bornés à `1/30 s`. Un surplus hors budget n’est pas différé : il est comptabilisé comme non simulé et réduit explicitement la vitesse effective. Les pontes utilisent toujours un ordinal et la graine de partie pour placer les œufs, et les éclosions au-delà du plafond restent en attente.
+
+En mode fluide, les lectures GPU sont opportunistes et coalescées : la colonie réagit au dernier snapshot disponible sans bloquer les images. La publication des œufs, l’initialisation de nouveaux slots et la croissance restent sérialisées ; reset, toggle et mutation du nid forment toujours une transaction atomique.
+
+Le mode strict est l’oracle reproductible. Il utilise des ticks de `1/120 s`, attend des statistiques fraîches aux frontières exactes et conserve toute dette de calcul. À graine et actions identiques, deux exécutions strictes arrêtées au même tick ont le même état ; cette identité bit à bit n’est pas une promesse du mode fluide.

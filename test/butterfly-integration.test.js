@@ -157,7 +157,8 @@ test( 'BUTTERFLY-SIM-013 butterflies are atomically hidden below ground or when 
 
 	assert.ok( masks.length >= 2 );
 	assert.match( source, /if \( ! gfx\.pollinators \|\| ! gfx\.butterflies \) return simulation\.getTelemetry\(\)/u );
-	assert.match( mainSource, /bees\.update\( simDt, ! dived \)/u );
+	assert.match( mainSource, /bees\.stepSimulation\( fixedDt \)/u );
+	assert.match( mainSource, /bees\.renderFrame\( rawDt, ! dived \)/u );
 	assert.match( mainSource, /bees\.setSurfaceVisible\( ! dived \)/u );
 
 } );

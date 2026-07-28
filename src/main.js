@@ -32,6 +32,18 @@ import { createSimulationGuide } from './guide.js';
 import { createUI } from './ui.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
 
+import { SimulationClock } from './simulation-clock.js';
+import {
+	MAX_SIMULATION_STEPS_PER_FRAME,
+	MAX_GPU_STEP_DT,
+	planGpuSimulationFrame,
+	SIMULATION_HZ,
+	authorityDueAt,
+	computeNextAuthorityTick,
+} from './simulation-authority.js';
+
+const FLUID_RAGDOLL_STEP = 1 / 60;
+
 async function main() {
 
 	if ( navigator.gpu === undefined ) {
@@ -184,7 +196,9 @@ async function main() {
 	await sim.setObstacles( props.wallStamps );
 
 	const bees = createPollinators( { scene, props, assets: pollinatorAssets, butterflyVat } );
+	await bees.preload();
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
+	spiders.setExternalAuthorityScheduling( params.timingMode === 'strict' );
 
 	// ragdoll GPU : pool borné, dispatch indirect (voir ragdoll.js)
 	const ragdoll = createRagdoll( { sim, vat: ants.vat, pose: ants.pose, renderer, camera } );
@@ -259,23 +273,104 @@ async function main() {
 
 	}
 
+	function nextAuthorityAfter( tick ) {
+
+		return computeNextAuthorityTick( tick, {
+			spiderCount: params.spiderCount,
+			colony: params.colony,
+		} );
+
+	}
+	const simulationClock = new SimulationClock( {
+		fixedStep: 1 / SIMULATION_HZ,
+		maxStepsPerAdvance: MAX_SIMULATION_STEPS_PER_FRAME,
+	} );
+	let nextAuthorityTick = nextAuthorityAfter( 0n );
+	let authorityPending = null;
+	let authorityFault = null;
+	let authorityEpoch = 0;
+	let latestAuthorityStats = null;
+	let resetPromise = null;
+	let authoritativeMutationTail = Promise.resolve();
+	let relaxedColonyStats = null;
+	let relaxedColonyPromise = null;
+	let activeTimingMode = params.timingMode;
+	let fluidSimulationTime = 0;
+	let fluidRagdollAccum = 0;
+
+	function enqueueAuthoritativeMutation( mutation ) {
+
+		++ authorityEpoch;
+		const predecessor = authoritativeMutationTail.catch( () => {} );
+		const operation = predecessor.then( async () => {
+
+			if ( authorityPending ) await authorityPending.catch( () => {} );
+			if ( relaxedColonyPromise ) await relaxedColonyPromise.catch( () => {} );
+			const changed = await mutation();
+			if ( ! changed ) return false;
+			simulationClock.reset();
+			fluidSimulationTime = 0;
+			fluidRagdollAccum = 0;
+			nextAuthorityTick = nextAuthorityAfter( 0n );
+			authorityFault = null;
+			latestAuthorityStats = null;
+			ants.refreshPose();
+			sim.refreshDisplay();
+			sim.updateFieldNodes();
+			return true;
+
+		} );
+		const guarded = operation.catch( ( error ) => {
+
+			authorityFault = error;
+			params.paused = true;
+			throw error;
+
+		} );
+		const tracked = guarded.finally( () => {
+
+			if ( resetPromise === tracked ) resetPromise = null;
+
+		} );
+		authoritativeMutationTail = tracked.catch( () => {} );
+		resetPromise = tracked;
+		return tracked;
+
+	}
+
+	function resetAuthoritativeSimulation() {
+
+		return enqueueAuthoritativeMutation( async () => {
+
+			await sim.reset();
+			spiders.reset();
+			await bees.reset();
+			await colony.reset();
+			return true;
+
+		} );
+
+	}
+
+	function setColonyEnabledAuthoritatively( enabled ) {
+
+		return enqueueAuthoritativeMutation( async () => {
+
+			const migrated = await sim.setColonyEnabled( enabled );
+			if ( ! migrated ) return false;
+			spiders.reset();
+			await colony.reset();
+			return true;
+
+		} );
+
+	}
 	// --- interface ---
 	const ui = createUI( {
 		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, bees,
 		godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume,
-		onReset: async () => {
-
-			await sim.reset();
-			spiders.reset();   // les prédateurs repartent aussi de zéro
-			await bees.reset();
-			await colony.reset(); // couvain vidé, compteurs de ponte/éclosion resynchronisés
-
-			// réécrit les marqueurs (nid, nourriture semée) dans la texture affichée,
-			// indispensable quand la simulation est en pause
-			sim.refreshDisplay();
-			sim.updateFieldNodes();
-
-		},
+		onReset: resetAuthoritativeSimulation,
+		onSetColonyEnabled: setColonyEnabledAuthoritatively,
 	} );
 
 	// éclosions → activation de nouvelles fourmis : nées au couvain (sous
@@ -283,16 +378,99 @@ async function main() {
 	// les slots AVANT de monter antCount (l'inverse rendrait une frame de
 	// fourmis à l'état périmé).
 	const colonyHooks = {
-		activateAnts( n ) {
+		async activateAnts( n ) {
 
 			const from = params.antCount;
 			const target = Math.min( MAX_ANTS, from + n );
-			if ( target <= from ) return;
+			if ( target <= from ) return 0;
 			sim.spawnHatched( from );
-			ui.setPopulation( target );
+			await ui.setPopulationFromSimulation( target );
+			return target - from;
 
 		},
 	};
+
+	function scheduleRelaxedColonyReconciliation( stats ) {
+
+		if ( ! params.colony ) return;
+		relaxedColonyStats = stats;
+		if ( relaxedColonyPromise ) return;
+		const task = ( async () => {
+
+			while ( relaxedColonyStats ) {
+
+				const latest = relaxedColonyStats;
+				relaxedColonyStats = null;
+				await colony.onStats( latest, colonyHooks );
+
+			}
+
+		} )();
+		const tracked = task.catch( ( error ) => {
+
+			console.error( 'Reconciliation souple de la colonie interrompue.', error );
+
+		} ).finally( () => {
+
+			if ( relaxedColonyPromise === tracked ) relaxedColonyPromise = null;
+			if ( relaxedColonyStats ) scheduleRelaxedColonyReconciliation( relaxedColonyStats );
+
+		} );
+		relaxedColonyPromise = tracked;
+
+	}
+
+	function beginAuthorityReconciliation( boundaryTick ) {
+
+		if ( authorityPending || authorityFault || resetPromise ) return;
+		const due = authorityDueAt( boundaryTick, {
+			spiderCount: params.spiderCount,
+			colony: params.colony,
+		} );
+		const spiderAntDue = due.spiderAnt;
+		const spiderDamageDue = due.spiderDamage;
+		const colonyDue = due.colony;
+		if ( ! spiderAntDue && ! spiderDamageDue && ! colonyDue ) {
+
+			nextAuthorityTick = nextAuthorityAfter( boundaryTick );
+			return;
+
+		}
+		const epoch = authorityEpoch;
+		const transaction = ( async () => {
+
+			await spiders.syncAuthoritative( {
+				ants: spiderAntDue,
+				damage: spiderDamageDue,
+			} );
+			if ( epoch !== authorityEpoch ) return;
+			if ( colonyDue ) {
+
+				const stats = await sim.readStatsAuthoritative();
+				if ( epoch !== authorityEpoch ) return;
+				await colony.reconcileStatsAtTick( stats, boundaryTick, colonyHooks );
+				if ( epoch !== authorityEpoch ) return;
+				latestAuthorityStats = stats;
+
+			}
+			nextAuthorityTick = nextAuthorityAfter( boundaryTick );
+
+		} )().catch( ( error ) => {
+
+			if ( epoch !== authorityEpoch ) return;
+			authorityFault = error;
+			params.paused = true;
+			console.error( 'Barriere autoritaire de simulation interrompue.', error );
+
+		} );
+		const pending = transaction.finally( () => {
+
+			if ( authorityPending === pending ) authorityPending = null;
+
+		} );
+		authorityPending = pending;
+
+	}
 
 	// --- SÉLECTION D'UNE FOURMI AU CLIC (suivi caméra — antfollow.js) ---
 	// Un « clic » = bouton gauche, <6 px de déplacement, <500 ms : on ne vole
@@ -336,19 +514,31 @@ async function main() {
 
 	// --- boucle ---
 	const timer = new THREE.Timer();
-	let frame = 0;
 	let fpsAccum = 0;
 	let fpsCount = 0;
 	let fps = 0;
+	let simulationWallAccum = 0;
+	let simulationEffectiveAccum = 0;
+	let simulationDroppedAccum = 0;
+	let simulationBudgetLimited = false;
+	let overlayAccum = 0;
+	// Décalé de 125 ms pour ne pas mapper les timestamps et les stats ensemble.
+	let timestampAccum = - 0.125;
+	let lastClockSnapshot = {
+		mode: params.timingMode,
+		requestedMultiplier: 0,
+		effectiveMultiplier: 0,
+		backlog: 0,
+		dropped: 0,
+		budgetLimited: false,
+		tick: 0,
+	};
 	let wasDived = false;      // mémoire de la bascule surface/sous-sol
 	let wasScanOn = false;     // mémoire de la bascule du scanner (passe émissive)
 	const perf = { compute: 0, render: 0, computeCalls: 0 };
 
-	// Chronos GPU. Le pool de requêtes de three est BORNÉ (256 paires) : avec
-	// 8-9 passes compute par frame il déborde en une trentaine de frames, et les
-	// mesures perdues le sont silencieusement. On résout donc toutes les 10
-	// frames — et jamais pendant un autre readback (deux mappings concurrents se
-	// corrompent mutuellement, cf. le verrou global de readback.js).
+	// Chronos GPU résolus toutes les 0,5 s, en décalage des stats. Le verrou
+	// global interdit deux mappings concurrents sans bloquer la simulation.
 	async function resolveTimings() {
 
 		if ( renderer.backend.trackTimestamp !== true ) return;
@@ -367,23 +557,144 @@ async function main() {
 	renderer.setAnimationLoop( () => {
 
 		timer.update();
-		const rawDt = Math.min( timer.getDelta(), 1 / 30 );
-		fpsAccum += rawDt;
+		const wallDt = Math.max( 0, timer.getDelta() );
+		const rawDt = Math.min( wallDt, MAX_GPU_STEP_DT );
+		fpsAccum += wallDt;
 		fpsCount ++;
+		overlayAccum += wallDt;
+		timestampAccum += wallDt;
 
 		const painted = sim.drainBrush();
+		const paintFlag = ui.consumePaintFlag();
 		const running = ! params.paused && params.simSpeed > 0;
-		const simDt = running ? rawDt * params.simSpeed : 0;
 
-		if ( running ) {
+		const strictTiming = params.timingMode === 'strict';
 
-			sim.step( simDt );
-			colony.step( simDt );   // couvain (kernel dédié) + semis des pontes
-			sim.updateFieldNodes();
+		if ( params.timingMode !== activeTimingMode ) {
 
-		} else if ( painted || ui.consumePaintFlag() ) {
+			activeTimingMode = params.timingMode;
+			spiders.setExternalAuthorityScheduling( strictTiming );
+			// Une dette du mode strict ne doit jamais ressurgir dans le mode fluide.
+			simulationClock.discardBacklog();
+			nextAuthorityTick = nextAuthorityAfter( simulationClock.tickExact );
+			simulationWallAccum = 0;
+			simulationEffectiveAccum = 0;
+			simulationDroppedAccum = 0;
+			simulationBudgetLimited = false;
+			fluidRagdollAccum = 0;
+			if ( strictTiming ) {
 
-			// peinture pendant la pause : on rafraîchit l'affichage sans simuler
+				// Strict replay always starts from a clean transactional state.
+				if ( ! resetPromise ) void resetAuthoritativeSimulation().catch( ( error ) => {
+
+					console.error( 'Strict timing reset failed.', error );
+
+				} );
+
+			} else {
+
+				fluidSimulationTime = simulationClock.time;
+
+			}
+
+		}
+
+		const requestedSpeed = running && ! resetPromise && ! authorityFault
+			? params.simSpeed
+			: 0;
+		let logicalSteps = 0;
+		let frameEffective = 0;
+		let frameDropped = 0;
+		let frameBudgetLimited = false;
+
+		if ( params.timingMode === 'fluid' ) {
+
+			// Fast path GPU : aucune lecture GPU→CPU ne bloque l'avancement. À ×1,
+			// une seule passe fraîche est calculée par image ; au-delà, le budget
+			// borné évite toute spirale de rattrapage.
+			const fluidBlocked = !! authorityPending || !! authorityFault || !! resetPromise;
+			const fluidPlan = planGpuSimulationFrame( {
+				wallDt,
+				speed: fluidBlocked ? 0 : requestedSpeed,
+				maxSubsteps: params.maxGpuSubsteps,
+				maxStepDt: MAX_GPU_STEP_DT,
+			} );
+
+			for ( let step = 0; step < fluidPlan.stepCount; step ++ ) {
+
+				const dt = fluidPlan.stepDt;
+				sim.step( dt );
+				colony.stepSimulation( dt );
+				spiders.stepSimulation( dt );
+				bees.stepSimulation( dt );
+
+			}
+
+			if ( fluidPlan.consumedDt > 0 ) ants.stepSimulation( fluidPlan.consumedDt, true );
+			logicalSteps = fluidPlan.stepCount;
+			frameEffective = fluidPlan.consumedDt;
+			frameDropped = fluidPlan.droppedDt;
+			frameBudgetLimited = fluidPlan.budgetLimited;
+			fluidSimulationTime += fluidPlan.consumedDt;
+
+		} else {
+
+			// Mode strict : pas fixe 120 Hz et frontières d'autorité exactes. Il est
+			// destiné aux tests/replays, où la reproductibilité prime sur le pacing.
+			let stepBudget = 0;
+			const authorityBlocked = !! authorityPending || !! authorityFault
+				|| !! resetPromise || !! relaxedColonyPromise;
+			if ( ! authorityBlocked ) {
+
+				const candidate = nextAuthorityAfter( simulationClock.tickExact );
+				if ( nextAuthorityTick === null || ( candidate !== null && candidate < nextAuthorityTick ) )
+					nextAuthorityTick = candidate;
+				if ( nextAuthorityTick === null ) {
+
+					stepBudget = MAX_SIMULATION_STEPS_PER_FRAME;
+
+				} else {
+
+					const ticksUntilBoundary = nextAuthorityTick - simulationClock.tickExact;
+					stepBudget = ticksUntilBoundary > 0n
+						? Math.min( MAX_SIMULATION_STEPS_PER_FRAME, Number( ticksUntilBoundary ) )
+						: 0;
+
+				}
+
+			}
+			simulationClock.setMaxStepsPerAdvance( stepBudget );
+			const clockFrame = simulationClock.advance( wallDt, requestedSpeed, ( fixedDt, tick ) => {
+
+				sim.step( fixedDt );
+				colony.stepSimulation( fixedDt );
+				ants.stepSimulation( fixedDt );
+				if ( tick % 2 === 0 ) ragdoll.tick();
+				spiders.stepSimulation( fixedDt );
+				bees.stepSimulation( fixedDt );
+
+			} );
+			logicalSteps = clockFrame.effectiveSteps;
+			frameEffective = clockFrame.effective;
+			frameBudgetLimited = clockFrame.budgetLimited;
+			if (
+				! authorityPending
+				&& ! authorityFault
+				&& ! resetPromise
+				&& ! relaxedColonyPromise
+				&& simulationClock.tickExact === nextAuthorityTick
+			) beginAuthorityReconciliation( nextAuthorityTick );
+
+		}
+
+		simulationWallAccum += wallDt;
+		simulationEffectiveAccum += frameEffective;
+		simulationDroppedAccum += frameDropped;
+		simulationBudgetLimited ||= frameBudgetLimited;
+		if ( logicalSteps > 0 ) sim.updateFieldNodes();
+		if ( ! running && ( painted || paintFlag ) ) {
+
+			// Peinture en pause : rafraîchir l'affichage sans avancer le temps logique.
 			sim.refreshDisplay();
 			sim.updateFieldNodes();
 
@@ -416,19 +727,32 @@ async function main() {
 			colony.piles.renderOrder = scanOn ? 11 : 0;
 
 		}
-		ants.tick( simDt, camera );
-		antfollow.update( rawDt );   // APRÈS ants.tick : lit la pose fraîche de kPose
+		ants.renderFrame( camera );
+		// Le mode fluide calcule la pose une fois, puis le ragdoll lit cette pose fraîche.
+		if ( ! strictTiming && logicalSteps > 0 ) {
+
+			fluidRagdollAccum = Math.min(
+				FLUID_RAGDOLL_STEP,
+				fluidRagdollAccum + frameEffective,
+			);
+			if ( fluidRagdollAccum + 1e-12 >= FLUID_RAGDOLL_STEP ) {
+
+				ragdoll.tick();
+				fluidRagdollAccum = 0;
+
+			}
+
+		}
+		antfollow.update( rawDt );   // APRES ants.renderFrame : lit la pose fraiche de kPose
 		// surbrillance jaune émissive de la fourmi suivie (visible à travers tout)
 		ants.uFollowIdx.value = antfollow.selected;
 		ants.followMesh.visible = antfollow.selected >= 0;
-		// APRÈS ants.tick : le ragdoll lit la pose que kPose vient d'écrire
-		if ( running ) ragdoll.tick();
-		spiders.update( simDt );
+		spiders.renderFrame();
 
 		// Entering the soil hides every surface-only renderable atomically.
 		// Underground fauna and colony meshes remain available.
 		const dived = underground.dive;
-		bees.update( simDt, ! dived );
+		bees.renderFrame( rawDt, ! dived );
 		if ( dived !== wasDived ) {
 
 			wasDived = dived;
@@ -465,28 +789,57 @@ async function main() {
 		if ( gfx.godrays && ! underground.dive ) godrays.render();
 		else renderer.render( scene, camera );
 
-		frame ++;
+		// Diagnostic copies are submitted after the visible image and may safely
+		// observe it with one frame of latency.
+		spiders.serviceDiagnostics();
+		colony.serviceDiagnostics( wallDt );
 
-		// résolution intercalée (jamais la même frame que le readback de stats)
-		if ( renderer.backend.trackTimestamp === true && frame % 30 === 10 ) {
+		if ( renderer.backend.trackTimestamp === true && timestampAccum >= 0.5 ) {
 
+			timestampAccum %= 0.5;
 			if ( tryAcquireReadback() ) resolveTimings().finally( releaseReadback );
 
 		}
 
-		if ( frame % 30 === 0 ) {
+		if ( overlayAccum >= 0.25 ) {
 
-			fps = Math.round( fpsCount / fpsAccum );
+			overlayAccum %= 0.25;
+			fps = fpsAccum > 0 ? Math.round( fpsCount / fpsAccum ) : 0;
+			const fpsSnapshot = fps;
+			const clockSnapshot = {
+				mode: strictTiming ? 'strict' : 'fluid',
+				requestedMultiplier: running ? params.simSpeed : 0,
+				effectiveMultiplier: simulationWallAccum > 0
+					? simulationEffectiveAccum / simulationWallAccum
+					: 0,
+				backlog: strictTiming ? simulationClock.backlog : 0,
+				dropped: strictTiming ? 0 : simulationDroppedAccum,
+				budgetLimited: simulationBudgetLimited,
+				tick: strictTiming
+					? simulationClock.tick
+					: Math.round( fluidSimulationTime * SIMULATION_HZ ),
+			};
+			lastClockSnapshot = clockSnapshot;
 			fpsAccum = 0;
 			fpsCount = 0;
+			simulationWallAccum = 0;
+			simulationEffectiveAccum = 0;
+			simulationDroppedAccum = 0;
+			simulationBudgetLimited = false;
 			perf.computeCalls = renderer.info.compute.frameCalls;
-			sim.readStats().then( async ( stats ) => {
+			const perfSnapshot = { ...perf, clock: clockSnapshot };
+			const snapshotMode = clockSnapshot.mode;
+			const statsEpoch = authorityEpoch;
+			sim.readStats().then( ( stats ) => {
 
-				await resolveTimings();
-				ui.updateOverlay( stats, fps, perf );
-				// la colonie réagit aux MÊMES stats (zéro readback en plus) :
-				// pontes → semis d'œufs, éclosions → nouvelles fourmis
-				colony.onStats( stats, colonyHooks );
+				if ( statsEpoch !== authorityEpoch ) return;
+				if ( snapshotMode === 'fluid' && params.timingMode === 'fluid' ) {
+
+					latestAuthorityStats = stats;
+					scheduleRelaxedColonyReconciliation( stats );
+
+				}
+				ui.updateOverlay( stats, fpsSnapshot, perfSnapshot );
 
 			} );
 
@@ -534,7 +887,14 @@ async function main() {
 	const warden = createWarden( { sim, colony, ants, cones, renderer, nestVolume } );
 
 	// accès console pour le débogage
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, bees, colony, underground, antfollow, guide, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
+	const authority = {
+		get pending() { return !! authorityPending; },
+		get fault() { return authorityFault; },
+		get nextTick() { return nextAuthorityTick; },
+		get latestStats() { return latestAuthorityStats; },
+		get timing() { return lastClockSnapshot; },
+	};
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, bees, colony, underground, antfollow, guide, layout, tests, warden, simulationClock, authority, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

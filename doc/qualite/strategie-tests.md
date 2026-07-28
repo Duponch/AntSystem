@@ -116,3 +116,29 @@ Après un changement intentionnel d’un contrat :
 3. relire tous les guides UI associés ;
 4. lancer `npm run docs:sync` ;
 5. terminer par `npm run check`.
+
+## Temps simulé et multiplicateurs
+
+Les deux profils temporels ont des objectifs et des oracles distincts. Le mode fluide GPU-first, recréé par défaut à chaque session, protège la cadence, la continuité visuelle et des invariants causaux ; le mode strict protège la reproductibilité exacte au tick pour les tests et les replays. Toute campagne de transition vers strict doit commencer par le reset autoritatif transactionnel, jamais par la réutilisation directe d’un état fluide.
+
+### Mode fluide
+
+- `test/hybrid-time-policy.test.js` couvre la pause, l’unique passe par frame à `×1` ou moins, les nombres de sous-pas à `×4`, `×15` et `×22`, le plafond à huit sous-pas pour `×100`, et la borne `1/30 s` de chaque pas.
+- `test/config-timing-session.test.js` prouve qu’une sauvegarde stricte est ignorée, que seul `?timing=strict` force la session et que `maxGpuSubsteps`, contrairement au profil, reste persistant.
+- L’oracle vérifie à `10⁻¹²` près `requestedDt = consumedDt + droppedDt`. Le surplus explicite est autorisé ; une perte cachée, une dette ou un rattrapage ultérieur sont des régressions.
+- Les contrats source `HYBRID-TIME-RUNTIME-*` verrouillent la branche non bloquante, la simulation regroupée des fourmis et l’unique calcul final de pose/LOD par frame.
+- Les campagnes WebGPU à `×1` mesurent une pose fraîche à chaque frame, l’absence de barrière CPU/GPU autoritative et la coalescence des readbacks diagnostiques soumis après le rendu. Ces relevés peuvent avoir une frame de retard ; les campagnes comparent donc les invariants, l’ordre causal et les compteurs agrégés, pas une identité bit à bit entre FPS.
+
+### Mode strict
+
+- `test/simulation-clock.test.js` protège l’accumulation entière à `120 Hz`, la pause, le budget, la dette récupérable et l’absence de dérive sous plusieurs FPS avec jitter.
+- `test/time-scale-ecosystem.test.js` compare aux mêmes ticks les états complets des abeilles, papillons, fleurs et du caméléon à `×1`, `×4`, `×15`, `×22` et `×100`.
+- `test/readback.test.js` protège le verrou FIFO des barrières autoritatives ; le cache opportuniste du mode fluide ne remplace jamais un snapshot strict.
+- `test/simulation-synchronization.test.js` prouve la sentinelle GPU non destructive, la vraie barriere de queue et l'invalidation par epoch des readbacks post-reset.
+- `TIME-SCALE-RUNTIME-003` verrouille le reset transactionnel lors de la transition `fluid → strict` et le rejet des statistiques d'une ancienne generation.
+- `test/spider-time.test.js` sépare les ticks des araignées de leurs uploads de rendu et protège leur PRNG.
+- `test/spider-authority-readback.test.js` prouve qu’une frontière combinée passe par un unique snapshot et exactement un mapping GPU→CPU sous le verrou FIFO.
+- `test/spider-kill-election.test.js` protège l’élection atomique et déterministe de la victime, le sentinel d’intervalle et l’absence de retour au buffer de position non atomique.
+- `TIME-SCALE-RUNTIME-006` dans `test/time-scale-runtime.test.js` verrouille le chemin UI du toggle « Colonie vivante » : file autoritative, invalidation d’epoch, attente de barrière et arrêt des ticks via `resetPromise`.
+
+Les campagnes WebGPU strictes comparent les compteurs de ponte, d’éclosion, de nourriture, les slots actifs et les décisions des prédateurs aux mêmes ticks de frontière. Toute lecture qui participe à cette décision doit alors venir de la barrière exacte, jamais d’un readback diagnostique best-effort.

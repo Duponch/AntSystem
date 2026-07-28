@@ -130,15 +130,12 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 	let simulation = createLifecycleSimulation();
 	let surfaceVisible = true;
 	let predationDirty = false;
-	const predationX = new Float32Array( MAX_BUTTERFLIES );
-	const predationY = new Float32Array( MAX_BUTTERFLIES );
-	const predationZ = new Float32Array( MAX_BUTTERFLIES );
 	const predationContext = {
 		count: simulation.count,
 		capacity: MAX_BUTTERFLIES,
-		x: predationX,
-		y: predationY,
-		z: predationZ,
+		x: null,
+		y: null,
+		z: null,
 		visible: null,
 		captured: null,
 		headingX: null,
@@ -156,9 +153,6 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 			const accepted = simulation.setCapturedPosition( index, x, y, z );
 			if ( accepted ) {
 
-				predationX[ index ] = x;
-				predationY[ index ] = y;
-				predationZ[ index ] = z;
 				predationDirty = true;
 
 			}
@@ -185,6 +179,9 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 		const views = simulation.getViews();
 		predationContext.count = simulation.count;
+		predationContext.x = views.x;
+		predationContext.y = views.y;
+		predationContext.z = views.z;
 		predationContext.visible = views.visible;
 		predationContext.captured = views.captured;
 		predationContext.headingX = views.headingX;
@@ -222,9 +219,6 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 				renderPosition.y += Math.sin( simulation.time * 1.9 + butterfly ) * 0.025;
 
 			}
-			predationX[ butterfly ] = renderPosition.x;
-			predationY[ butterfly ] = renderPosition.y;
-			predationZ[ butterfly ] = renderPosition.z;
 
 			heading.set(
 				views.headingX[ butterfly ],
@@ -260,11 +254,7 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 	}
 
-	function update( dt, visible = true ) {
-
-		surfaceVisible = visible;
-		group.visible = !! gfx.pollinators && !! gfx.butterflies && surfaceVisible;
-		if ( ! gfx.pollinators || ! gfx.butterflies ) return simulation.getTelemetry();
+	function syncSimulationInputs() {
 
 		context.daylight = gfx.beeDaylight;
 		context.weather.temperatureC = gfx.beeTemperature;
@@ -273,11 +263,41 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		context.flowers = getFlowers() || EMPTY_FLOWER_CONTEXT;
 		simulation.flightSpeed = gfx.butterflySpeed;
 		simulation.lifeSpeed = gfx.butterflyLifeSpeed;
-		if ( dt > 0 ) simulation.update( dt, context );
+
+	}
+
+	function stepSimulation( dt ) {
+
+		if ( ! Number.isFinite( dt ) || dt < 0 )
+			throw new RangeError( 'dt must be a finite non-negative number' );
+		if ( ! gfx.pollinators || ! gfx.butterflies || dt === 0 )
+			return simulation.getTelemetry();
+		syncSimulationInputs();
+		simulation.update( dt, context );
+		syncPredationContext();
+		predationDirty = true;
+		return simulation.getTelemetry();
+
+	}
+
+	function renderFrame( visible = true ) {
+
+		surfaceVisible = visible;
+		group.visible = !! gfx.pollinators && !! gfx.butterflies && surfaceVisible;
+		if ( ! gfx.pollinators || ! gfx.butterflies ) return simulation.getTelemetry();
 		writeInstances();
 		return simulation.getTelemetry();
 
 	}
+
+	function update( dt, visible = true ) {
+
+		const telemetry = stepSimulation( dt );
+		renderFrame( visible );
+		return telemetry;
+
+	}
+
 
 	function reset() {
 
@@ -341,6 +361,8 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		group,
 		mesh: renderer.mesh,
 		update,
+		stepSimulation,
+		renderFrame,
 		reset,
 		setCount,
 		setSurfaceVisible,
@@ -349,7 +371,7 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		setReceiveShadow,
 		flushPredationRender,
 		getPredationContext: () =>
-			gfx.pollinators && gfx.butterflies && surfaceVisible ? predationContext : null,
+			gfx.pollinators && gfx.butterflies ? predationContext : null,
 		getSimulation: () => simulation,
 		getTelemetry: () => simulation.getTelemetry(),
 	};

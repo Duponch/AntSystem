@@ -744,9 +744,69 @@ export async function createAnts( sim ) {
 	// ------------------------------------------------------------------
 	const fovTmp = { tan: Math.tan };
 	const renderer = sim.renderer;
-	// tableau STABLE (three suit les passes par identité d'objet) : les quatre
-	// noyaux partent en UN seul command buffer au lieu de trois.
-	const PASSES = [ pose.kPose, kReset, kClassify, kFinalize ];
+	// Tableau stable : classement LOD/frustum encodé une seule fois par rendu.
+	const RENDER_PASSES = [ kReset, kClassify, kFinalize ];
+	// Contrat d'introspection historique ; le scheduler ne l'exécute plus par frame.
+	const PASSES = [ pose.kPose, ... RENDER_PASSES ];
+	let poseReady = false;
+
+	function refreshPose() {
+
+		pose.tick( 0 );
+		renderer.compute( pose.kPose );
+		poseReady = true;
+
+	}
+
+	function stepSimulation( simDt, deferPose = false ) {
+
+		if ( ! Number.isFinite( simDt ) || simDt < 0 )
+			throw new RangeError( 'simDt must be a finite non-negative number' );
+		pose.tick( simDt );
+		phaseAcc = ( phaseAcc + simDt * params.moveSpeed * params.walkAnim * 0.14 ) % 1;
+		uPhase.value = phaseAcc;
+		poseReady = false;
+		if ( ! deferPose ) {
+
+			renderer.compute( pose.kPose );
+			poseReady = true;
+
+		}
+
+	}
+
+	function renderFrame( camera ) {
+
+		camera.updateMatrixWorld();
+		u.view.value.copy( camera.matrixWorldInverse );
+		u.tanY.value = fovTmp.tan( ( camera.fov * Math.PI / 180 ) / 2 );
+		u.tanX.value = u.tanY.value * camera.aspect;
+		u.far.value = camera.far;
+		u.lod0.value = gfx.lodDist0;
+		u.lod1.value = gfx.lodDist1;
+		u.budget0.value = gfx.lodBudget;
+		u.budget1.value = gfx.lodBudget * 4;
+
+		if ( gfx.perfHud ) {
+
+			const passes = poseReady ? RENDER_PASSES : PASSES;
+			for ( const pass of passes ) renderer.compute( pass );
+
+		} else {
+
+			renderer.compute( poseReady ? RENDER_PASSES : PASSES );
+
+		}
+		poseReady = true;
+
+	}
+
+	function tick( simDt, camera ) {
+
+		stepSimulation( simDt, true );
+		renderFrame( camera );
+
+	}
 
 	return {
 		group,
@@ -785,40 +845,11 @@ export async function createAnts( sim ) {
 			for ( const b of bodies ) b.castShadow = on;
 
 		},
-		// chaque frame : horloge de pose + phase historique + classement LOD/frustum
-		// (les dispatches eux-mêmes sont encodés par main.js, en un seul submit)
-		tick( simDt, camera ) {
-
-			pose.tick( simDt );
-
-			phaseAcc = ( phaseAcc + simDt * params.moveSpeed * params.walkAnim * 0.14 ) % 1;
-			uPhase.value = phaseAcc;
-
-			camera.updateMatrixWorld();
-			u.view.value.copy( camera.matrixWorldInverse );
-			u.tanY.value = fovTmp.tan( ( camera.fov * Math.PI / 180 ) / 2 );
-			u.tanX.value = u.tanY.value * camera.aspect;
-			u.far.value = camera.far;
-			u.lod0.value = gfx.lodDist0;
-			u.lod1.value = gfx.lodDist1;
-			u.budget0.value = gfx.lodBudget;
-			u.budget1.value = gfx.lodBudget * 4;
-
-			// ORDRE IMPOSÉ : kPose lit ce que kAnt vient d'écrire, kClassify lit
-			// ce que kPose vient d'écrire. En mode profilage on encode une passe
-			// par command buffer, sinon les chronos GPU se recouvrent et three
-			// leur donne le même identifiant (mesures écrasées).
-			if ( gfx.perfHud ) {
-
-				for ( const p of PASSES ) renderer.compute( p );
-
-			} else {
-
-				renderer.compute( PASSES );
-
-			}
-
-		},
+		stepSimulation,
+		renderFrame,
+		refreshPose,
+		// Façade de compatibilité pour les bancs isolés.
+		tick,
 	};
 
 }

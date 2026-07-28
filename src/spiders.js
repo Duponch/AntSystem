@@ -17,12 +17,13 @@ import * as THREE from 'three/webgpu';
 import {
 	Fn, If, uniform, uniformArray, attribute, vertexIndex, varyingProperty,
 	float, int, uint, vec3, ivec2, mat3, cos, sin, floor, mix, select, textureLoad,
+	instancedArray, instanceIndex, uvec4, floatBitsToUint, atomicLoad,
 } from 'three/tsl';
 
 import { loadVATMulti } from './vat.js';
 import { qrot } from './pose.js';
-import { GRID, WORLD, NEST, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
-import { tryAcquireReadback, releaseReadback } from './readback.js';
+import { GRID, WORLD, NEST, MAX_ANTS, MAX_SPIDERS, params, gfx, gridToWorld, worldToGrid } from './config.js';
+import { acquireReadback, tryAcquireReadback, releaseReadback } from './readback.js';
 
 const BODY_LENGTH = 3.2;               // unités monde
 const CONTACT_ANIM = 2.6;              // corps→proie estimé sous lequel joue l'anim d'attaque (« au contact »)
@@ -39,6 +40,54 @@ const SP_GRAV = 26;                    // gravité ressentie par l'araignée (u/
 const T = GRID / WORLD;
 const SAMPLE = 1024;                   // fourmis échantillonnées pour la détection
 const WINDOW = 64;                     // fenêtre de recherche par araignée
+const SNAPSHOT_SPIDER_ROWS = 2;
+const SNAPSHOT_SPIDER_OFFSET = SAMPLE;
+const SNAPSHOT_SIZE = SAMPLE + MAX_SPIDERS * SNAPSHOT_SPIDER_ROWS;
+const ANT_POLL_INTERVAL = 0.3;
+const DAMAGE_POLL_INTERVAL = 0.2;
+const SPIDER_DEFAULT_SEED = 0x51F15EED;
+
+// PRNG entier, stable entre navigateurs. Chaque araignée possède son propre
+// flux : ajouter/enlever un autre individu ne décale donc pas ses décisions.
+// Le zéro est exclu car xorshift32 y resterait bloqué.
+export function spiderRandomSeed( seed, stream = 0 ) {
+
+	let x = ( ( seed >>> 0 ) ^ Math.imul( ( stream + 1 ) >>> 0, 0x9E3779B9 ) ) >>> 0;
+	x ^= x >>> 16;
+	x = Math.imul( x, 0x7FEB352D ) >>> 0;
+	x ^= x >>> 15;
+	x = Math.imul( x, 0x846CA68B ) >>> 0;
+	x ^= x >>> 16;
+	return x === 0 ? 0x6D2B79F5 : x >>> 0;
+
+}
+
+export function spiderRandomNext( state ) {
+
+	let x = state >>> 0;
+	if ( x === 0 ) x = 0x6D2B79F5;
+	x ^= x << 13;
+	x ^= x >>> 17;
+	x ^= x << 5;
+	return x >>> 0;
+
+}
+
+// Horloge périodique indépendante du découpage de dt. Contrairement à
+// `accum = 0`, le modulo conserve exactement le temps restant après une frame
+// longue. `due` peut dépasser 1 ; le runtime coalesce ensuite les readbacks car
+// une autorité GPU asynchrone ne peut pas reconstruire des snapshots passés.
+export function advanceSpiderPollClock( clock, dt ) {
+
+	if ( ! Number.isFinite( dt ) || dt < 0 ) throw new RangeError( 'dt must be a finite non-negative number' );
+	if ( dt === 0 ) return 0;
+	clock.residual += dt;
+	const due = Math.floor( ( clock.residual + 1e-12 ) / clock.interval );
+	if ( due > 0 ) clock.residual -= due * clock.interval;
+	if ( clock.residual < 0 && clock.residual > - 1e-10 ) clock.residual = 0;
+	return due;
+
+}
 
 // secteur plat (éventail) pour le cône de vision debug : rayon 1, pointant +X
 // (avant local), dans le plan XZ ; orienté ensuite par le cap de l'araignée.
@@ -62,7 +111,7 @@ function buildConeGeo( fovDeg ) {
 
 }
 
-export async function createSpiders( { scene, sim, renderer, props } ) {
+export async function createSpiders( { scene, sim, renderer, props, seed = null } ) {
 
 	const vat = await loadVATMulti( '/Spider.glb', {
 		clipNames: [ 'Idle', 'Walk', 'Attack', 'Death', 'Jump' ],
@@ -215,18 +264,36 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	// État CPU par araignée
 	// ------------------------------------------------------------------
 	const spiders = [];
+	let followsSimulationSeed = seed === null || seed === undefined;
+	let baseSeed = ( followsSimulationSeed ? sim.u?.seed?.value : seed );
+	baseSeed = Number.isFinite( baseSeed ) ? baseSeed >>> 0 : SPIDER_DEFAULT_SEED;
+
+	function randomSpider( sp ) {
+
+		sp.rngState = spiderRandomNext( sp.rngState );
+		return sp.rngState / 0x100000000;
+
+	}
+
+	function randomForSerial( stream, serial ) {
+
+		return spiderRandomNext( spiderRandomSeed( baseSeed ^ ( serial >>> 0 ), stream ) ) / 0x100000000;
+
+	}
 
 	function initSpider( i ) {
 
+		const randomState = { rngState: spiderRandomSeed( baseSeed, i ) };
+		const random = () => randomSpider( randomState );
 		// apparition dans l'ANNEAU de fourragement (là où circulent les fourmis) :
 		// le prédateur est tout de suite dans l'action, quelle que soit la taille
 		// de la colonie — au lieu d'un point fixe lointain, chaotique à trouver
-		const ang = Math.random() * Math.PI * 2;
-		const r = WORLD * ( 0.12 + Math.random() * 0.14 );   // ~ anneau 20–42 u (carte 160)
-		return {
+		const ang = random() * Math.PI * 2;
+		const r = WORLD * ( 0.12 + random() * 0.14 );   // ~ anneau 20–42 u (carte 160)
+		const spider = {
 			id: i,
 			state: 'roam',
-			t: 0.5 + Math.random() * 2,
+			t: 0.5 + random() * 2,
 			pos: new THREE.Vector2( Math.cos( ang ) * r, Math.sin( ang ) * r ),
 			// --- état dynamique : l'araignée a une masse, donc de l'inertie ---
 			vel: new THREE.Vector2(),  // vitesse planaire (u/s)
@@ -236,11 +303,11 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			roll: 0,                   // roulis courant (rad)
 			pitchT: 0,                 // tangage visé
 			rollT: 0,                  // roulis visé
-			gait: Math.random(),       // phase de marche, pilotée par la DISTANCE
-			jumpCd: Math.random() * params.spiderJumpCooldown,
-			heading: Math.random() * Math.PI * 2,
+			gait: random(),       // phase de marche, pilotée par la DISTANCE
+			jumpCd: random() * params.spiderJumpCooldown,
+			heading: random() * Math.PI * 2,
 			target: new THREE.Vector2(),
-			detectTimer: Math.random() * 0.4,
+			detectTimer: random() * 0.4,
 			lostT: 0,
 			biteMode: MODE_NONE,       // 0 rien / 1 morsure / 2 dévoration (diffusé au noyau)
 			feedTimer: 0,              // décompte de dévoration
@@ -249,15 +316,18 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			hp: MAX_HP,
 			lastBites: 0,
 			biteWindow: 0,
-			scaleVar: 0.85 + Math.random() * 0.3,
+			scaleVar: 0.85 + random() * 0.3,
 			clip: CLIP.idle,
-			phase: Math.random(),
+			phase: random(),
 			prevClip: CLIP.idle,
 			prevPhase: 0,
 			blend: 0,
 			blendRate: 4,
 			speedScale: 1,
+			rngState: 0,
 		};
+		spider.rngState = randomState.rngState;
+		return spider;
 
 	}
 
@@ -278,11 +348,19 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	}
 
 	// remet toutes les araignées à leur état/position de départ (appelé au reset)
-	function resetSpiders() {
+	function resetSpiders( nextSeed = followsSimulationSeed ? sim.u?.seed?.value : baseSeed ) {
 
+		if ( Number.isFinite( nextSeed ) ) baseSeed = nextSeed >>> 0;
 		for ( let i = 0; i < MAX_SPIDERS; i ++ ) spiders[ i ] = initSpider( i );
 		spiderCorpses.length = 0;
 		sampleN = 0;
+		antPollClock.residual = 0;
+		damagePollClock.residual = 0;
+		antPollPending = damagePollPending = false;
+		readbackEpoch ++;
+		antPollSerial = 0;
+		pollTelemetry.antDeadlines = pollTelemetry.damageDeadlines = 0;
+		pollTelemetry.antCoalesced = pollTelemetry.damageCoalesced = 0;
 
 	}
 
@@ -415,50 +493,157 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	// et le poller du couvain — deux getArrayBufferAsync concurrents se
 	// corrompent mutuellement, quel que soit le module d'origine
 	let manualPoll = false;   // tests headless : coupe les relevés internes (pilotés à la main)
+	const antPollClock = { interval: ANT_POLL_INTERVAL, residual: 0 };
+	const damagePollClock = { interval: DAMAGE_POLL_INTERVAL, residual: 0 };
+	let antPollPending = false;
+	let damagePollPending = false;
+	let scheduledReadbackInFlight = false;
+	let readbackEpoch = 0;
+	let antPollSerial = 0;
+	const pollTelemetry = {
+		antDeadlines: 0,
+		damageDeadlines: 0,
+		antCoalesced: 0,
+		damageCoalesced: 0,
+	};
+	// One packed GPU snapshot preserves the exact uint/float bit patterns while
+	// reducing a combined authority boundary to a single GPU-to-CPU mapping.
+	const authoritySnapshot = instancedArray( SNAPSHOT_SIZE, 'uvec4' );
+	const authorityReadback = new THREE.ReadbackBuffer( SNAPSHOT_SIZE * 16 );
+	authorityReadback.name = 'spider_authority_snapshot';
+	const uSnapshotAntStart = uniform( 0, 'uint' );
+	const uSnapshotAntCount = uniform( 0, 'uint' );
+	const uSnapshotMask = uniform( 0, 'uint' );
+	const kAuthoritySnapshot = Fn( () => {
+
+		const row = instanceIndex;
+		const output = authoritySnapshot.element( row );
+		If( row.lessThan( uint( SAMPLE ) ), () => {
+
+			If(
+				uSnapshotMask.bitAnd( uint( 1 ) ).notEqual( uint( 0 ) )
+					.and( row.lessThan( uSnapshotAntCount ) ),
+				() => {
+
+					const antIndex = row.add( uSnapshotAntStart );
+					const ant = sim.antData.element( antIndex );
+					output.assign( uvec4(
+						floatBitsToUint( ant.x ),
+						floatBitsToUint( ant.y ),
+						sim.antState.element( antIndex ),
+						uint( 0 ),
+					) );
+
+				},
+			);
+
+		} ).Else( () => {
+
+			If( uSnapshotMask.bitAnd( uint( 2 ) ).notEqual( uint( 0 ) ), () => {
+
+				const packed = row.sub( uint( SNAPSHOT_SPIDER_OFFSET ) );
+				const spiderIndex = packed.shiftRight( uint( 1 ) );
+				const killAnt = atomicLoad( sim.spiderKillAnt.element( spiderIndex ) );
+				If( packed.bitAnd( uint( 1 ) ).equal( uint( 0 ) ), () => {
+
+					output.assign( uvec4(
+						atomicLoad( sim.spiderDamage.element( spiderIndex ) ),
+						atomicLoad( sim.spiderAlarm.element( spiderIndex ) ),
+						atomicLoad( sim.spiderKills.element( spiderIndex ) ),
+						killAnt,
+					) );
+
+				} ).Else( () => {
+
+					If( killAnt.lessThan( uint( MAX_ANTS ) ), () => {
+
+						const killPos = sim.antData.element( killAnt );
+						output.assign( uvec4(
+							floatBitsToUint( killPos.x ), floatBitsToUint( killPos.y ), uint( 0 ), uint( 0 ),
+						) );
+
+					} ).Else( () => {
+
+						output.assign( uvec4( uint( 0 ), uint( 0 ), uint( 0 ), uint( 0 ) ) );
+
+					} );
+
+				} );
+
+			} );
+
+		} );
+
+	} )().compute( SNAPSHOT_SIZE );
+	// Stable compute group: capture the packed snapshot first, then acknowledge
+	// the kill winner on the same GPU command buffer. Later simulation submits
+	// can therefore only write after the clear, without an extra queue submit.
+	const kAuthoritySnapshotWithKillAck = [
+		kAuthoritySnapshot,
+		sim.kClearSpiderKillAnt,
+	];
+
+	function scheduleReadbacks( dt ) {
+
+		const antDue = advanceSpiderPollClock( antPollClock, dt );
+		const damageDue = advanceSpiderPollClock( damagePollClock, dt );
+		if ( antDue > 0 ) {
+
+			pollTelemetry.antDeadlines += antDue;
+			pollTelemetry.antCoalesced += Math.max( 0, antDue - ( antPollPending ? 0 : 1 ) );
+			antPollPending = true;
+
+		}
+		if ( damageDue > 0 ) {
+
+			pollTelemetry.damageDeadlines += damageDue;
+			pollTelemetry.damageCoalesced += Math.max( 0, damageDue - ( damagePollPending ? 0 : 1 ) );
+			damagePollPending = true;
+
+		}
+
+	}
+
+	// Les échéances sont déterministes en temps simulé. Leur lecture reste
+	// nécessairement une observation asynchrone de la dernière autorité GPU :
+	// si plusieurs échéances arrivent avant que le verrou global se libère, elles
+	// sont coalescées en un snapshot récent au lieu de lancer des lectures
+	// concurrentes ou de jeter le résidu de l'horloge.
+	function serviceScheduledReadback() {
+
+		// Strict/external authority owns every boundary. Never drain a relaxed
+		// request left behind by the previous timing mode at an arbitrary tick.
+		if ( manualPoll || externalAuthorityScheduling || scheduledReadbackInFlight ) return;
+		if ( ! antPollPending && ! damagePollPending ) return;
+		const ants = antPollPending;
+		const damage = damagePollPending;
+		const epoch = readbackEpoch;
+		scheduledReadbackInFlight = true;
+		const task = pollSnapshot( { ants, damage }, epoch, false );
+		Promise.resolve( task ).then( ( succeeded ) => {
+
+			if ( succeeded && epoch === readbackEpoch ) {
+
+				if ( ants ) antPollPending = false;
+				if ( damage ) damagePollPending = false;
+
+			}
+
+		} ).finally( () => {
+
+			scheduledReadbackInFlight = false;
+
+		} );
+
+	}
 
 	// --- échantillonnage d'un lot de fourmis (16 Ko ~1×/0,6 s) ---
 	const antSample = new Float32Array( SAMPLE * 2 );  // x, z monde
 	let sampleN = 0;
-	let pollAccum = 0;
 
-	async function pollAnts() {
+	async function pollAnts( epoch = readbackEpoch, waitForLock = false ) {
 
-		if ( ! tryAcquireReadback() ) return;
-
-		try {
-
-			const n = Math.min( SAMPLE, params.antCount );
-			const start = Math.floor( Math.random() * Math.max( 1, params.antCount - n ) );
-			const posBuf = await renderer.getArrayBufferAsync( sim.antData.value, null, start * 16, n * 16 );
-			const stBuf = await renderer.getArrayBufferAsync( sim.antState.value, null, start * 4, n * 4 );
-			const d = new Float32Array( posBuf );
-			const st = new Uint32Array( stBuf );
-
-			// antState est PACKÉ (bits 0-2 état, bit 3 souterraine). On ne garde
-			// QUE les fourmis VIVANTES (état 0/1) et DE SURFACE. Les MORTES gardent
-			// leur position dans antData : cadavre (état 2) ET surtout DÉVORÉE
-			// (état 3, invisible) — sans ce filtre, l'araignée « chasse » une
-			// fourmi fantôme à l'infini. Les SOUTERRAINES sont invisibles et hors
-			// de portée : les cibler ferait mordre l'araignée à travers le sol.
-			let m = 0;
-
-			for ( let i = 0; i < n; i ++ ) {
-
-				if ( ( st[ i ] & 7 ) >= 2 || ( st[ i ] & 8 ) !== 0 ) continue;
-				const w = gridToWorld( d[ i * 4 ], d[ i * 4 + 1 ] );
-				antSample[ m * 2 ] = w.x;
-				antSample[ m * 2 + 1 ] = w.z;
-				m ++;
-
-			}
-
-			sampleN = m;
-
-		} catch { /* device occupé */ } finally {
-
-			releaseReadback();
-
-		}
+		return pollSnapshot( { ants: true, damage: false }, epoch, waitForLock );
 
 	}
 
@@ -533,58 +718,103 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	}
 
 	// --- morsures des soldates : buffer par araignée, relevé ~2×/s ---
-	let dmgAccum = 0;
 	// nombre de fourmis paniquées « autour » qui sature l'alarme (→ fuite)
 	const ALARM_SATURATION = 7;
 
-	async function pollDamage() {
+	async function pollDamage( epoch = readbackEpoch, waitForLock = false ) {
 
-		if ( ! tryAcquireReadback() ) return;
-
-		try {
-
-			// 3 tampons par araignée : morsures des soldates (cumulé), pression
-			// d'alarme instantanée, proies tuées (cumulé → delta = « je viens de tuer »).
-			// Lectures SÉQUENTIELLES : getArrayBufferAsync n'est pas sûr en parallèle
-			// (les mappings concurrents se corrompent → lectures à zéro).
-			const d = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderDamage.value ) );
-			const al = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderAlarm.value ) );
-			const kl = new Uint32Array( await renderer.getArrayBufferAsync( sim.spiderKills.value ) );
-			const kp = new Float32Array( await renderer.getArrayBufferAsync( sim.spiderKillPos.value ) );
-
-			for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
-
-				const sp = spiders[ i ];
-
-				const delta = Math.max( 0, ( d[ i ] || 0 ) - sp.lastBites );
-				sp.lastBites = d[ i ] || 0;
-				sp.biteWindow = delta;
-
-				// alarme instantanée (virgule fixe FIXED=1024) → 0..1 lissé
-				const alarmNorm = Math.min( 1, ( al[ i ] || 0 ) / 1024 / ALARM_SATURATION );
-				sp.alarm += ( alarmNorm - sp.alarm ) * 0.5;
-
-				// proies tuées depuis le dernier relevé → passe à la dévoration, sur le
-				// lieu de la mise à mort (position monde du cadavre)
-				sp.newKills = Math.max( 0, ( kl[ i ] || 0 ) - sp.lastKills );
-				sp.lastKills = kl[ i ] || 0;
-				if ( sp.newKills > 0 ) {
-
-					const cw = gridToWorld( kp[ i * 2 ], kp[ i * 2 + 1 ] );
-					sp.killX = cw.x; sp.killY = cw.z;
-
-				}
-
-			}
-
-		} catch { /* device occupé */ } finally {
-
-			releaseReadback();
-
-		}
+		return pollSnapshot( { ants: false, damage: true }, epoch, waitForLock );
 
 	}
 
+	async function pollSnapshot( { ants = false, damage = false } = {}, epoch = readbackEpoch, waitForLock = true ) {
+
+		if ( ! ants && ! damage ) return false;
+		if ( waitForLock ) await acquireReadback();
+		else if ( ! tryAcquireReadback() ) return false;
+		let succeeded = false;
+
+		try {
+
+			const activeAnts = Math.min( MAX_ANTS, Math.max( 0, params.antCount | 0 ) );
+			const n = ants ? Math.min( SAMPLE, activeAnts ) : 0;
+			const maxStart = Math.max( 0, activeAnts - n );
+			const start = ants && maxStart > 0
+				? Math.floor( randomForSerial( 0xA17, antPollSerial ) * ( maxStart + 1 ) )
+				: 0;
+			uSnapshotAntStart.value = start;
+			uSnapshotAntCount.value = n;
+			uSnapshotMask.value = ( ants ? 1 : 0 ) | ( damage ? 2 : 0 );
+
+			// Capture then acknowledgement are encoded in-order in one compute
+			// command buffer. A later simulation submit can only write after the
+			// clear, and damage polling pays a single compute submission.
+			renderer.compute( damage
+				? kAuthoritySnapshotWithKillAck
+				: kAuthoritySnapshot );
+
+			const mapped = await renderer.getArrayBufferAsync( authoritySnapshot.value, authorityReadback );
+			if ( epoch !== readbackEpoch ) return false;
+			const raw = mapped.buffer;
+			const words = new Uint32Array( raw );
+			const floats = new Float32Array( raw );
+
+			if ( ants ) {
+
+				let m = 0;
+				for ( let i = 0; i < n; i ++ ) {
+
+					const base = i * 4;
+					const state = words[ base + 2 ];
+					if ( ( state & 7 ) >= 2 || ( state & 8 ) !== 0 ) continue;
+					const world = gridToWorld( floats[ base ], floats[ base + 1 ] );
+					antSample[ m * 2 ] = world.x;
+					antSample[ m * 2 + 1 ] = world.z;
+					m ++;
+
+				}
+				sampleN = m;
+				antPollSerial ++;
+
+			}
+
+			if ( damage ) {
+
+				for ( let i = 0; i < MAX_SPIDERS; i ++ ) {
+
+					const sp = spiders[ i ];
+					const base = ( SNAPSHOT_SPIDER_OFFSET + i * SNAPSHOT_SPIDER_ROWS ) * 4;
+					const bites = words[ base ];
+					const alarm = words[ base + 1 ];
+					const kills = words[ base + 2 ];
+					const killAnt = words[ base + 3 ];
+					sp.biteWindow = ( bites - sp.lastBites ) >>> 0;
+					sp.lastBites = bites;
+					const alarmNorm = Math.min( 1, alarm / 1024 / ALARM_SATURATION );
+					sp.alarm += ( alarmNorm - sp.alarm ) * 0.5;
+					sp.newKills = ( kills - sp.lastKills ) >>> 0;
+					sp.lastKills = kills;
+					if ( sp.newKills > 0 && killAnt < MAX_ANTS ) {
+
+						const world = gridToWorld( floats[ base + 4 ], floats[ base + 5 ] );
+						sp.killX = world.x;
+						sp.killY = world.z;
+
+					}
+
+				}
+			}
+			succeeded = true;
+
+		} catch { /* keep the deterministic boundary pending and retry */ } finally {
+
+			if ( authorityReadback._mapped ) authorityReadback.release();
+			releaseReadback();
+
+		}
+		return succeeded;
+
+	}
 	// --- évitements (nid, obstacles, bords) ---
 	const nestWorld = gridToWorld( NEST.x, NEST.y );
 	const nestV = new THREE.Vector2( nestWorld.x, nestWorld.z );
@@ -662,7 +892,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			const push = Math.min( 1, sp.biteWindow / 90 ) * params.spiderKnockback;
 			impulse( sp, - Math.cos( sp.heading ) * push, - Math.sin( sp.heading ) * push );
 			sp.pitchT -= push * 0.05;
-			sp.rollT += ( Math.random() - 0.5 ) * push * 0.08;
+			sp.rollT += ( randomSpider( sp ) - 0.5 ) * push * 0.08;
 			sp.biteWindow = 0;
 
 			if ( sp.hp <= 0 ) {
@@ -674,8 +904,8 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				// Une araignée morte ne reste pas plantée sur ses huit pattes.
 				sp.vh = 2.4;
 				sp.h = 1e-3;
-				sp.rollT = ( Math.random() < 0.5 ? - 1 : 1 ) * ( 1.15 + Math.random() * 0.5 );
-				sp.pitchT = ( Math.random() - 0.5 ) * 0.5;
+				sp.rollT = ( randomSpider( sp ) < 0.5 ? - 1 : 1 ) * ( 1.15 + randomSpider( sp ) * 0.5 );
+				sp.pitchT = ( randomSpider( sp ) - 0.5 ) * 0.5;
 				dropFood( sp.pos.x, sp.pos.y );   // billes de nourriture lâchées sur le corps
 				return;
 
@@ -730,7 +960,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			if ( sp.t <= 0 ) {
 
-				const a = Math.random() * Math.PI * 2;
+				const a = randomSpider( sp ) * Math.PI * 2;
 				sp.pos.set( Math.cos( a ) * ( WORLD / 2 - 10 ), Math.sin( a ) * ( WORLD / 2 - 10 ) );
 				sp.vel.set( 0, 0 );
 				sp.h = 0; sp.vh = 0;
@@ -756,7 +986,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			// ne repart que si le délai est écoulé ET l'alarme retombée
 			if ( sp.t <= 0 && sp.alarm < params.alarmFleeThreshold * 0.5 ) {
 
-				sp.state = 'idle'; sp.t = 3 + Math.random() * 3;
+				sp.state = 'idle'; sp.t = 3 + randomSpider( sp ) * 3;
 
 			}
 
@@ -769,16 +999,16 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			if ( sp.detectTimer <= 0 ) {
 
-				sp.detectTimer = 0.25 + Math.random() * 0.3;
+				sp.detectTimer = 0.25 + randomSpider( sp ) * 0.3;
 				if ( findNearest( sp, detect, null ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); sp.lostT = 0; }
 
 			}
 
-			if ( sp.state === 'idle' && sp.t <= 0 ) { sp.state = 'roam'; sp.t = 6 + Math.random() * 8; }
+			if ( sp.state === 'idle' && sp.t <= 0 ) { sp.state = 'roam'; sp.t = 6 + randomSpider( sp ) * 8; }
 
 		} else if ( sp.state === 'roam' ) {
 
-			sp.heading += ( Math.random() - 0.5 ) * 1.6 * dt;
+			sp.heading += ( randomSpider( sp ) - 0.5 ) * 1.6 * dt;
 			// patrouille l'ANNEAU de fourragement (là où les fourmis circulent),
 			// au lieu de dériver vers le nid où presque personne ne forage :
 			// trop loin → rentre, trop près du nid → ressort
@@ -793,7 +1023,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 
 			if ( sp.detectTimer <= 0 ) {
 
-				sp.detectTimer = 0.25 + Math.random() * 0.3;
+				sp.detectTimer = 0.25 + randomSpider( sp ) * 0.3;
 				if ( findNearest( sp, detect, null ) ) { sp.state = 'hunt'; sp.target.copy( nearest ); sp.lostT = 0; }
 
 			}
@@ -801,7 +1031,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			if ( sp.state === 'roam' && sp.t <= 0 ) {
 
 				sp.state = 'idle';
-				sp.t = 2.5 + Math.random() * 4 * ( 1 - aggro * 0.7 );
+				sp.t = 2.5 + randomSpider( sp ) * 4 * ( 1 - aggro * 0.7 );
 
 			}
 
@@ -939,7 +1169,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 					play( sp, 'attack', 0.12, 1.0 );
 					// RECUL DU COUP : chaque frappe repousse légèrement l'araignée
 					// (elle mord, elle ne pousse pas un mur)
-					if ( Math.random() < dt / Math.max( params.biteInterval, 0.05 ) ) {
+					if ( randomSpider( sp ) < dt / Math.max( params.biteInterval, 0.05 ) ) {
 
 						impulse( sp, - Math.cos( sp.heading ) * 1.4, - Math.sin( sp.heading ) * 1.4 );
 						sp.pitchT -= 0.12;
@@ -978,7 +1208,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 			} else if ( sp.lostT > 1.2 ) {
 
 				// plus aucune proie en vue depuis longtemps → on abandonne
-				sp.state = 'idle'; sp.t = 1 + Math.random() * 2;
+				sp.state = 'idle'; sp.t = 1 + randomSpider( sp ) * 2;
 
 			}
 
@@ -1008,7 +1238,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				play( sp, 'walk', 0.1, params.spiderWalkAnim * 1.4 );
 
 				// cadavre inatteignable (coincé) → on abandonne au bout de quelques s
-				if ( sp.feedApproach > 4 ) { sp.state = 'idle'; sp.t = 1 + Math.random() * 2; }
+				if ( sp.feedApproach > 4 ) { sp.state = 'idle'; sp.t = 1 + randomSpider( sp ) * 2; }
 
 			} else {
 
@@ -1019,7 +1249,7 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 				sp.moved = integrate( sp, dt, 0, 0 );
 				play( sp, 'attack', 0.1, 0.9 );
 				if ( sp.feedTimer < 0.5 ) sp.biteMode = MODE_EAT;
-				if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + Math.random() * 1.2; }
+				if ( sp.feedTimer <= 0 ) { sp.state = 'idle'; sp.t = 0.6 + randomSpider( sp ) * 1.2; }
 
 			}
 
@@ -1092,121 +1322,186 @@ export async function createSpiders( { scene, sim, renderer, props } ) {
 	}
 
 	// ------------------------------------------------------------------
+	// Pas logique et rendu sont volontairement séparés. Le scheduler global peut
+	// exécuter N appels stepSimulation(FIXED_DT), puis un seul renderFrame() :
+	// les trajectoires/PRNG suivent alors les ticks et les uploads restent liés
+	// au nombre d'images, pas au facteur d'accélération.
+	let logicalCount = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
+	let externalAuthorityScheduling = false;
+
+	function stepSimulation( simDt ) {
+
+		if ( ! Number.isFinite( simDt ) || simDt < 0 )
+			throw new RangeError( 'simDt must be a finite non-negative number' );
+		logicalCount = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
+		if ( ! externalAuthorityScheduling && logicalCount > 0 && simDt > 0 && ! manualPoll ) scheduleReadbacks( simDt );
+
+		for ( let i = 0; i < logicalCount; i ++ ) {
+
+			const sp = spiders[ i ];
+			if ( simDt <= 0 ) continue;
+			updateSpider( sp, simDt );
+			// L'onde de choc dure un tick logique et prime sur la morsure.
+			if ( sp.landShock ) { sp.biteMode = MODE_LAND; sp.landShock = 0; }
+			advanceAnim( sp, simDt, sp.moved || 0 );
+
+		}
+
+		buildSectors( logicalCount );
+		sim.u.spiderCount.value = logicalCount;
+		sim.u.fleeRadius.value = params.fleeRadius;
+		return logicalCount;
+
+	}
+
+	async function syncAuthoritative( { ants = false, damage = false } = {} ) {
+
+		if ( logicalCount <= 0 || ( ! ants && ! damage ) ) return false;
+		const epoch = readbackEpoch;
+		if ( ! await pollSnapshot( { ants, damage }, epoch, true ) )
+			throw new Error( 'authoritative spider snapshot readback failed' );
+		if ( ants ) antPollPending = false;
+		if ( damage ) damagePollPending = false;
+		return true;
+
+	}
+	function serviceDiagnostics() {
+
+		serviceScheduledReadback();
+
+	}
+	function renderFrame() {
+
+		let render = 0;
+
+		for ( let i = 0; i < logicalCount; i ++ ) {
+
+			const sp = spiders[ i ];
+			if ( sp.state === 'respawn' ) continue;
+			const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
+			aPose.setXYZW( render, sp.pos.x, PIVOT_H * sp.scaleVar + sp.h, sp.pos.y, sp.scaleVar );
+			writeAttitude( render, theta, sp.pitch, sp.roll );
+			aAnim.setXYZW( render, sp.clip, sp.phase, sp.prevClip, sp.prevPhase );
+			aBlend.setX( render, sp.blend );
+
+			if ( showDebug ) {
+
+				const br = params.bodyRadius * sp.scaleVar;
+				_m4.makeScale( br, br, br ); _m4.setPosition( sp.pos.x, 0.45 + sp.h, sp.pos.y );
+				hitboxMesh.setMatrixAt( render, _m4 );
+				const gr = params.fleeRadius * 0.85 / T;
+				_m4.makeScale( gr, gr * 0.4, gr ); _m4.setPosition( sp.pos.x, 0.2, sp.pos.y );
+				grabMesh.setMatrixAt( render, _m4 );
+				_q.setFromAxisAngle( _yAxis, - sp.heading );
+				_vp.set( sp.pos.x, 0.12, sp.pos.y );
+				_vs.set( params.spiderVision, 1, params.spiderVision );
+				_m4.compose( _vp, _q, _vs );
+				coneMesh.setMatrixAt( render, _m4 );
+
+			}
+			render ++;
+
+		}
+
+		const liveRender = render;
+		for ( let c = 0; c < spiderCorpses.length && render < MAX_SPIDERS; c ++ ) {
+
+			const cp = spiderCorpses[ c ];
+			aPose.setXYZW( render, cp.x, PIVOT_H * cp.scale, cp.y, cp.scale );
+			writeAttitude( render, cp.theta, cp.pitch || 0, cp.roll || 0 );
+			aAnim.setXYZW( render, CLIP.death, 0.999, CLIP.death, 0.999 );
+			aBlend.setX( render, 0 );
+			render ++;
+
+		}
+
+		geo.instanceCount = render;
+		mesh.visible = render > 0;
+		aPose.needsUpdate = true;
+		aQuat.needsUpdate = true;
+		aAnim.needsUpdate = true;
+		aBlend.needsUpdate = true;
+
+		if ( showDebug && params.spiderFOV !== coneFov ) {
+
+			coneFov = params.spiderFOV;
+			coneMesh.geometry.dispose();
+			coneMesh.geometry = buildConeGeo( coneFov );
+
+		}
+		for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) {
+
+			m.count = showDebug ? liveRender : 0;
+			m.visible = showDebug && liveRender > 0;
+			if ( showDebug ) m.instanceMatrix.needsUpdate = true;
+
+		}
+		return render;
+
+	}
+
+	function update( simDt ) {
+
+		stepSimulation( simDt );
+		return renderFrame();
+
+	}
+
 	return {
 		mesh,
 		uSpiderColor,
 		uSpiderAccent,
 		reset: resetSpiders,
-		setDebugVisible( v ) { showDebug = !! v; for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) m.visible = showDebug; },
-		// hooks de débogage (tests headless : pollAnts/pollDamage sont async et ne
-		// résolvent pas dans une boucle synchrone → on les awaite à la main)
-		_dbg: { spiders, spiderCorpses, pollAnts, pollDamage, sampleN: () => sampleN, setManualPoll( v ) { manualPoll = !! v; } },
-		update( simDt ) {
+		stepSimulation,
+		syncAuthoritative,
+		setExternalAuthorityScheduling( enabled ) {
 
-			const count = Math.min( MAX_SPIDERS, params.spiderCount | 0 );
+			const next = !! enabled;
+			if ( next && ! externalAuthorityScheduling ) {
 
-			if ( count > 0 && ! manualPoll ) {
-
-				pollAccum += simDt;
-				if ( pollAccum > 0.3 ) { pollAccum = 0; pollAnts(); }
-
-				// morsures/alarme/mises à mort relevées assez souvent pour que la
-				// bascule vers la dévoration soit réactive après une mise à mort
-				dmgAccum += simDt;
-				if ( dmgAccum > 0.2 ) { dmgAccum = 0; pollDamage(); }
+				// Invalidate any relaxed result already mapping and drop requests
+				// that have not started. Strict mode will acquire a fresh snapshot
+				// at its exact integer boundary.
+				readbackEpoch ++;
+				antPollPending = false;
+				damagePollPending = false;
+				antPollClock.residual = 0;
+				damagePollClock.residual = 0;
 
 			}
+			externalAuthorityScheduling = next;
+		},
+		serviceDiagnostics,
+		renderFrame,
+		update,
+		setSeed( nextSeed, reset = true ) {
 
-			let render = 0;
-
-			for ( let i = 0; i < count; i ++ ) {
-
-				const sp = spiders[ i ];
-
-				if ( simDt > 0 ) {
-
-					updateSpider( sp, simDt );
-					// l'onde de choc ne dure qu'une frame et prime sur la morsure
-					if ( sp.landShock ) { sp.biteMode = MODE_LAND; sp.landShock = 0; }
-					advanceAnim( sp, simDt, sp.moved || 0 );
-
-				}
-
-				if ( sp.state === 'respawn' ) continue;
-
-				const theta = Math.atan2( Math.cos( sp.heading ), Math.sin( sp.heading ) );
-				aPose.setXYZW( render, sp.pos.x, PIVOT_H * sp.scaleVar + sp.h, sp.pos.y, sp.scaleVar );
-				writeAttitude( render, theta, sp.pitch, sp.roll );
-				aAnim.setXYZW( render, sp.clip, sp.phase, sp.prevClip, sp.prevPhase );
-				aBlend.setX( render, sp.blend );
-
-				// helpers debug : hitbox corps (jaune), zone de saisie (orange), cône (bleu)
-				if ( showDebug ) {
-
-					const br = params.bodyRadius * sp.scaleVar;
-					_m4.makeScale( br, br, br ); _m4.setPosition( sp.pos.x, 0.45 + sp.h, sp.pos.y );
-					hitboxMesh.setMatrixAt( render, _m4 );
-
-					const gr = params.fleeRadius * 0.85 / T;   // zone de saisie (monde)
-					_m4.makeScale( gr, gr * 0.4, gr ); _m4.setPosition( sp.pos.x, 0.2, sp.pos.y );
-					grabMesh.setMatrixAt( render, _m4 );
-
-					// cône : orienté par le cap (avant monde = (cos h, sin h)), échelle = portée
-					_q.setFromAxisAngle( _yAxis, - sp.heading );
-					_vp.set( sp.pos.x, 0.12, sp.pos.y );
-					_vs.set( params.spiderVision, 1, params.spiderVision );
-					_m4.compose( _vp, _q, _vs );
-					coneMesh.setMatrixAt( render, _m4 );
-
-				}
-
-				render ++;
-
-			}
-
-			const liveRender = render;   // les helpers ne concernent QUE les vivantes
-
-			// CADAVRES persistants (pose de mort figée) rendus après les vivantes
-			for ( let c = 0; c < spiderCorpses.length && render < MAX_SPIDERS; c ++ ) {
-
-				const cp = spiderCorpses[ c ];
-				aPose.setXYZW( render, cp.x, PIVOT_H * cp.scale, cp.y, cp.scale );
-				// le cadavre garde l'ORIENTATION où la physique l'a laissé
-				writeAttitude( render, cp.theta, cp.pitch || 0, cp.roll || 0 );
-				aAnim.setXYZW( render, CLIP.death, 0.999, CLIP.death, 0.999 );
-				aBlend.setX( render, 0 );
-				render ++;
-
-			}
-
-			geo.instanceCount = render;
-			mesh.visible = render > 0;
-			aPose.needsUpdate = true;
-			aQuat.needsUpdate = true;
-			aAnim.needsUpdate = true;
-			aBlend.needsUpdate = true;
-
-			// le cône dépend du FOV : on reconstruit sa géométrie si le réglage change
-			if ( showDebug && params.spiderFOV !== coneFov ) {
-
-				coneFov = params.spiderFOV;
-				coneMesh.geometry.dispose();
-				coneMesh.geometry = buildConeGeo( coneFov );
-
-			}
-			for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) {
-
-				m.count = showDebug ? liveRender : 0;
-				m.visible = showDebug && liveRender > 0;
-				if ( showDebug ) m.instanceMatrix.needsUpdate = true;
-
-			}
-
-			buildSectors( count );
-			sim.u.spiderCount.value = count;
-			sim.u.fleeRadius.value = params.fleeRadius;
+			if ( ! Number.isFinite( nextSeed ) ) throw new RangeError( 'seed must be finite' );
+			baseSeed = nextSeed >>> 0;
+			followsSimulationSeed = false;
+			if ( reset ) resetSpiders( baseSeed );
+			return baseSeed;
 
 		},
+		setDebugVisible( v ) {
+
+			showDebug = !! v;
+			for ( const m of [ grabMesh, coneMesh, hitboxMesh ] ) m.visible = showDebug;
+
+		},
+		_dbg: {
+			spiders,
+			spiderCorpses,
+			pollAnts,
+			pollDamage,
+			pollTelemetry,
+			pollClocks: { ants: antPollClock, damage: damagePollClock },
+			pollPending: () => ( { ants: antPollPending, damage: damagePollPending } ),
+			sampleN: () => sampleN,
+			seed: () => baseSeed,
+			setManualPoll( v ) { manualPoll = !! v; },
+		},
 	};
+
 
 }
