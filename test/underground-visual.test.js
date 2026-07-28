@@ -43,6 +43,7 @@ describe( 'stylised underground visual contract', () => {
 
 	test( 'UNDERGROUND-VISUAL-002 diving depends only on the physical soil block', () => {
 
+		assert.equal( isInsideUndergroundBlock( { x: 0, y: - Number.EPSILON, z: 0 }, WORLD, THICKNESS ), true );
 		assert.equal( isInsideUndergroundBlock( { x: 0, y: - 0.01, z: 0 }, WORLD, THICKNESS ), true );
 		assert.equal( isInsideUndergroundBlock( { x: 79.99, y: - 27.99, z: - 79.99 }, WORLD, THICKNESS ), true );
 		for ( const point of [

@@ -5,6 +5,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
 import {
 	params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL,
+	MAX_BEES, MAX_FLOWERS,
 	MIN_NEST_DEPTH, MAX_NEST_DEPTH, saveSettings, clearSettings,
 } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
@@ -15,7 +16,7 @@ import { createNestCommitPause } from './nest-mutation-ui.js';
 const TOOL_MODES = { nourriture: 0, mur: 1, gomme: 2 };
 const TOOL_COLORS = { nourriture: 0xffb45c, mur: 0xa8a29a, gomme: 0xff6b6b };
 
-export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume, onReset } ) {
+export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, bees, godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume, onReset } ) {
 
 	// ------------------------------------------------------------------
 	// Panneau de réglages
@@ -653,6 +654,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 		props.setCategoryScale( cat );
 		if ( restamp ) sim.setObstacles( props.computeWallStamps() );
+		if ( cat === 'trees' ) bees.refreshHiveAnchor( true );
 
 	};
 
@@ -662,6 +664,35 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fScales.add( gfx, 'scalePlants', 0.3, 3, 0.05 ).name( 'Plantes' ).onChange( rescale( 'plants', false ) );
 	fScales.add( gfx, 'scaleRocks', 0.3, 3, 0.05 ).name( 'Cailloux' ).onChange( rescale( 'rocks', false ) );
 
+	const fPollinators = fGfx.addFolder( '🌼 Pollinisateurs' );
+	fPollinators.add( gfx, 'pollinators' ).name( 'Activer' );
+	fPollinators.add( gfx, 'beeCount', 0, MAX_BEES, 1 ).name( 'Abeilles visibles' )
+		.onChange( ( value ) => bees.setBeeCount( value ) );
+	fPollinators.add( gfx, 'beeScale', 0.4, 2.5, 0.05 ).name( 'Taille abeilles' );
+	fPollinators.add( gfx, 'beeSpeed', 2, 16, 0.25 ).name( 'Vitesse de vol' );
+	fPollinators.add( gfx, 'beeForageDuration', 0.35, 3, 0.05 ).name( 'Durée des cycles' );
+	fPollinators.add( gfx, 'beeDaylight', 0, 1, 0.02 ).name( 'Lumière du jour' );
+	fPollinators.add( gfx, 'beeTemperature', 5, 38, 0.5 ).name( 'Température (°C)' );
+	fPollinators.add( gfx, 'beeRain', 0, 1, 0.02 ).name( 'Pluie' );
+	fPollinators.add( gfx, 'beeWind', 0, 10, 0.1 ).name( 'Vent (m/s)' );
+	fPollinators.add( gfx, 'flowerCount', 0, MAX_FLOWERS, 1 ).name( 'Fleurs' )
+		.onFinishChange( () => bees.refreshFlowers() );
+	fPollinators.add( gfx, 'flowerSize', 0.4, 3, 0.05 ).name( 'Taille fleurs' )
+		.onFinishChange( () => bees.refreshFlowers() );
+	fPollinators.add( gfx, 'flowerVariation', 0, 1, 0.02 ).name( 'Variation fleurs' )
+		.onFinishChange( () => bees.refreshFlowers() );
+	fPollinators.add( gfx, 'flowerWind', 0, 1.5, 0.02 ).name( 'Mouvement fleurs' );
+	fPollinators.addColor( gfx, 'flowerPetalColor' ).name( 'Teinte pétales' )
+		.onChange( ( value ) => bees.setFlowerPetalColor( value ) );
+	fPollinators.addColor( gfx, 'flowerStemColor' ).name( 'Teinte tiges' )
+		.onChange( ( value ) => bees.setFlowerStemColor( value ) );
+	fPollinators.addColor( gfx, 'beeTint' ).name( 'Teinte abeilles' )
+		.onChange( ( value ) => bees.setBeeTint( value ) );
+	fPollinators.addColor( gfx, 'beeWingColor' ).name( 'Teinte ailes' )
+		.onChange( ( value ) => bees.setBeeWingColor( value ) );
+	fPollinators.add( gfx, 'hiveScale', 0.35, 1.5, 0.05 ).name( 'Taille ruche' )
+		.onChange( ( value ) => bees.setHiveScale( value ) );
+	fPollinators.close();
 	const fGrass = fGfx.addFolder( 'Herbe' );
 	fGrass.add( gfx, 'grass' ).name( 'Herbe' );
 	fGrass.add( gfx, 'grassDensity', 5, grass.MAX_DENSITY, 1 ).name( 'Densité (brins/m²)' );

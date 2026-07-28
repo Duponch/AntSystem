@@ -410,7 +410,12 @@ export async function loadAntVAT( url, { frames = 20, targetLength = 0.95 } = {}
 // table {offset, frames} et peut fondre deux clips (transition douce). Le
 // skinning ne coûte plus rien → des centaines/milliers d'instances animées.
 // ---------------------------------------------------------------------------
-export async function loadVATMulti( url, { clipNames = [], fps = 16, targetLength = 1 } = {} ) {
+export async function loadVATMulti( url, {
+	clipNames = [],
+	fps = 16,
+	targetLength = 1,
+	preserveUv = false,
+} = {} ) {
 
 	const gltf = await new GLTFLoader().loadAsync( url );
 	const root = gltf.scene;
@@ -436,6 +441,19 @@ export async function loadVATMulti( url, { clipNames = [], fps = 16, targetLengt
 	const mixer = new THREE.AnimationMixer( root );
 	const counts = skinned.map( ( m ) => m.geometry.attributes.position.count );
 	const totalVerts = counts.reduce( ( a, b ) => a + b, 0 );
+	let partOffset = 0;
+	const parts = skinned.map( ( mesh, index ) => {
+
+		const part = {
+			name: mesh.name,
+			index,
+			offset: partOffset,
+			count: counts[ index ],
+		};
+		partOffset += part.count;
+		return part;
+
+	} );
 
 	// table des clips (offset de ligne + nb de frames) et total de lignes
 	const clipInfos = [];
@@ -550,14 +568,45 @@ export async function loadVATMulti( url, { clipNames = [], fps = 16, targetLengt
 
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute( 'position', new THREE.BufferAttribute( position, 3 ) );
+	if ( preserveUv ) {
+
+		const uv = new Float32Array( totalVerts * 2 );
+		let uvOffset = 0;
+
+		for ( const mesh of skinned ) {
+
+			const source = mesh.geometry.getAttribute( 'uv' );
+			const count = mesh.geometry.getAttribute( 'position' ).count;
+
+			for ( let i = 0; i < count; i ++ ) {
+
+				uv[ ( uvOffset + i ) * 2 ] = source ? source.getX( i ) : 0.5;
+				uv[ ( uvOffset + i ) * 2 + 1 ] = source ? source.getY( i ) : 0.5;
+
+			}
+
+			uvOffset += count;
+
+		}
+
+		geometry.setAttribute( 'uv', new THREE.BufferAttribute( uv, 2 ) );
+
+	}
 	const vatIndex = new Float32Array( totalVerts );
 	for ( let i = 0; i < totalVerts; i ++ ) vatIndex[ i ] = i;
 	geometry.setAttribute( 'vatIndex', new THREE.BufferAttribute( vatIndex, 1 ) );
 	geometry.setIndex( new THREE.BufferAttribute( index, 1 ) );
 
 	const bounds = { length: Math.max( size.x, size.z ) * scale, height: size.y * scale };
+	const colorMaps = skinned.map( ( mesh ) => {
 
-	return { texture, geometry, totalVerts, counts, bounds, clipInfos };
+		const material = Array.isArray( mesh.material ) ? mesh.material[ 0 ] : mesh.material;
+		return material?.map || null;
+
+	} );
+	const colorMap = colorMaps.find( Boolean ) || null;
+
+	return { texture, geometry, totalVerts, counts, bounds, clipInfos, parts, colorMap, colorMaps };
 
 }
 

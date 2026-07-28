@@ -32,6 +32,8 @@ export const MIN_NEST_DEPTH = 19;
 export const MAX_NEST_DEPTH = 24;
 export const MAX_ANTS = 65536;
 export const MAX_SPIDERS = 1024;       // prédateurs simultanés (VAT instancié)
+export const MAX_BEES = 128;            // représentantes visibles, pool VAT fixe
+export const MAX_FLOWERS = 256;         // champ instancié fixe, un seul draw
 export const MAX_BROOD = 4096;         // œufs/larves/nymphes simultanés (kernel couvain)
 export const FIXED = 1024;             // échelle virgule fixe des dépôts u32
 
@@ -217,8 +219,29 @@ export const gfx = {
 	pupaColor: '#8f6f45',              // nymphes (brun clair)
 	spiderColor: '#39302a',            // corps de l'araignée (VAT sans matériau GLB)
 	spiderAccent: '#17110c',           // pattes / détail
+	beeTint: '#ffffff',                // conserve l'atlas, permet une légère direction artistique
+	beeWingColor: '#dceeff',
+	flowerPetalColor: '#fff4c2',
+	flowerStemColor: '#5f8d35',
 	entranceColor: '#6a472f',          // paroi de la bouche souterraine
 	foodColor: '#ff9d3a',
+
+	// Pollinisateurs de surface : capacités fixes, simulation indépendante des
+	// fourmis. Les nombres changent seulement les instanceCount, jamais les pools.
+	pollinators: true,
+	beeCount: 48,
+	beeScale: 1,
+	beeSpeed: 8,
+	beeForageDuration: 1,
+	beeDaylight: 1,
+	beeTemperature: 22,
+	beeRain: 0,
+	beeWind: 1,
+	flowerCount: 128,
+	flowerSize: 1.45,
+	flowerVariation: 0.35,
+	flowerWind: 0.32,
+	hiveScale: 0.72,
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
 	foodBallSpacing: 4,                // texels entre billes
@@ -376,6 +399,19 @@ for ( const prefix of [ 'Rock', 'Bone', 'FishBone' ] ) {
 
 }
 gfx.undergroundArtifactExposure = clampSetting( gfx.undergroundArtifactExposure, 0, 1.2 );
+gfx.beeCount = Math.round( clampSetting( gfx.beeCount, 0, MAX_BEES ) );
+gfx.beeScale = clampSetting( gfx.beeScale, 0.25, 3 );
+gfx.beeSpeed = clampSetting( gfx.beeSpeed, 1, 20 );
+gfx.beeForageDuration = clampSetting( gfx.beeForageDuration, 0.25, 4 );
+gfx.beeDaylight = clampSetting( gfx.beeDaylight, 0, 1 );
+gfx.beeTemperature = clampSetting( gfx.beeTemperature, - 5, 45 );
+gfx.beeRain = clampSetting( gfx.beeRain, 0, 1 );
+gfx.beeWind = clampSetting( gfx.beeWind, 0, 12 );
+gfx.flowerCount = Math.round( clampSetting( gfx.flowerCount, 0, MAX_FLOWERS ) );
+gfx.flowerSize = clampSetting( gfx.flowerSize, 0.2, 4 );
+gfx.flowerVariation = clampSetting( gfx.flowerVariation, 0, 1 );
+gfx.flowerWind = clampSetting( gfx.flowerWind, 0, 2 );
+gfx.hiveScale = clampSetting( gfx.hiveScale, 0.25, 2 );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau

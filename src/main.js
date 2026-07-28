@@ -24,6 +24,8 @@ import { createColonyTests } from './tests.js';
 import { createWarden } from './warden.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
+import { loadPollinatorAssets } from './pollinator-assets.js';
+import { createPollinators } from './pollinators.js';
 import { createRagdoll } from './ragdoll.js';
 import { createAntFollow } from './antfollow.js';
 import { createSimulationGuide } from './guide.js';
@@ -165,10 +167,11 @@ async function main() {
 	} catch { /* document illisible : on repart du procédural */ }
 
 	// sol/fourmilière + décor + fourmis en parallèle (chargements de fichiers)
-	const [ env, props, ants ] = await Promise.all( [
+	const [ env, props, ants, pollinatorAssets ] = await Promise.all( [
 		createEnvironment( scene, sim ),
 		createProps( scene, decorDoc ),
 		createAnts( sim ),
+		gfx.pollinators ? loadPollinatorAssets() : Promise.resolve( null ),
 	] );
 	const grass = createGrass( scene, sim );
 	const foodballs = createFoodBalls( scene, sim );
@@ -179,6 +182,7 @@ async function main() {
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
+	const bees = createPollinators( { scene, props, assets: pollinatorAssets } );
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
 
 	// ragdoll GPU : pool borné, dispatch indirect (voir ragdoll.js)
@@ -256,12 +260,13 @@ async function main() {
 
 	// --- interface ---
 	const ui = createUI( {
-		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor,
+		scene, sim, ants, env, sky, grass, props, foodballs, cones, editor, bees,
 		godrays, cinematic, bench, music, spiders, colony, controls, camera, renderer, nestVolume,
 		onReset: async () => {
 
 			await sim.reset();
 			spiders.reset();   // les prédateurs repartent aussi de zéro
+			await bees.reset();
 			await colony.reset(); // couvain vidé, compteurs de ponte/éclosion resynchronisés
 
 			// réécrit les marqueurs (nid, nourriture semée) dans la texture affichée,
@@ -422,6 +427,7 @@ async function main() {
 		// Entering the soil hides every surface-only renderable atomically.
 		// Underground fauna and colony meshes remain available.
 		const dived = underground.dive;
+		bees.update( simDt, ! dived );
 		if ( dived !== wasDived ) {
 
 			wasDived = dived;
@@ -438,6 +444,7 @@ async function main() {
 			env.entrance.visible = ! dived;
 			colony.setVisible( params.colony && dived );
 			ants.queen.visible = params.colony && dived;
+			bees.setSurfaceVisible( ! dived );
 
 		}
 		// Surface-only debug geometry can be toggled from the UI at any time.
@@ -526,7 +533,7 @@ async function main() {
 	const warden = createWarden( { sim, colony, ants, cones, renderer, nestVolume } );
 
 	// accès console pour le débogage
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, colony, underground, antfollow, guide, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, bees, colony, underground, antfollow, guide, layout, tests, warden, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

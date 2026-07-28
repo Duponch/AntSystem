@@ -83,7 +83,6 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 	const uSoilPatchSize = uniform( gfx.undergroundPatchSize );
 	const uSoilBlend = uniform( gfx.undergroundBlend );
 	const uSoilGrain = uniform( gfx.undergroundGrain );
-	const uSurfaceCap = uniform( - 0.004 );
 
 	// --- scanner : activation binaire + impulsion (voir en-tête) ---
 	const uScan = uniform( gfx.nestScan );         // intensité maître (UI)
@@ -146,7 +145,7 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 
 		const excavation = max(
 			length( p.sub( cameraPosition ) ).sub( radius ),
-			p.y.sub( uSurfaceCap ),
+			p.y.sub( uSurfaceY ),
 		);
 		return min( sampleSDF( p ), excavation );
 
@@ -644,14 +643,20 @@ export async function createUnderground( { scene, layout, camera, volume } ) {
 			.mul( mix( float( 1 ), float( 1.55 ), ghost ) );
 
 		// lueur chaude au fond des galeries : elle vient de l'interieur du nid,
-		// signale les cavites lointaines au lieu de les noyer dans le noir
+		// signale les cavites lointaines au lieu de les noyer dans le noir.
+		// Le plan artificiel qui ferme l'excavation à y=0 ne doit jamais recevoir
+		// cette lueur : vu en rasance, il formerait une bande orange rectiligne.
+		const surfaceCapFade = smoothstep( 0.03, 0.20, uSurfaceY.sub( p.y ) );
 		const warm = color( 0xffa055 ).mul( float( 1 ).sub( cave ) ).mul( 0.26 ).mul( occ )
 			.mul( wallness )
-			.add( color( 0xffb267 ).mul( ghost ).mul( 0.16 ) );
+			.add( color( 0xffb267 ).mul( ghost ).mul( 0.16 ) )
+			.mul( surfaceCapFade );
 
 		// LISERE de bouche de galerie : un filet clair la ou la paroi rencontre la
 		// tranche. L'oeil accroche le dessin des cavites.
-		const rim = smoothstep( 0.30, 0.80, wallness ).mul( smoothstep( 1.1, 0.05, r.w ) );
+		const rim = smoothstep( 0.30, 0.80, wallness )
+			.mul( smoothstep( 1.1, 0.05, r.w ) )
+			.mul( surfaceCapFade );
 		const edge = color( 0xf0cb96 ).mul( rim ).mul( 0.08 );
 
 		const cavityFill = base.mul( wallness ).mul( 0.16 );

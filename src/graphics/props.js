@@ -154,6 +154,7 @@ export async function createProps( scene, savedDoc = null ) {
 	const registry = [];   // { mesh, placements, category, model, fit }
 	const sizes = new Map();
 	let edited = false;
+	let revision = 0;
 
 	const CATEGORY_KEY = {
 		trees: 'scaleTrees', obstacles: 'scaleObstacles',
@@ -212,6 +213,7 @@ export async function createProps( scene, savedDoc = null ) {
 			if ( entry.category === category ) writeMatrices( entry );
 
 		}
+		revision ++;
 
 	}
 
@@ -245,6 +247,7 @@ export async function createProps( scene, savedDoc = null ) {
 		}
 
 		edited = true;
+		revision ++;
 		return { entry, index: entry.placements.length - 1 };
 
 	}
@@ -254,6 +257,7 @@ export async function createProps( scene, savedDoc = null ) {
 		Object.assign( entry.placements[ index ], patch );
 		writeMatrices( entry );
 		edited = true;
+		revision ++;
 
 	}
 
@@ -262,6 +266,7 @@ export async function createProps( scene, savedDoc = null ) {
 		entry.placements.splice( index, 1 );
 		writeMatrices( entry );
 		edited = true;
+		revision ++;
 
 	}
 
@@ -276,6 +281,7 @@ export async function createProps( scene, savedDoc = null ) {
 				placements: e.placements.map( ( p ) => ( {
 					x: + p.x.toFixed( 2 ), z: + p.z.toFixed( 2 ),
 					yaw: + ( p.yaw || 0 ).toFixed( 3 ), scale: + p.scale.toFixed( 2 ),
+					...( p.tag ? { tag: p.tag } : {} ),
 				} ) ),
 			} ) );
 
@@ -372,7 +378,7 @@ export async function createProps( scene, savedDoc = null ) {
 	const innerTrees = scatter( Math.round( 6 * S ), half * 0.52, half * 0.70, 3 )
 		.map( ( p ) => ( { ...p, scale: 13 + rand() * 8 } ) );
 	const heroTrees = [
-		{ x: - half * 0.72, z: - half * 0.66, yaw: 0.8, scale: 30 },
+		{ x: - half * 0.72, z: - half * 0.66, yaw: 0.8, scale: 30, tag: 'hive-host' },
 		{ x: half * 0.76, z: half * 0.60, yaw: 2.4, scale: 28 },
 	];
 
@@ -518,6 +524,7 @@ export async function createProps( scene, savedDoc = null ) {
 		removePlacement,
 		exportDoc,
 		isEdited: () => edited,
+		getRevision: () => revision,
 	};
 
 }

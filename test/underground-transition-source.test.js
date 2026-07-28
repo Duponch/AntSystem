@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { buildOpenTopBoxGeometry } from '../src/navigation/entrance-geometry.js';
 
 const readSource = ( name ) => readFileSync(
 	new URL( '../src/' + name, import.meta.url ), 'utf8',
@@ -135,6 +136,8 @@ test( 'UNDERGROUND-TRANSITION-006 persisted numeric controls migrate into safe b
 test( 'UNDERGROUND-RENDER-001 excavation unions with the nest and owns its depth', () => {
 
 	assert.match( undergroundSource, /return min\( sampleSDF\( p \), excavation \);/ );
+	assert.match( undergroundSource, /p\.y\.sub\( uSurfaceY \)/ );
+	assert.doesNotMatch( undergroundSource, /uSurfaceCap/ );
 	assert.match( undergroundSource, /material\.depthNode = Fn/ );
 	assert.match( undergroundSource, /material\.fog = false;/ );
 	assert.match( undergroundSource, /for \( let refinement = 0; refinement < 3; refinement \+\+ \)/ );
@@ -187,5 +190,47 @@ test( 'UNDERGROUND-RENDER-005 GLB geometries load once outside the update loop',
 	assert.match( assetSource, /geometry\.scale\( 1 \/ maxDimension/ );
 	const updateSource = undergroundSource.slice( undergroundSource.indexOf( 'function update( dt )' ) );
 	assert.doesNotMatch( updateSource, /loadAsync|GLTFLoader|new THREE\.BufferGeometry/ );
+
+} );
+
+test( 'UNDERGROUND-RENDER-006 the surface cap cannot receive cave glow', () => {
+
+	assert.match( undergroundSource,
+		/const surfaceCapFade = smoothstep\( 0\.03, 0\.20, uSurfaceY\.sub\( p\.y \) \);/ );
+	assert.match( undergroundSource,
+		/const warm =[\s\S]*?\.mul\( surfaceCapFade \);/ );
+	assert.match( undergroundSource,
+		/const rim =[\s\S]*?\.mul\( surfaceCapFade \);/ );
+
+} );
+
+test( 'UNDERGROUND-TRANSITION-007 the lateral soil block meets y=0 exactly', () => {
+
+	assert.match( environmentSource, /soil\.position\.y = - gfx\.groundThickness \/ 2;/ );
+	assert.match( environmentSource, /const safeThickness = Math\.max\( 0\.05, t \);/ );
+	assert.match( environmentSource, /soil\.scale\.y = safeThickness;/ );
+	assert.match( environmentSource, /soil\.position\.y = - safeThickness \/ 2;/ );
+	assert.doesNotMatch( environmentSource, /soil\.position\.y\s*=\s*-[^;\n]+-\s*0\.01/ );
+
+	const geometry = buildOpenTopBoxGeometry( 160, 1, 160 );
+	const positions = geometry.getAttribute( 'position' );
+	for ( const requested of [ 0.01, 0.2, 3, 28, 60 ] ) {
+
+		const thickness = Math.max( 0.05, requested );
+		const offsetY = - thickness / 2;
+		let minY = Infinity, maxY = - Infinity;
+		for ( let index = 0; index < positions.count; index ++ ) {
+
+			const y = positions.getY( index ) * thickness + offsetY;
+			minY = Math.min( minY, y );
+			maxY = Math.max( maxY, y );
+
+		}
+		assert.ok( Math.abs( maxY ) < 1e-9, `top seam drifted at thickness ${ requested }` );
+		assert.ok( Math.abs( minY + thickness ) < 1e-9,
+			`bottom seam drifted at thickness ${ requested }` );
+
+	}
+	geometry.dispose();
 
 } );

@@ -125,14 +125,15 @@ export async function createEnvironment( scene, sim ) {
 
 	const soil = new THREE.Mesh( buildOpenTopBoxGeometry( WORLD, 1, WORLD ), soilMat );
 	soil.scale.y = gfx.groundThickness;
-	soil.position.y = - gfx.groundThickness / 2 - 0.01;
+	soil.position.y = - gfx.groundThickness / 2;
 	soil.receiveShadow = true;
 	scene.add( soil );
 
 	function setThickness( t ) {
 
-		soil.scale.y = Math.max( 0.05, t );
-		soil.position.y = - t / 2 - 0.01;
+		const safeThickness = Math.max( 0.05, t );
+		soil.scale.y = safeThickness;
+		soil.position.y = - safeThickness / 2;
 
 	}
 

@@ -24,7 +24,7 @@ L’excavation de caméra est un second champ, éphémère et purement visuel. S
 dRendu(p) = min(dNid(p), dExcavationCamera(p))
 ```
 
-Cette union ouvre une fenêtre autour de la caméra et la raccorde naturellement aux cavités réelles. L’excavation est intersectée avec le demi-espace souterrain `y ≤ -0,004` afin que son relief ne perce jamais la surface. Elle n’est jamais écrite dans la texture du nid, renvoyée à la simulation ou consultée par une fourmi. Déplacer la caméra déplace donc la fenêtre sans creuser, sans persistance et sans invalider les tables de navigation.
+Cette union ouvre une fenêtre autour de la caméra et la raccorde naturellement aux cavités réelles. L’excavation est intersectée avec le demi-espace souterrain `y ≤ 0`, le même plan exact que le sol, la bouche, le socle latéral et le seuil de plongée. Son relief ne perce donc jamais la surface et aucun interstice n’existe entre les deux vues. Une courte atténuation en profondeur empêche ce cap purement visuel de recevoir la lueur orange réservée aux galeries. L’excavation n’est jamais écrite dans la texture du nid, renvoyée à la simulation ou consultée par une fourmi. Déplacer la caméra déplace donc la fenêtre sans creuser, sans persistance et sans invalider les tables de navigation.
 
 Le scanner demeure indépendant de cette union : il échantillonne le canal propre du volume physique. Il peut ainsi afficher le réseau réel sans dessiner la bulle de caméra comme une fausse chambre.
 
