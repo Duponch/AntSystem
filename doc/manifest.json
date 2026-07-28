@@ -3,7 +3,7 @@
   "algorithm": "sha256",
   "generator": {
     "path": "scripts/docs-sync.mjs",
-    "hash": "sha256:74884612a7132bc7cdd17508293f244ef8d2cfac0dad7cb9cfdecca98db70176"
+    "hash": "sha256:c80940d2f71e1bade7690e05ea5441552cdee1fd77a5ff5a91de68f42c7b77eb"
   },
   "contracts": {
     "COL-ECO": {
@@ -256,6 +256,43 @@
         "POLLINATOR-009"
       ]
     },
+    "BUTTERFLY-SIM": {
+      "document": "doc/technique/papillons.md",
+      "guides": [
+        "doc/guide/papillons.md"
+      ],
+      "sources": [
+        "src/butterfly-simulation.js",
+        "src/butterflies.js",
+        "src/config.js",
+        "src/main.js",
+        "src/pollinator-assets.js",
+        "src/pollinators.js",
+        "src/ui.js",
+        "src/vat.js"
+      ],
+      "tests": [
+        "test/butterfly-simulation.test.js",
+        "test/butterfly-integration.test.js"
+      ],
+      "runtimeTests": [],
+      "evidence": [
+        "BUTTERFLY-SIM-001",
+        "BUTTERFLY-SIM-002",
+        "BUTTERFLY-SIM-003",
+        "BUTTERFLY-SIM-004",
+        "BUTTERFLY-SIM-005",
+        "BUTTERFLY-SIM-006",
+        "BUTTERFLY-SIM-007",
+        "BUTTERFLY-SIM-008",
+        "BUTTERFLY-SIM-009",
+        "BUTTERFLY-SIM-010",
+        "BUTTERFLY-SIM-011",
+        "BUTTERFLY-SIM-012",
+        "BUTTERFLY-SIM-013",
+        "BUTTERFLY-SIM-014"
+      ]
+    },
     "UNDERGROUND-VISUAL": {
       "document": "doc/technique/rendu-souterrain-stylise.md",
       "guides": [
@@ -324,15 +361,17 @@
       "doc/guide/demarrage-naturel.md": "sha256:8b5365f9a69fbe47daaac12b1b252fe97b890862e5a6d0d1bd39ce43f3be2fe6",
       "doc/guide/inspecteur.md": "sha256:73eac7ead532ed5584f4c780865abc7d3c93878f709a540acc0195858e2783f6",
       "doc/guide/navigation-3d.md": "sha256:9e7a57574a3ddd3df5f69ae66fb1d726ad0cdff38eba4ac6bb342558b713ae27",
-      "doc/guide/pollinisateurs.md": "sha256:6ce36a592ef1f8b46be1659b2bf6b63365181f4ae71c1157e80ba1ae9b93efc3",
+      "doc/guide/papillons.md": "sha256:311a090afa04119eb4a911a0559d4aa0baa4d579d3a42c287f4b7052cb209f7f",
+      "doc/guide/pollinisateurs.md": "sha256:d914067cf3dbe2bf86bca02ddd66b394f0e2b7f7e2c0af9c935cfcaf0d355b08",
       "doc/guide/vue-souterraine.md": "sha256:321f4b46c791f215d76ca76ce4df0322ea875402e7f5b085a415bc965393886b",
-      "doc/index.md": "sha256:c12cb3cd4903bdec399681afc56c50299207e3761cd435e70396cfa27fdcf0c4",
-      "doc/qualite/matrice-contrats.md": "sha256:3518cf68f765c0464074ceb500d4de39e07a8d1c0e127a684a6447d15ddb4fbc",
-      "doc/qualite/strategie-tests.md": "sha256:3ca9cc160855eac02fbec1cd003728d8dc1ddff77f6843eb0f0cfaa4d852cc0d",
+      "doc/index.md": "sha256:c224836a44faa95a3b33b4857f943c94af4b5b43dfedffee4866d55514ab8404",
+      "doc/qualite/matrice-contrats.md": "sha256:2ae329217e16819c67129684c8f6bcb5a93b4aeb88014b51b3c524f9477decd9",
+      "doc/qualite/strategie-tests.md": "sha256:b3f70528ff2e5125889d4c271cddc099037e3d0943aea894b5a7396fb14006d5",
       "doc/technique/architecture.md": "sha256:322ca2b5766e3ae9a8fa506eb9c499cf33479372ff1049bb4785a65bf0eba4a5",
       "doc/technique/navigation-contact-3d.md": "sha256:c13114d8010c771c256ba9d1fc3569a3c9783b058c5d52b4b6de96092e9c0796",
+      "doc/technique/papillons.md": "sha256:27288d2813ce0fa4c0e75fa0608655133ca08b7c809ce160dbe11149d747ecc4",
       "doc/technique/performance.md": "sha256:b85d78dba015ce6b0ca6ff5c36391037990166f6a90a4a370551cffe3bbeb3cc",
-      "doc/technique/pollinisateurs.md": "sha256:247f4eaec5322c7f91ad5339c79cdd0bf80cc58c6abf5bb5abe5fffc31c35a53",
+      "doc/technique/pollinisateurs.md": "sha256:a917792cb3b1cf9e76ea105a9091ab6100e6af97ab1ee7a0866d35ef84f00e4f",
       "doc/technique/rendu-souterrain-stylise.md": "sha256:87a3f7ae24274170b899698420c8b5c26634a3a37376a28b6f57dce00c4e0cfe"
     },
     "watched": {
@@ -341,16 +380,18 @@
       "src/ants.js": "sha256:0f74f0ec7c4a63355e9fb196de9baa79e8ed05bff34b5025d3df5a01dbe19a55",
       "src/bee-simulation.js": "sha256:a6c1824f2728c9e649ef65911e00a43fc2cf108e37ad2919277a56c786334189",
       "src/bees.js": "sha256:9e71070c2e3a4e2b2b7fa921f672f70e5c9bd51f316abaf667b35d8a65789a4b",
+      "src/butterflies.js": "sha256:76822cb5242725a5120ed34d351ae7a8628adb79ebd0b09801599929c0ecb591",
+      "src/butterfly-simulation.js": "sha256:3b78ef2c0a2f25933221113b246de1477d6a7c932120746b9614d52959df2798",
       "src/colony-layout.js": "sha256:021624af7c1430e126d549e65ca5b901834926a96df1df24d57a9fcf864295ee",
       "src/colony-startup.js": "sha256:aefad301a35fc341b6464e67bc4996da3818617dd30b22db1f4adf94e2c8ddf0",
       "src/colony.js": "sha256:0aaaacbf00a03c48061ba4701acde55e2ae1b439ee39ae99c30088028de7e812",
-      "src/config.js": "sha256:2338865b50c1261114e64d4727e2b54e198bbf04c36080bacf8a064c4ae85c7e",
+      "src/config.js": "sha256:5b0deb1797447163a0cd9f6716b1c1b5866b667049585a996f78859817d0929b",
       "src/environment.js": "sha256:23a855762be3ba770c42791d883c25ae80f2d26e82b41f48021ac804bac11825",
       "src/graphics/grass.js": "sha256:ee93d0570e8aceb71b9d116513f8065fc59d78f3ba0f1858ab14416c3f27d28d",
       "src/graphics/props.js": "sha256:ced422dc47802fd0ebc00160db838a62ac730a8c8ebb325c1876835da9f5ca7a",
       "src/guide.css": "sha256:51c057c6059b1f8e0676023f760451a587a9f6133a36634cc8df99adec4aabe6",
       "src/guide.js": "sha256:61b3baa76661b80f50734781ee0337ceb5a192f3700cc534125655b15bdba3bb",
-      "src/main.js": "sha256:1bf9f145f19a813bfd6378c7134934cfb89650f6f20173ca3f3c75dd2aa491ae",
+      "src/main.js": "sha256:2802572b18066a7103b14f2fb5dc908de1bcfae5f4b0a808a327ee9c55e0648b",
       "src/navigation/corridor-network.js": "sha256:a63ded584941bfcb0dca7d6ad651166a2d9fda21cc9eea1b3474bcfcf2309db9",
       "src/navigation/corridor-sampling-tsl.js": "sha256:817f172702f9425240141d54ceef2529b4d4bb7516eaacd3c71d82e270bcd193",
       "src/navigation/corridor-surface-parallel.js": "sha256:b7237ac9db089c9009961e5a1bf3641f2a47890191e0464176f31d863a16797a",
@@ -363,15 +404,15 @@
       "src/nest-mutation-ui.js": "sha256:dc7164274b8c4c22dc874530e494e99d603c22b321f734088579b47f5bb942cf",
       "src/nest.js": "sha256:7b5f99a59725dcd414b812d053019483e8120736c41051a3ac03d2761f2cf910",
       "src/nestvolume.js": "sha256:dcdb929960bf9944ba9978e0782689b8afb1e336893181dca3edc9ab0e185667",
-      "src/pollinator-assets.js": "sha256:6b3c704b715f8548094b0da635e0d4c2a7e75b1f8ba8e76ef0491e230c30967b",
+      "src/pollinator-assets.js": "sha256:fa941aac75655832bd64c7446f35be0812fbfb6679faf56f106ff12d1140e88b",
       "src/pollinator-layout.js": "sha256:90fa1e8545d3b95b6e7990b216c30b3b7d1768d29230489393c350571b85d61a",
-      "src/pollinators.js": "sha256:257e2a1ebb2642078b7bf19f5807ad696a2cc1b28866a3b21fbef3f889847486",
+      "src/pollinators.js": "sha256:498347f1a3397f10311f87f52a8a25d83a8a30065f79f9c7b290aab8467b3eaf",
       "src/pose.js": "sha256:d8bb13b4b6eb0388abfb8121aead3b2174f855e0ce68245bdf9e3e157eeccad7",
       "src/ragdoll.js": "sha256:f0e24c0ac1cc6a1de704c446d4f7e28e2d23463c75b706265bd2d5b9fd72654f",
       "src/simulation.js": "sha256:2bc75e180e7c163936f17fe67be51471bca91e5580d28ddba3a99f5b6255d73e",
       "src/spiders.js": "sha256:07d0bff7ea83f2e73c34df16e9544cb82b18c6c41969a7709fb71b601e0ebc23",
       "src/tests.js": "sha256:d5f9aafa4a3633e52fe497c4264114706be23c7fbe4a9fbd650a2a124fd28f98",
-      "src/ui.js": "sha256:65e8674341c780d977aa89891ed061c64d8fe5377ac84c6a5233439e35bb614f",
+      "src/ui.js": "sha256:3033e5085d296d62ff3e82462a062e150d0c5322ba0100c557312a1027e89682",
       "src/underground-assets.js": "sha256:9f971af69ef4860ebb099be27af126621386f209d689595fe4f6d242f39beaf8",
       "src/underground-visual.js": "sha256:8805e0991d89a2e7f4c57d7adf8be84d1ac1c5b62c6bae89dc6925ba36b4db73",
       "src/underground.js": "sha256:e5c317d06a445da3662eeae2714ae9d80efe90781887817284dab7d03add4913",
@@ -380,6 +421,8 @@
       "test/ant-observer.intent.test.js": "sha256:f98fa26bbcfa050458b8664e10a4887314328a12413053e40ec55018a2c5de82",
       "test/ant-observer.motion.test.js": "sha256:d60b906a9623a39aaf5cf6235d9570d2b55b89fc0cb9dbcc8b5c86ef99eefd72",
       "test/bee-simulation.test.js": "sha256:a54c366b9835cf42adf6ec80fa20343f1415bfb067f2d693ad96811db43add45",
+      "test/butterfly-integration.test.js": "sha256:822b680335a8eda6d125f95da1053e02a1b47ab08b91af007110dccc48c00f92",
+      "test/butterfly-simulation.test.js": "sha256:846c3dadcf7e016b1c9a3519be94137908d111b07dd86986bfd41c54d965de9e",
       "test/chamber-surface.test.js": "sha256:8699c42cee9b6d967af781cd166bf187c4f2f7f18c67c1c3d9ac771818ab2f3a",
       "test/colony-layout.test.js": "sha256:17b6a0d6f2191b4c28526ac561d9635a778dc444af23d83340064845d58848c4",
       "test/colony-runtime-oracles.test.js": "sha256:e718d450a698a8a39326a1aba0bd98fefd95fcf3b48fbc7e22b1a4c99f221276",

@@ -1,18 +1,28 @@
 import { gfx } from './config.js';
 import { createBees } from './bees.js';
-import { loadPollinatorAssets } from './pollinator-assets.js';
+import { createButterflies } from './butterflies.js';
+import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js';
 
 /**
- * Stable facade around an optional pollinator renderer.
+ * Stable facade around optional pollinator renderers.
  *
- * Persisting "Activer" to false skips every GLB request and the VAT bake at
+ * Persisting "Activer" to false skips every GLB request and VAT bake at
  * startup. Re-enabling starts one shared asynchronous load; UI callbacks remain
- * valid before, during and after that load.
+ * valid before, during and after that load. Butterflies have their own lazy
+ * singleton so disabling them does not disable bees or flowers.
  */
-export function createPollinators( { scene, props, assets = null } ) {
+export function createPollinators( { scene, props, assets = null, butterflyVat = null } ) {
 
 	let system = assets ? createBees( { scene, props, assets } ) : null;
+	let butterflySystem = system && butterflyVat && gfx.butterflies
+		? createButterflies( {
+			scene,
+			vat: butterflyVat,
+			getFlowers: () => system?.getFlowerContext() || null,
+		} )
+		: null;
 	let loadPromise = null;
+	let butterflyLoadPromise = null;
 	let surfaceVisible = true;
 
 	function ensureLoaded() {
@@ -41,22 +51,84 @@ export function createPollinators( { scene, props, assets = null } ) {
 
 	}
 
+	function ensureButterflies() {
+
+		if ( butterflySystem ) return Promise.resolve( butterflySystem );
+		if ( ! gfx.pollinators || ! gfx.butterflies ) return Promise.resolve( null );
+		if ( butterflyLoadPromise ) return butterflyLoadPromise;
+
+		butterflyLoadPromise = Promise.all( [
+			ensureLoaded(),
+			butterflyVat ? Promise.resolve( butterflyVat ) : loadButterflyAsset(),
+		] )
+			.then( ( [ loadedSystem, loadedVat ] ) => {
+
+				butterflyVat = loadedVat;
+				if ( ! loadedSystem || ! loadedVat ) {
+
+					butterflyLoadPromise = null;
+					return null;
+
+				}
+				if ( ! butterflySystem ) {
+
+					butterflySystem = createButterflies( {
+						scene,
+						vat: loadedVat,
+						getFlowers: () => system?.getFlowerContext() || null,
+					} );
+					butterflySystem.setSurfaceVisible( surfaceVisible );
+
+				}
+				return butterflySystem;
+
+			} )
+			.catch( ( error ) => {
+
+				butterflyLoadPromise = null;
+				gfx.butterflies = false;
+				console.error( 'Chargement des papillons impossible.', error );
+				return null;
+
+			} );
+		return butterflyLoadPromise;
+
+	}
+
 	return {
-		preload: ensureLoaded,
+		preload() {
+
+			return Promise.all( [
+				ensureLoaded(),
+				gfx.butterflies ? ensureButterflies() : Promise.resolve( null ),
+			] );
+
+		},
 		update( dt, visible = true ) {
 
 			surfaceVisible = visible;
-			if ( system ) return system.update( dt, visible );
-			if ( gfx.pollinators ) void ensureLoaded();
-			return null;
+			let telemetry = null;
+			if ( system ) telemetry = system.update( dt, visible );
+			else if ( gfx.pollinators ) void ensureLoaded();
+
+			if ( butterflySystem ) butterflySystem.update( dt, visible );
+			else if ( gfx.pollinators && gfx.butterflies ) void ensureButterflies();
+			return telemetry;
 
 		},
 		reset() {
 
-			if ( system ) return system.reset();
-			return gfx.pollinators
-				? ensureLoaded().then( ( loaded ) => loaded?.reset() )
-				: null;
+			const beeReset = system
+				? system.reset()
+				: gfx.pollinators
+					? ensureLoaded().then( ( loaded ) => loaded?.reset() )
+					: null;
+			const butterflyReset = butterflySystem
+				? butterflySystem.reset()
+				: gfx.pollinators && gfx.butterflies
+					? ensureButterflies().then( ( loaded ) => loaded?.reset() )
+					: null;
+			return Promise.all( [ beeReset, butterflyReset ] );
 
 		},
 		setBeeCount( value ) {
@@ -85,6 +157,7 @@ export function createPollinators( { scene, props, assets = null } ) {
 
 			surfaceVisible = visible;
 			if ( system ) system.setSurfaceVisible( visible );
+			if ( butterflySystem ) butterflySystem.setSurfaceVisible( visible );
 
 		},
 		setFlowerPetalColor( value ) {
@@ -111,13 +184,30 @@ export function createPollinators( { scene, props, assets = null } ) {
 			if ( system ) system.setBeeWingColor( value );
 
 		},
+		setButterflyCount( value ) {
+
+			gfx.butterflyCount = value;
+			if ( butterflySystem ) return butterflySystem.setCount( value );
+			if ( gfx.pollinators && gfx.butterflies ) void ensureButterflies();
+			return value;
+
+		},
+		setButterflyTint( value ) {
+
+			gfx.butterflyTint = value;
+			if ( butterflySystem ) butterflySystem.setTint( value );
+
+		},
 		getSimulation: () => system?.getSimulation() || null,
 		getTelemetry: () => system?.getTelemetry() || null,
 		getFlowerContext: () => system?.getFlowerContext() || null,
+		getButterflySimulation: () => butterflySystem?.getSimulation() || null,
+		getButterflyTelemetry: () => butterflySystem?.getTelemetry() || null,
 		get group() { return system?.group || null; },
 		get flowerMesh() { return system?.flowerMesh || null; },
 		get beeMesh() { return system?.beeMesh || null; },
 		get hive() { return system?.hive || null; },
+		get butterflyMesh() { return butterflySystem?.mesh || null; },
 	};
 
 }

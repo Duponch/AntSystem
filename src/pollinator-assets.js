@@ -6,6 +6,7 @@ import { loadVATMulti } from './vat.js';
 
 const loader = new GLTFLoader();
 let assetsPromise = null;
+let butterflyPromise = null;
 
 function materialAt( mesh, materialIndex = 0 ) {
 
@@ -116,5 +117,18 @@ export function loadPollinatorAssets() {
 	} ) );
 
 	return assetsPromise;
+
+}
+export function loadButterflyAsset() {
+
+	if ( butterflyPromise ) return butterflyPromise;
+
+	butterflyPromise = loadVATMulti( '/Butterfly.glb', {
+		clipNames: [ 'Flight_Butterfly' ],
+		fps: 16,
+		targetLength: 1.1,
+		preserveUv: true,
+	} );
+	return butterflyPromise;
 
 }

@@ -5,7 +5,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
 import {
 	params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL,
-	MAX_BEES, MAX_FLOWERS,
+	MAX_BEES, MAX_FLOWERS, MAX_BUTTERFLIES,
 	MIN_NEST_DEPTH, MAX_NEST_DEPTH, saveSettings, clearSettings,
 } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
@@ -692,6 +692,17 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( value ) => bees.setBeeWingColor( value ) );
 	fPollinators.add( gfx, 'hiveScale', 0.35, 1.5, 0.05 ).name( 'Taille ruche' )
 		.onChange( ( value ) => bees.setHiveScale( value ) );
+
+	const fButterflies = fPollinators.addFolder( '🦋 Papillons' );
+	fButterflies.add( gfx, 'butterflies' ).name( 'Activer les papillons' );
+	fButterflies.add( gfx, 'butterflyCount', 0, MAX_BUTTERFLIES, 1 ).name( 'Slots de cycle' )
+		.onChange( ( value ) => bees.setButterflyCount( value ) );
+	fButterflies.add( gfx, 'butterflyScale', 0.4, 2.5, 0.05 ).name( 'Taille papillons' );
+	fButterflies.add( gfx, 'butterflySpeed', 1.5, 10, 0.25 ).name( 'Vitesse de vol' );
+	fButterflies.add( gfx, 'butterflyLifeSpeed', 0.25, 4, 0.05 ).name( 'Vitesse du cycle' );
+	fButterflies.addColor( gfx, 'butterflyTint' ).name( 'Teinte papillons' )
+		.onChange( ( value ) => bees.setButterflyTint( value ) );
+	fButterflies.close();
 	fPollinators.close();
 	const fGrass = fGfx.addFolder( 'Herbe' );
 	fGrass.add( gfx, 'grass' ).name( 'Herbe' );

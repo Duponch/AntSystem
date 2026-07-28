@@ -34,6 +34,7 @@ export const MAX_ANTS = 65536;
 export const MAX_SPIDERS = 1024;       // prédateurs simultanés (VAT instancié)
 export const MAX_BEES = 128;            // représentantes visibles, pool VAT fixe
 export const MAX_FLOWERS = 256;         // champ instancié fixe, un seul draw
+export const MAX_BUTTERFLIES = 64;      // slots de cycle de vie, un draw VAT adulte
 export const MAX_BROOD = 4096;         // œufs/larves/nymphes simultanés (kernel couvain)
 export const FIXED = 1024;             // échelle virgule fixe des dépôts u32
 
@@ -242,6 +243,12 @@ export const gfx = {
 	flowerVariation: 0.35,
 	flowerWind: 0.32,
 	hiveScale: 0.72,
+	butterflies: true,
+	butterflyCount: 18,
+	butterflyScale: 1,
+	butterflySpeed: 4.8,
+	butterflyLifeSpeed: 1,
+	butterflyTint: '#ffffff',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
 	foodBallSpacing: 4,                // texels entre billes
@@ -412,6 +419,10 @@ gfx.flowerSize = clampSetting( gfx.flowerSize, 0.2, 4 );
 gfx.flowerVariation = clampSetting( gfx.flowerVariation, 0, 1 );
 gfx.flowerWind = clampSetting( gfx.flowerWind, 0, 2 );
 gfx.hiveScale = clampSetting( gfx.hiveScale, 0.25, 2 );
+gfx.butterflyCount = Math.round( clampSetting( gfx.butterflyCount, 0, MAX_BUTTERFLIES ) );
+gfx.butterflyScale = clampSetting( gfx.butterflyScale, 0.25, 3 );
+gfx.butterflySpeed = clampSetting( gfx.butterflySpeed, 1, 12 );
+gfx.butterflyLifeSpeed = clampSetting( gfx.butterflyLifeSpeed, 0.1, 8 );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau

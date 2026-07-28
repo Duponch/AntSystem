@@ -9,7 +9,7 @@ contracts: BEE-SIM
 
 ## Ce que vous voyez
 
-Le système de pollinisateurs vit uniquement à la surface. Une ruche est suspendue à un arbre, les fleurs forment plusieurs parcelles autour de la carte et des ouvrières butineuses font des allers-retours entre les deux. Entrer sous terre masque cet ensemble avec le reste du décor de surface.
+Le système de pollinisateurs vit uniquement à la surface. Une ruche est suspendue à un arbre, les fleurs forment plusieurs parcelles autour de la carte et des ouvrières butineuses font des allers-retours entre les deux. Entrer sous terre masque cet ensemble avec le reste du décor de surface. Les papillons utilisent aussi ces fleurs mais suivent un cycle indépendant, décrit dans le guide [Papillons](./papillons.md).
 
 Le nombre **Abeilles visibles** règle des représentantes graphiques, pas la population réelle calculée dans la ruche. Par défaut, 48 slots représentent collectivement 32 000 ouvrières adultes. Une partie de ces représentantes se trouve dans la ruche et n’est volontairement pas dessinée : il est normal de voir moins de 48 abeilles à l’écran.
 

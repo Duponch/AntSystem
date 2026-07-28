@@ -24,7 +24,7 @@ import { createColonyTests } from './tests.js';
 import { createWarden } from './warden.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
-import { loadPollinatorAssets } from './pollinator-assets.js';
+import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js';
 import { createPollinators } from './pollinators.js';
 import { createRagdoll } from './ragdoll.js';
 import { createAntFollow } from './antfollow.js';
@@ -167,11 +167,12 @@ async function main() {
 	} catch { /* document illisible : on repart du procédural */ }
 
 	// sol/fourmilière + décor + fourmis en parallèle (chargements de fichiers)
-	const [ env, props, ants, pollinatorAssets ] = await Promise.all( [
+	const [ env, props, ants, pollinatorAssets, butterflyVat ] = await Promise.all( [
 		createEnvironment( scene, sim ),
 		createProps( scene, decorDoc ),
 		createAnts( sim ),
 		gfx.pollinators ? loadPollinatorAssets() : Promise.resolve( null ),
+		gfx.pollinators && gfx.butterflies ? loadButterflyAsset() : Promise.resolve( null ),
 	] );
 	const grass = createGrass( scene, sim );
 	const foodballs = createFoodBalls( scene, sim );
@@ -182,7 +183,7 @@ async function main() {
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
-	const bees = createPollinators( { scene, props, assets: pollinatorAssets } );
+	const bees = createPollinators( { scene, props, assets: pollinatorAssets, butterflyVat } );
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
 
 	// ragdoll GPU : pool borné, dispatch indirect (voir ragdoll.js)
