@@ -31,6 +31,17 @@ export const CHAMELEON_STATE_NAMES = Object.freeze( [
 
 export const CHAMELEON_MIN_SCAN_HZ = 8;
 export const CHAMELEON_MAX_SCAN_HZ = 10;
+export const CHAMELEON_CAMOUFLAGE_SETTLE_SECONDS = 0.08;
+
+export function advanceChameleonCamouflageDwell(
+	previousDwell, dt, active, stationary, revealing,
+) {
+
+	const elapsed = Number.isFinite( previousDwell ) && previousDwell > 0 ? previousDwell : 0;
+	const step = Number.isFinite( dt ) && dt > 0 ? dt : 0;
+	return active && stationary && ! revealing ? elapsed + step : 0;
+
+}
 
 const NO_TARGET = - 1;
 const EPSILON = 1e-8;
@@ -115,6 +126,7 @@ export class ChameleonSimulation {
 		mouthHeight = 0.13,
 		maxIntegrationStep = 1 / 120,
 		maxIntegrationSteps = 256,
+		holdAtTrackEnd = false,
 	} = {} ) {
 
 		if ( ! Number.isInteger( preyCapacity ) || preyCapacity <= 0 ) {
@@ -164,6 +176,7 @@ export class ChameleonSimulation {
 		this.mouthHeight = finiteOr( mouthHeight, 0.13 );
 		this.maxIntegrationStep = Math.max( 1 / 1000, finiteOr( maxIntegrationStep, 1 / 120 ) );
 		this.maxIntegrationSteps = maxIntegrationSteps;
+		this.holdAtTrackEnd = !! holdAtTrackEnd;
 
 		this.time = 0;
 		this.state = CHAMELEON_STATE.REST_SCAN;
@@ -173,6 +186,7 @@ export class ChameleonSimulation {
 		this.patrolDirection = 1;
 		this.trackPosition = 0;
 		this.trackLength = 0;
+		this.routeCompleted = 0;
 		this._trackSegment = 0;
 
 		this.x = 0;
@@ -181,6 +195,9 @@ export class ChameleonSimulation {
 		this.headingX = 1;
 		this.headingY = 0;
 		this.headingZ = 0;
+		this.upX = 0;
+		this.upY = 1;
+		this.upZ = 0;
 		this.mouthX = 0;
 		this.mouthY = 0;
 		this.mouthZ = 0;
@@ -211,6 +228,9 @@ export class ChameleonSimulation {
 		this._trackX = null;
 		this._trackY = null;
 		this._trackZ = null;
+		this._trackNormalX = null;
+		this._trackNormalY = null;
+		this._trackNormalZ = null;
 		this._trackCumulative = null;
 		this._trackCount = 0;
 
@@ -246,6 +266,9 @@ export class ChameleonSimulation {
 			headingX: 1,
 			headingY: 0,
 			headingZ: 0,
+			upX: 0,
+			upY: 1,
+			upZ: 0,
 			state: this.state,
 			stateName: CHAMELEON_STATE_NAMES[ this.state ],
 			stateTime: 0,
@@ -268,6 +291,7 @@ export class ChameleonSimulation {
 			strikeZ: 0,
 			trackPosition: 0,
 			trackLength: 0,
+			routeCompleted: 0,
 		} );
 
 		this.setTrack( - 1, 0, 0, 1, 0, 0 );
@@ -305,16 +329,29 @@ export class ChameleonSimulation {
 		let x = sourceX;
 		let y = sourceY;
 		let z = sourceZ;
+		let normalX = null;
+		let normalY = null;
+		let normalZ = null;
 		let sampleCount = count;
 		if ( sourceX && sourceX.x && sourceX.y && sourceX.z ) {
 
 			x = sourceX.x;
 			y = sourceX.y;
 			z = sourceX.z;
+			normalX = sourceX.normalX || null;
+			normalY = sourceX.normalY || null;
+			normalZ = sourceX.normalZ || null;
 			sampleCount = sourceX.count;
 
 		}
 		if ( ! x || ! y || ! z ) throw new TypeError( 'track samples require x, y and z arrays' );
+		const hasAnyNormals = !! ( normalX || normalY || normalZ );
+		const hasNormals = !! ( normalX && normalY && normalZ );
+		if ( hasAnyNormals && ! hasNormals ) {
+
+			throw new TypeError( 'track normals require normalX, normalY and normalZ arrays' );
+
+		}
 		if ( sampleCount === undefined ) sampleCount = Math.min( x.length, y.length, z.length );
 		if ( ! Number.isInteger( sampleCount ) || sampleCount < 2 ) {
 
@@ -326,10 +363,19 @@ export class ChameleonSimulation {
 			throw new RangeError( 'track sample arrays are shorter than count' );
 
 		}
+		if ( hasNormals && ( normalX.length < sampleCount
+			|| normalY.length < sampleCount || normalZ.length < sampleCount ) ) {
+
+			throw new RangeError( 'track normal arrays are shorter than count' );
+
+		}
 
 		const trackX = new Float32Array( sampleCount );
 		const trackY = new Float32Array( sampleCount );
 		const trackZ = new Float32Array( sampleCount );
+		const trackNormalX = new Float32Array( sampleCount );
+		const trackNormalY = new Float32Array( sampleCount );
+		const trackNormalZ = new Float32Array( sampleCount );
 		const cumulative = new Float32Array( sampleCount );
 		for ( let i = 0; i < sampleCount; i ++ ) {
 
@@ -339,6 +385,30 @@ export class ChameleonSimulation {
 			trackX[ i ] = x[ i ];
 			trackY[ i ] = y[ i ];
 			trackZ[ i ] = z[ i ];
+			let nx = 0;
+			let ny = 1;
+			let nz = 0;
+			if ( hasNormals ) {
+
+				assertFiniteNumber( `track normal x[${ i }]`, normalX[ i ] );
+				assertFiniteNumber( `track normal y[${ i }]`, normalY[ i ] );
+				assertFiniteNumber( `track normal z[${ i }]`, normalZ[ i ] );
+				nx = normalX[ i ];
+				ny = normalY[ i ];
+				nz = normalZ[ i ];
+				const normalLength = Math.hypot( nx, ny, nz );
+				if ( normalLength > EPSILON ) {
+
+					nx /= normalLength;
+					ny /= normalLength;
+					nz /= normalLength;
+
+				} else { nx = 0; ny = 1; nz = 0; }
+
+			}
+			trackNormalX[ i ] = nx;
+			trackNormalY[ i ] = ny;
+			trackNormalZ[ i ] = nz;
 			if ( i > 0 ) {
 
 				const dx = trackX[ i ] - trackX[ i - 1 ];
@@ -355,9 +425,13 @@ export class ChameleonSimulation {
 		this._trackX = trackX;
 		this._trackY = trackY;
 		this._trackZ = trackZ;
+		this._trackNormalX = trackNormalX;
+		this._trackNormalY = trackNormalY;
+		this._trackNormalZ = trackNormalZ;
 		this._trackCumulative = cumulative;
 		this._trackCount = sampleCount;
 		this.trackLength = length;
+		this.routeCompleted = 0;
 		this.trackPosition = clamp( this.trackPosition, 0, length );
 		this._trackSegment = 0;
 		this._sampleTrack( this.trackPosition, this.patrolDirection );
@@ -365,6 +439,23 @@ export class ChameleonSimulation {
 		this._resetTongueAtMouth();
 		this._syncPublicState();
 		return this.trackLength;
+
+	}
+
+	setHeading( x, y, z ) {
+
+		assertFiniteNumber( 'heading x', x );
+		assertFiniteNumber( 'heading y', y );
+		assertFiniteNumber( 'heading z', z );
+		const length = Math.hypot( x, y, z );
+		if ( length <= EPSILON ) throw new RangeError( 'heading must have non-zero length' );
+		this.headingX = x / length;
+		this.headingY = y / length;
+		this.headingZ = z / length;
+		this._updateMouth();
+		if ( ! this.tongueVisible ) this._resetTongueAtMouth();
+		this._syncPublicState();
+		return this._view;
 
 	}
 
@@ -407,9 +498,26 @@ export class ChameleonSimulation {
 
 	_updateMouth() {
 
-		this.mouthX = this.x + this.headingX * this.mouthForward;
-		this.mouthY = this.y + this.mouthHeight + this.headingY * this.mouthForward;
-		this.mouthZ = this.z + this.headingZ * this.mouthForward;
+		// Match the renderer basis exactly: the support normal is made
+		// orthogonal to the current heading before applying the authored
+		// mouth height. This keeps sweep collision and the animated socket
+		// coincident on logs, slopes and rounded descent transitions.
+		const projection = this.upX * this.headingX
+			+ this.upY * this.headingY + this.upZ * this.headingZ;
+		let ux = this.upX - this.headingX * projection;
+		let uy = this.upY - this.headingY * projection;
+		let uz = this.upZ - this.headingZ * projection;
+		const upLength = Math.hypot( ux, uy, uz );
+		if ( upLength > EPSILON ) {
+
+			ux /= upLength;
+			uy /= upLength;
+			uz /= upLength;
+
+		} else { ux = 0; uy = 1; uz = 0; }
+		this.mouthX = this.x + this.headingX * this.mouthForward + ux * this.mouthHeight;
+		this.mouthY = this.y + this.headingY * this.mouthForward + uy * this.mouthHeight;
+		this.mouthZ = this.z + this.headingZ * this.mouthForward + uz * this.mouthHeight;
 
 	}
 
@@ -441,6 +549,16 @@ export class ChameleonSimulation {
 		this.headingX = dx * inverseLength * sign;
 		this.headingY = dy * inverseLength * sign;
 		this.headingZ = dz * inverseLength * sign;
+		let upX = this._trackNormalX[ segment ]
+			+ ( this._trackNormalX[ segment + 1 ] - this._trackNormalX[ segment ] ) * alpha;
+		let upY = this._trackNormalY[ segment ]
+			+ ( this._trackNormalY[ segment + 1 ] - this._trackNormalY[ segment ] ) * alpha;
+		let upZ = this._trackNormalZ[ segment ]
+			+ ( this._trackNormalZ[ segment + 1 ] - this._trackNormalZ[ segment ] ) * alpha;
+		const upLength = Math.hypot( upX, upY, upZ ) || 1;
+		this.upX = upX / upLength;
+		this.upY = upY / upLength;
+		this.upZ = upZ / upLength;
 		this._updateMouth();
 
 	}
@@ -490,6 +608,8 @@ export class ChameleonSimulation {
 		}
 
 		this.trackPosition = clamp( this.trackPosition + movement, 0, this.trackLength );
+		if ( this.trackPosition > EPSILON && this.trackPosition < this.trackLength - EPSILON )
+			this.routeCompleted = 0;
 		this._sampleTrack( this.trackPosition, movement );
 		const travelled = Math.hypot( this.x - beforeX, this.y - beforeY, this.z - beforeZ );
 		this._telemetry.distanceTravelled += travelled;
@@ -508,8 +628,13 @@ export class ChameleonSimulation {
 			|| ( this.patrolDirection < 0 && this.trackPosition <= EPSILON )
 		) {
 
-			this.patrolDirection *= - 1;
-			this._telemetry.trackReversals ++;
+			this.routeCompleted = 1;
+			if ( ! this.holdAtTrackEnd ) {
+
+				this.patrolDirection *= - 1;
+				this._telemetry.trackReversals ++;
+
+			}
 			this._setState( CHAMELEON_STATE.REST_SCAN );
 
 		}
@@ -1025,6 +1150,9 @@ export class ChameleonSimulation {
 		view.headingX = this.headingX;
 		view.headingY = this.headingY;
 		view.headingZ = this.headingZ;
+		view.upX = this.upX;
+		view.upY = this.upY;
+		view.upZ = this.upZ;
 		view.state = this.state;
 		view.stateName = CHAMELEON_STATE_NAMES[ this.state ];
 		view.stateTime = this.stateTime;
@@ -1047,6 +1175,7 @@ export class ChameleonSimulation {
 		view.strikeZ = this.strikeZ;
 		view.trackPosition = this.trackPosition;
 		view.trackLength = this.trackLength;
+		view.routeCompleted = this.routeCompleted;
 
 		const telemetry = this._telemetry;
 		telemetry.time = this.time;

@@ -195,6 +195,11 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 	const argsArray = new Uint32Array( [ 0, 1, 1 ] );
 	const rdArgsAttr = new THREE.IndirectStorageBufferAttribute( argsArray, 1 );
 	const rdArgs = storage( rdArgsAttr, 'uint', 3 ).toAtomic();
+	// DRAW INDIRECT : créé ici pour que son instanceCount soit publié dans la
+	// même passe que les arguments de simulation, sans troisième soumission.
+	const drawArgs = new Uint32Array( 5 );
+	const drawAttr = new THREE.IndirectStorageBufferAttribute( drawArgs, 1 );
+	const drawNode = storage( drawAttr, 'uint', 5 ).toAtomic();
 
 	const u = {
 		gravity: uniform( params.gravity ),
@@ -377,6 +382,7 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 		const n = atomicLoad( rdAlloc.element( uint( 1 ) ) );
 		atomicStore( rdArgs.element( uint( 0 ) ), n.add( uint( WG - 1 ) ).div( uint( WG ) ) );
+		atomicStore( drawNode.element( uint( 1 ) ), atomicLoad( rdAlloc.element( uint( 2 ) ) ) );
 
 	} )().compute( 1 );
 
@@ -614,23 +620,14 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 
 	// DRAW INDIRECT dédié : le nombre de ragdolls affichés est écrit par le GPU,
 	// le CPU ne le connaît jamais et ne réalloue rien.
-	const drawArgs = new Uint32Array( 5 );
 	drawArgs[ 0 ] = rdGeoSrc.index.count;
-	const drawAttr = new THREE.IndirectStorageBufferAttribute( drawArgs, 1 );
-	const drawNode = storage( drawAttr, 'uint', 5 ).toAtomic();
 	igeo.setIndirect( drawAttr, 0 );
 	igeo.instanceCount = 1;
 
-	const kRdDrawArgs = Fn( () => {
-
-		atomicStore( drawNode.element( uint( 1 ) ), atomicLoad( rdAlloc.element( uint( 2 ) ) ) );
-
-	} )().compute( 1 );
-
 	// ------------------------------------------------------------------
 	const PASSES_A = [ kRdSpawn, kRdReset, kRdCull, kRdArgs ];
-	const PASSES_B = [ kRdDrawArgs ];
 	let enabled = params.physics && gfx.rdBudget > 0;
+	let antDispatchCount = - 1;
 
 	return {
 		mesh,
@@ -653,12 +650,20 @@ export function createRagdoll( { sim, vat, pose, renderer, camera } ) {
 			u.gravity.value = params.gravity;
 			u.dist.value = gfx.rdDist;
 			u.camPos.value.copy( camera.position );
+			const activeAnts = Math.max( 0, Math.min(
+				MAX_ANTS, Math.ceil( Number( sim.u.antCount.value ) || 0 ),
+			) );
+			if ( activeAnts !== antDispatchCount ) {
+
+				antDispatchCount = activeAnts;
+				kRdSpawn.count = activeAnts;
+
+			}
 
 			renderer.compute( PASSES_A );
 			// DISPATCH INDIRECT : le nombre de workgroups vient du GPU lui-même.
 			// Zéro ragdoll réveillé = zéro workgroup lancé.
 			renderer.compute( kRdSolve, rdArgsAttr );
-			renderer.compute( PASSES_B );
 
 		},
 	};

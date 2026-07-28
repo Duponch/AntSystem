@@ -1965,19 +1965,28 @@ export class AntSimulation {
 			// flou 3×3 : canaux R/G pour la diffusion des phéromones,
 			// canal A pour le halo lumineux de la nourriture (mêmes fetchs = gratuit)
 			let sum = vec3( 0 );
+			let center4;
 
 			for ( let oy = - 1; oy <= 1; oy ++ ) {
 
 				for ( let ox = - 1; ox <= 1; ox ++ ) {
 
 					const nc = clamp( c.add( ivec2( ox, oy ) ), ivec2( 0 ), ivec2( GRID - 1 ) );
-					sum = sum.add( textureLoad( readTex, nc ).xyw );
+					if ( ox === 0 && oy === 0 ) {
+
+						center4 = textureLoad( readTex, nc ).toVar();
+						sum = sum.add( center4.xyw );
+
+					} else {
+
+						sum = sum.add( textureLoad( readTex, nc ).xyw );
+
+					}
 
 				}
 
 			}
 
-			const center4 = textureLoad( readTex, c );
 			const center = center4.xy;
 			const blurred = sum.xy.div( 9 );
 
@@ -2093,6 +2102,7 @@ export class AntSimulation {
 		const [ tA, tB ] = this.textures;
 		this.kAnt = [ makeAntKernel( tA ), makeAntKernel( tB ) ];
 		this.kGrid = [ makeGridKernel( tA, tB ), makeGridKernel( tB, tA ) ];
+		this._antDispatchCount = - 1;
 		// Tableaux stables : en mode normal Three encode chaque tick dans un seul
 		// command buffer WebGPU, sans allocation ni soumission intermédiaire.
 		this.kStep = [
@@ -2367,6 +2377,19 @@ export class AntSimulation {
 		this.u.tick.value = this._tick;
 		this._clock = ( ( this._clock || 0 ) + dt ) % 840;
 		this.u.simTime.value = this._clock;
+		// Les buffers sont préalloués au maximum mais le noyau comportemental ne
+		// doit jamais lancer les slots inactifs. Changer ComputeNode.count ajuste
+		// le dispatch WebGPU sans allocation et sans recompilation.
+		const activeAnts = Math.max( 0, Math.min(
+			MAX_ANTS, Math.ceil( Number( this.u.antCount.value ) || 0 ),
+		) );
+		if ( activeAnts !== this._antDispatchCount ) {
+
+			this._antDispatchCount = activeAnts;
+			this.kAnt[ 0 ].count = activeAnts;
+			this.kAnt[ 1 ].count = activeAnts;
+
+		}
 		// alarme ressentie par les araignées : instantanée → on la vide avant le
 		// noyau fourmis, qui la re-remplit selon la panique locale de cette frame
 		const passes = this.u.spiderCount.value > 0

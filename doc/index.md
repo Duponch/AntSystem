@@ -7,7 +7,7 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 - Fonctionnel : [colonie, castes et cycle de vie](./fonctionnel/colonie.md), [démarrage naturel](./fonctionnel/demarrage-naturel.md), [intentions et arrêts](./fonctionnel/intentions-et-arrets.md).
 - Technique : [architecture](./technique/architecture.md), [navigation et contact 3D](./technique/navigation-contact-3d.md), [abeilles et pollinisateurs](./technique/pollinisateurs.md), [papillons](./technique/papillons.md), [caméléon et prédation](./technique/cameleons.md), [rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md), [coûts et performance](./technique/performance.md).
 - Qualité : [stratégie de tests](./qualite/strategie-tests.md) et [matrice contrats/tests](./qualite/matrice-contrats.md).
-- Guide intégré à l’interface : [colonie](./guide/colonie.md), [démarrage](./guide/demarrage-naturel.md), [cycle de vie et ressources](./guide/cycle-vie-ressources.md), [attentes et menaces](./guide/attentes-menaces-limites.md), [navigation](./guide/navigation-3d.md), [vue souterraine](./guide/vue-souterraine.md), [abeilles et pollinisateurs](./guide/pollinisateurs.md), [papillons](./guide/papillons.md), [inspecteur](./guide/inspecteur.md), [caméléon et prédation](./guide/cameleons.md).
+- Guide intégré à l’interface : [colonie](./guide/colonie.md), [démarrage](./guide/demarrage-naturel.md), [cycle de vie et ressources](./guide/cycle-vie-ressources.md), [attentes et menaces](./guide/attentes-menaces-limites.md), [navigation](./guide/navigation-3d.md), [vue souterraine](./guide/vue-souterraine.md), [abeilles et pollinisateurs](./guide/pollinisateurs.md), [papillons](./guide/papillons.md), [inspecteur des animaux](./guide/inspecteur.md), [caméléon et prédation](./guide/cameleons.md).
 
 ## Contrats stables
 
@@ -19,10 +19,10 @@ Cette arborescence décrit le comportement actuellement attendu de la colonie et
 | `NAV-SURFACE` | Contact direct, support continu et profondeur compatible avec le volume 3D | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-surface) |
 | `NAV-ENTRANCE` | Bouche physique et transition surface/tunnel partageant la même géométrie | [Navigation/contact 3D](./technique/navigation-contact-3d.md#nav-entrance) |
 | `BEE-SIM` | Butinage déterministe, démographie agrégée, météo, ressources et coût borné | [Abeilles et pollinisateurs](./technique/pollinisateurs.md#bee-sim--abeilles-et-pollinisateurs) |
-| `BUTTERFLY-SIM` | Cycle accéléré déterministe, activité adulte, fleurs partagées et rendu VAT borné | [Papillons](./technique/papillons.md#butterfly-sim--cycle-de-vie-et-rendu-des-papillons) |
-| `CHAMELEON-SIM` | Patrouille bornée sur tronc, attaque animée, contact réel et prédation transactionnelle | [Caméléon et prédation](./technique/cameleons.md#chameleon-sim--caméléon-support-et-prédation) |
+| `BUTTERFLY-SIM` | Cycle accéléré déterministe, fleurs partagées, perception bornée du caméléon, fuite continue et rendu VAT borné | [Papillons](./technique/papillons.md#butterfly-sim--cycle-de-vie-et-rendu-des-papillons) |
+| `CHAMELEON-SIM` | Graphe global terrain/rochers/troncs/arbres, exploration locale continue, camouflage perceptif et prédation transactionnelle | [Caméléon et prédation](./technique/cameleons.md#chameleon-sim--caméléon-support-et-prédation) |
 | `UNDERGROUND-VISUAL` | Excavation visuelle, matière 3D chaotique et objets enfouis bornés, indépendants du nid physique | [Rendu souterrain stylisé](./technique/rendu-souterrain-stylise.md#underground-visual--rendu-souterrain-stylisé) |
-| `OBS` | Intentions lisibles et distinction entre arrêt attendu et immobilité suspecte | [Intentions et arrêts](./fonctionnel/intentions-et-arrets.md#obs) |
+| `OBS` | Intentions lisibles, arrêts expliqués et sélection d’une fourmi, d’un papillon ou du caméléon | [Intentions et arrêts](./fonctionnel/intentions-et-arrets.md#obs) |
 
 Ces identifiants sont des contrats de comportement, pas des numéros de version. Un changement qui les affecte doit mettre à jour le code, les tests et leur document canonique dans la même modification.
 

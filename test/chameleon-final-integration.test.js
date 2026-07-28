@@ -20,6 +20,16 @@ test( 'CHAMELEON-SIM-025 config and UI expose predator tuning and independent sh
 		'chameleonScale',
 		'chameleonPatrolSpeed',
 		'chameleonTrackingSpeed',
+		'chameleonAnimationSpeed',
+		'chameleonRoamingEnabled',
+		'chameleonRoamingRadius',
+		'chameleonCamouflageEnabled',
+		'chameleonCamouflageColor',
+		'chameleonCamouflageInterval',
+		'chameleonCamouflageMinDuration',
+		'chameleonCamouflageMaxDuration',
+		'chameleonSupportClearance',
+		'chameleonDebugAttackRange',
 		'chameleonAttackDistance',
 		'chameleonDetectionDistance',
 		'chameleonAimDuration',
@@ -37,6 +47,46 @@ test( 'CHAMELEON-SIM-025 config and UI expose predator tuning and independent sh
 	assert.match( ui, /\.setChameleonEnabled\(\s*value\s*\)/u );
 	assert.match( ui, /\.setChameleonCastShadow\(\s*value\s*\)/u );
 	assert.match( ui, /\.setChameleonReceiveShadow\(\s*value\s*\)/u );
+	assert.match( config, /chameleonCamouflageMinDuration:\s*7/u );
+	assert.match( config, /chameleonCamouflageMaxDuration:\s*13/u );
+	assert.match( ui, /addColor\(\s*gfx,\s*'chameleonCamouflageColor'/u );
+
+} );
+
+test( 'CHAMELEON-SIM-030 movement and walk animation speeds stay independently configurable', async () => {
+
+	const [ config, ui, chameleons ] = await Promise.all( [
+		readSource( '../src/config.js' ),
+		readSource( '../src/ui.js' ),
+		readSource( '../src/chameleons.js' ),
+	] );
+
+	assert.match( config, /chameleonPatrolSpeed:\s*1\.15/u );
+	assert.match( config, /chameleonAnimationSpeed:\s*1/u );
+	assert.match( ui, /chameleonAnimationSpeed['"],\s*0\.1,\s*4/u );
+	assert.match( chameleons, /travelled \/ stride \* animationSpeed/u );
+	assert.match( chameleons, /attackAction\.time[\s\S]*?view\.attackClipPhase/u );
+
+} );
+
+test( 'CHAMELEON-SIM-032 runtime uses reactive local surface exploration and explicit ambush camouflage', async () => {
+
+	const source = await readSource( '../src/chameleons.js' );
+	assert.match( source, /from\s*['"]\.\/chameleon-surface-graph\.js['"]/u );
+	assert.doesNotMatch( source, /chameleon-support-network|buildChameleonSupportNetwork/u );
+	assert.match( source, /holdAtTrackEnd:\s*true/u );
+	assert.match( source, /surfaceRouter\.exploreNext\(\s*roamingRadius\s*\)/u );
+	assert.match( source, /simulation\.routeCompleted/u );
+	assert.match( source, /preserveHeading[\s\S]*?simulation\.setHeading/u );
+	assert.match( source, /bodyRoot\.quaternion\.slerp\(\s*targetBodyQuaternion/u );
+	assert.doesNotMatch( source, /surfaceRouter\.routeTo|findChameleonSurfacePath/u );
+	assert.match( source, /scheduledCamouflage[\s\S]*?simulation\.patrolSpeed/u );
+	assert.match( source, /camouflageCandidate[\s\S]*?scheduledCamouflage/u );
+	assert.match( source, /camouflageStationaryTime\s*=\s*advanceChameleonCamouflageDwell/u );
+	assert.doesNotMatch( source, /view\.stateTime\s*>=\s*0\.08/u );
+	assert.match( source, /chameleonCamouflageColor/u );
+	assert.match( source, /material\.color\.copy\( camouflageTint \)/u );
+	assert.match( source, /simulation\.state !== CHAMELEON_STATE\.AIM_AND_BRACE/u );
 
 } );
 
@@ -54,6 +104,9 @@ test( 'CHAMELEON-SIM-026 pollinator facade owns lazy chameleon lifecycle and sha
 	assert.match( source, /chameleonSystem\.setSurfaceVisible\(\s*visible\s*\)/u );
 	assert.match( source, /getChameleonSimulation:/u );
 	assert.match( source, /getChameleonTelemetry:/u );
+	assert.match( source, /getChameleonDebugView\(\)/u );
+	assert.match( source, /getChameleonAvoidanceContext\(\)/u );
+	assert.match( source, /selectChameleon\(\s*selected\s*=\s*true\s*\)/u );
 
 } );
 

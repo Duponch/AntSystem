@@ -40,6 +40,14 @@ Au départ, il compare toujours un petit échantillon de quatre fleurs. Il préf
 
 Les papillons et les abeilles partagent le même champ et ses stocks. Une visite de papillon prélève donc une petite quantité de nectar disponible. Elle ne produit pas encore de graines, de nouvelles plantes ou de nourriture pour les fourmis.
 
+## Quand un papillon voit le caméléon
+
+Un adulte possède une zone de vision réglable. Si un caméléon en mouvement ou en observation entre dans sa distance et son angle de vue, le papillon abandonne sa fleur et fuit continuellement dans la direction opposée. Il anticipe légèrement le mouvement du prédateur : sa trajectoire peut donc être oblique plutôt qu’une ligne parfaitement droite.
+
+Pendant une longue pause de camouflage planifiée, le caméléon devient **camouflé** après être resté immobile assez longtemps. Le joueur le reconnaît à une teinte de signal configurable, rouge par défaut. Cette couleur ne participe pas à la perception : les papillons lisent uniquement l’état logique de camouflage, ne voient plus le prédateur et cessent immédiatement de l’éviter. Ils peuvent alors traverser sa zone d’attaque. Ce risque est volontaire et explique pourquoi une attaque reste possible malgré la fuite.
+
+Sélectionnez un adulte puis activez **Zone du sélectionné** pour afficher uniquement son volume de perception, sans ajouter une géométrie de debug à toute la population. L’inspecteur indique aussi s’il voit une menace, sa distance et son intention courante.
+
 ## Quand un caméléon attaque
 
 Le caméléon ne vise que les adultes visibles. Un papillon touché reste accroché
@@ -68,6 +76,8 @@ Ouvrez **Graphismes → 🌼 Pollinisateurs → 🦋 Papillons** :
 - **Échelle** modifie leur taille visuelle ;
 - **Vitesse de vol** modifie la vitesse de déplacement des adultes ;
 - **Vitesse du cycle** accélère ou ralentit les quatre stades : une valeur élevée fait tourner les générations plus vite ;
+- **Distance de vue**, **Angle de vue**, **Accélération de fuite** et **Analyse menace** règlent la perception du caméléon ;
+- **Zone du sélectionné** dessine la vision du seul papillon inspecté ;
 - **Teinte** colore le modèle tout en conservant son atlas et son éclairage ;
 - **Projeter les ombres** et **Recevoir les ombres** règlent indépendamment sa contribution aux ombres de la scène.
 
@@ -75,6 +85,6 @@ Le modèle animé n’est chargé que lorsque Pollinisateurs et Papillons sont t
 
 ## Ce que la simulation ne représente pas encore
 
-Les stades immatures sont des états logiques : aucune chenille ne rampe, aucune chrysalide ne s’accroche et aucun œuf n’est placé sur une plante. Accouplement, espèces, plantes hôtes et migration ne sont pas modélisés. Le caméléon est le seul prédateur ; les adultes n’évitent pas physiquement les branches, les autres insectes ou sa zone d’attaque.
+Les stades immatures sont des états logiques : aucune chenille ne rampe, aucune chrysalide ne s’accroche et aucun œuf n’est placé sur une plante. Accouplement, espèces, plantes hôtes et migration ne sont pas modélisés. Le caméléon est le seul prédateur. Les adultes l’évitent quand ils le perçoivent, mais ils n’évitent pas encore physiquement les branches, les autres insectes ou les obstacles du décor.
 
 Le système cherche surtout à rendre un cycle simple, compréhensible, reproductible et peu coûteux. Les durées accélérées et les décisions ne doivent pas être interprétées comme une prédiction scientifique d’une espèce réelle.

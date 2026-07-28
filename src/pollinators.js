@@ -15,16 +15,19 @@ import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js
 export function createPollinators( { scene, props, assets = null, butterflyVat = null } ) {
 
 	let system = assets ? createBees( { scene, props, assets } ) : null;
+	let chameleonSystem = null;
+	const getChameleonThreat = () => chameleonSystem?.getAvoidanceContext?.()
+		|| chameleonSystem?.getAvoidanceView?.() || null;
 	let butterflySystem = system && butterflyVat && gfx.butterflies
 		? createButterflies( {
 			scene,
 			vat: butterflyVat,
 			getFlowers: () => system?.getFlowerContext() || null,
+			getPredatorThreat: getChameleonThreat,
 		} )
 		: null;
 	let loadPromise = null;
 	let butterflyLoadPromise = null;
-	let chameleonSystem = null;
 	let chameleonLoadPromise = null;
 	let surfaceVisible = true;
 	let chameleonWasEnabled = !! gfx.chameleonEnabled;
@@ -80,6 +83,7 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 						scene,
 						vat: loadedVat,
 						getFlowers: () => system?.getFlowerContext() || null,
+						getPredatorThreat: getChameleonThreat,
 					} );
 					butterflySystem.setSurfaceVisible( surfaceVisible );
 
@@ -324,6 +328,21 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			if ( butterflySystem ) butterflySystem.setReceiveShadow( value );
 
 		},
+		selectButterfly( index ) {
+
+			return butterflySystem ? butterflySystem.select( index ) : - 1;
+
+		},
+		clearButterflySelection() {
+
+			if ( butterflySystem ) butterflySystem.clearSelection();
+
+		},
+		getButterflyDebugSnapshot() {
+
+			return butterflySystem?.getDebugSnapshot() || null;
+
+		},
 		setChameleonEnabled( value ) {
 
 			gfx.chameleonEnabled = !! value;
@@ -353,6 +372,27 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			if ( chameleonSystem ) chameleonSystem.setReceiveShadow( value );
 
 		},
+		selectChameleon( selected = true ) {
+
+			if ( ! chameleonSystem ) return null;
+			return selected ? chameleonSystem.select() : chameleonSystem.clearSelection();
+
+		},
+		clearChameleonSelection() {
+
+			return chameleonSystem?.clearSelection() || null;
+
+		},
+		getChameleonDebugView() {
+
+			return chameleonSystem?.getDebugView() || null;
+
+		},
+		getChameleonAvoidanceContext() {
+
+			return chameleonSystem?.getAvoidanceContext() || null;
+
+		},
 		getSimulation: () => system?.getSimulation() || null,
 		getTelemetry: () => system?.getTelemetry() || null,
 		getFlowerContext: () => system?.getFlowerContext() || null,
@@ -366,6 +406,7 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 		get hive() { return system?.hive || null; },
 		get butterflyMesh() { return butterflySystem?.mesh || null; },
 		get chameleon() { return chameleonSystem?.model || null; },
+		get chameleonPickable() { return chameleonSystem?.pickable || null; },
 	};
 
 }

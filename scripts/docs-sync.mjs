@@ -83,6 +83,7 @@ const CONTRACTS = Object.freeze( {
 		],
 		tests: [
 			'test/config-timing-session.test.js',
+			'test/gpu-dispatch-budget.test.js',
 			'test/hybrid-time-policy.test.js',
 			'test/readback.test.js',
 			'test/simulation-clock.test.js',
@@ -101,6 +102,9 @@ const CONTRACTS = Object.freeze( {
 			'HYBRID-TIME-006',
 			'HYBRID-TIME-RUNTIME-001',
 			'CONFIG-TIMING-001',
+			'GPU-DISPATCH-001',
+			'GPU-DISPATCH-002',
+			'GPU-DISPATCH-003',
 			'SIM-SYNC-001',
 			'SIM-STATS-001',
 			'TIME-SCALE-RUNTIME-005',
@@ -331,6 +335,7 @@ const CONTRACTS = Object.freeze( {
 		tests: [
 			'test/butterfly-simulation.test.js',
 			'test/butterfly-integration.test.js',
+			'test/butterfly-predator-avoidance.test.js',
 		],
 		runtimeTests: [],
 		evidence: [
@@ -348,6 +353,12 @@ const CONTRACTS = Object.freeze( {
 			'BUTTERFLY-SIM-012',
 			'BUTTERFLY-SIM-013',
 			'BUTTERFLY-SIM-014',
+			'BUTTERFLY-FEAR-001',
+			'BUTTERFLY-FEAR-002',
+			'BUTTERFLY-FEAR-003',
+			'BUTTERFLY-FEAR-004',
+			'BUTTERFLY-FEAR-005',
+			'BUTTERFLY-FEAR-006',
 		],
 	},
 	'CHAMELEON-SIM': {
@@ -355,6 +366,7 @@ const CONTRACTS = Object.freeze( {
 		guides: [ 'doc/guide/cameleons.md' ],
 		sources: [
 			'src/chameleon-simulation.js',
+			'src/chameleon-surface-graph.js',
 			'src/chameleon-track.js',
 			'src/chameleon-assets.js',
 			'src/chameleons.js',
@@ -363,6 +375,7 @@ const CONTRACTS = Object.freeze( {
 			'src/config.js',
 			'src/pollinators.js',
 			'src/ui.js',
+			'src/wildlife-inspector.js',
 		],
 		tests: [
 			'test/chameleon-simulation.test.js',
@@ -371,6 +384,8 @@ const CONTRACTS = Object.freeze( {
 			'test/chameleon-predation.test.js',
 			'test/chameleon-final-integration.test.js',
 			'test/chameleon-facing.test.js',
+			'test/chameleon-surface-graph.test.js',
+			'test/wildlife-inspector.test.js',
 		],
 		runtimeTests: [],
 		evidence: [
@@ -402,6 +417,19 @@ const CONTRACTS = Object.freeze( {
 			'CHAMELEON-SIM-026',
 			'CHAMELEON-SIM-027',
 			'CHAMELEON-SIM-028',
+			'CHAMELEON-SIM-029',
+			'CHAMELEON-SIM-030',
+			'CHAMELEON-SIM-031',
+			'CHAMELEON-SIM-032',
+			'CHAMELEON-SIM-033',
+			'CHAMELEON-SURFACE-001',
+			'CHAMELEON-SURFACE-002',
+			'CHAMELEON-SURFACE-003',
+			'CHAMELEON-SURFACE-004',
+			'CHAMELEON-SURFACE-005',
+			'WILDLIFE-INSPECTOR-001',
+			'WILDLIFE-INSPECTOR-002',
+			'WILDLIFE-INSPECTOR-003',
 		],
 	},
 	'UNDERGROUND-VISUAL': {
@@ -623,6 +651,7 @@ function validate() {
 	const simulationSources = [
 		'src/bee-simulation.js',
 		'src/chameleon-simulation.js',
+		'src/chameleon-surface-graph.js',
 		'src/chameleon-track.js',
 		'src/chameleon-assets.js',
 		'src/chameleons.js',

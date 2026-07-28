@@ -254,14 +254,28 @@ export const gfx = {
 	butterflyScale: 1,
 	butterflySpeed: 4.8,
 	butterflyLifeSpeed: 1,
+	butterflyPredatorVisionDistance: 8,
+	butterflyPredatorVisionAngle: 250,
+	butterflyFleeSpeedMultiplier: 1.75,
+	butterflyThreatScanFrequency: 10,
+	butterflyDebugVision: false,
 	butterflyTint: '#ffffff',
 	butterflyCastShadow: true,
 	butterflyReceiveShadow: true,
 	chameleonEnabled: true,
 	chameleonScale: 1,
-	chameleonPatrolSpeed: 0.62,
-	chameleonTrackingSpeed: 0.95,
+	chameleonPatrolSpeed: 1.15,
+	chameleonTrackingSpeed: 1.45,
+	chameleonAnimationSpeed: 1,
 	chameleonTurnSpeed: 6,
+	chameleonRoamingEnabled: true,
+	chameleonRoamingRadius: Math.ceil( WORLD * Math.SQRT2 ),
+	chameleonCamouflageEnabled: true,
+	chameleonCamouflageColor: '#ef2b2b',
+	chameleonCamouflageInterval: 14,
+	chameleonCamouflageMinDuration: 7,
+	chameleonCamouflageMaxDuration: 13,
+	chameleonSupportClearance: 0.006,
 	chameleonAttackDistance: 3.2,
 	chameleonDetectionDistance: 4.8,
 	chameleonAimDuration: 0.55,
@@ -269,6 +283,7 @@ export const gfx = {
 	chameleonAttackCooldown: 1.1,
 	chameleonCastShadow: true,
 	chameleonReceiveShadow: true,
+	chameleonDebugAttackRange: false,
 	chameleonTongueColor: '#d96a79',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
@@ -389,6 +404,27 @@ if ( saved ) {
 
 	}
 
+	// Preserve intentional player tuning while migrating the three former
+	// chameleon defaults. Old saves contain every gfx key but predate the
+	// independent animation-speed setting, which is our unambiguous version flag.
+	const legacyChameleonSettings = saved.gfx || {};
+	if ( ! Object.hasOwn( legacyChameleonSettings, 'chameleonAnimationSpeed' ) ) {
+
+		if ( Math.abs( gfx.chameleonPatrolSpeed - 0.62 ) < 1e-9 )
+			gfx.chameleonPatrolSpeed = 1.15;
+		if ( Math.abs( gfx.chameleonTrackingSpeed - 0.95 ) < 1e-9 )
+			gfx.chameleonTrackingSpeed = 1.45;
+		if ( Math.abs( gfx.chameleonRoamingRadius - 52 ) < 1e-9 )
+			gfx.chameleonRoamingRadius = Math.ceil( WORLD * Math.SQRT2 );
+		if ( Math.abs( gfx.chameleonCamouflageInterval - 10 ) < 1e-9 )
+			gfx.chameleonCamouflageInterval = 14;
+		if ( Math.abs( gfx.chameleonCamouflageMinDuration - 2.5 ) < 1e-9 )
+			gfx.chameleonCamouflageMinDuration = 7;
+		if ( Math.abs( gfx.chameleonCamouflageMaxDuration - 6 ) < 1e-9 )
+			gfx.chameleonCamouflageMaxDuration = 13;
+
+	}
+
 	params.paused = false;
 	params.cinematic = false;
 	params.brushMode = false;
@@ -451,10 +487,25 @@ gfx.butterflyCount = Math.round( clampSetting( gfx.butterflyCount, 0, MAX_BUTTER
 gfx.butterflyScale = clampSetting( gfx.butterflyScale, 0.25, 3 );
 gfx.butterflySpeed = clampSetting( gfx.butterflySpeed, 1, 12 );
 gfx.butterflyLifeSpeed = clampSetting( gfx.butterflyLifeSpeed, 0.1, 8 );
+gfx.butterflyPredatorVisionDistance = clampSetting( gfx.butterflyPredatorVisionDistance, 1, 30 );
+gfx.butterflyPredatorVisionAngle = clampSetting( gfx.butterflyPredatorVisionAngle, 30, 360 );
+gfx.butterflyFleeSpeedMultiplier = clampSetting( gfx.butterflyFleeSpeedMultiplier, 1, 4 );
+gfx.butterflyThreatScanFrequency = clampSetting( gfx.butterflyThreatScanFrequency, 1, 30 );
 gfx.chameleonScale = clampSetting( gfx.chameleonScale, 0.4, 2.5 );
-gfx.chameleonPatrolSpeed = clampSetting( gfx.chameleonPatrolSpeed, 0.05, 2 );
-gfx.chameleonTrackingSpeed = clampSetting( gfx.chameleonTrackingSpeed, 0.05, 3 );
+gfx.chameleonPatrolSpeed = clampSetting( gfx.chameleonPatrolSpeed, 0.05, 4 );
+gfx.chameleonTrackingSpeed = clampSetting( gfx.chameleonTrackingSpeed, 0.05, 5 );
+gfx.chameleonAnimationSpeed = clampSetting( gfx.chameleonAnimationSpeed, 0.1, 4 );
 gfx.chameleonTurnSpeed = clampSetting( gfx.chameleonTurnSpeed, 1, 15 );
+gfx.chameleonRoamingRadius = clampSetting(
+	gfx.chameleonRoamingRadius, 2, Math.ceil( WORLD * Math.SQRT2 ),
+);
+gfx.chameleonCamouflageInterval = clampSetting( gfx.chameleonCamouflageInterval, 1, 60 );
+gfx.chameleonCamouflageMinDuration = clampSetting( gfx.chameleonCamouflageMinDuration, 0.5, 30 );
+gfx.chameleonCamouflageMaxDuration = Math.max(
+	gfx.chameleonCamouflageMinDuration,
+	clampSetting( gfx.chameleonCamouflageMaxDuration, 0.5, 60 ),
+);
+gfx.chameleonSupportClearance = clampSetting( gfx.chameleonSupportClearance, 0, 0.25 );
 gfx.chameleonAttackDistance = clampSetting( gfx.chameleonAttackDistance, 0.5, 8 );
 gfx.chameleonDetectionDistance = Math.max(
 	gfx.chameleonAttackDistance,

@@ -73,6 +73,16 @@ Chaque slot possède un générateur pseudo-aléatoire dérivé de la graine glo
 
 Ajouter ou retirer des lignées ajuste seulement le préfixe actif des buffers fixes. Aucune capacité n’est redimensionnée.
 
+## Perception et fuite du caméléon
+
+Chaque adulte teste une unique menace stable fournie par le caméléon. La perception combine une distance maximale et un cône 3D centré sur la direction de vol. Les analyses sont étalées entre les slots et limitées à une fréquence configurable ; elles ne parcourent ni les autres papillons, ni les objets de la carte.
+
+Lorsqu’un caméléon visible entre dans cette zone, l’activité courante est interrompue, la cible florale est abandonnée et l’intention devient `FLEE_CHAMELEON`. La direction de fuite s’éloigne de la position anticipée du prédateur, tourne progressivement et reste strictement bornée par la vitesse configurée. Une courte mémoire évite un changement de cap instantané entre deux analyses. Il n’existe ni saut de position ni téléportation.
+
+Un caméléon immobile dans son état de camouflage est perceptuellement équivalent à une menace absente : la peur est effacée immédiatement et le papillon peut passer à portée d’attaque. Le matériau du prédateur reçoit parallèlement une teinte de signal configurable, rouge par défaut, pour informer le joueur. Cette couleur n’entre jamais dans la décision : la perception du papillon lit uniquement le booléen logique `camouflaged`.
+
+Les tableaux `threatVisible`, `fearTime`, `threatDistance` et la position anticipée sont des SoA fixes. Avec 64 slots et 10 Hz par défaut, le travail reste borné à 640 tests simples par seconde.
+
 ## Transaction de prédation
 
 Le tableau SoA contient un drapeau `captured[]` par slot. Le caméléon ne reçoit
@@ -138,6 +148,11 @@ Dans **Graphismes → 🌼 Pollinisateurs → 🦋 Papillons** :
 | Échelle | 1 | taille des instances rendues |
 | Vitesse de vol | 4,8 | vitesse des trajets adultes |
 | Vitesse du cycle | 1 | multiplicateur du vieillissement des quatre stades |
+| Distance de vue du prédateur | 8 | portée maximale de perception du caméléon |
+| Angle de vue | 250° | ouverture du cône de perception 3D |
+| Accélération de fuite | 1,75× | multiplicateur borné de la vitesse pendant la fuite |
+| Analyse de menace | 10 Hz | fréquence maximale de perception par adulte |
+| Zone du sélectionné | non | affiche uniquement le volume de vision du papillon inspecté |
 | Teinte | blanc | multiplicateur appliqué à l’atlas d’origine |
 | Projeter les ombres | oui | active la passe d’ombre du draw VAT |
 | Recevoir les ombres | oui | applique l’éclairage ombré aux instances |
@@ -149,8 +164,8 @@ Les changements de nombre, d’échelle, de vitesse, de teinte ou d’ombres ré
 - Œufs, larves et chrysalides n’ont ni position d’hôte, ni plante nourricière, ni modèle 3D.
 - La ponte est la transition abstraite adulte → œuf ; accouplement, sexe et choix d’un site de ponte ne sont pas simulés.
 - Les adultes partagent le nectar floral des abeilles, mais ne pollinisent pas encore le paysage et ne modifient aucune économie.
-- Le vol est un trajet vectoriel continu ; il n’évite pas les arbres, branches, insectes ou obstacles dynamiques.
-- La seule interaction de prédation est l’attaque du caméléon ; les papillons ne disposent pas d’un comportement de fuite.
+- Le vol est un trajet vectoriel continu ; hors évitement du caméléon, il n’évite pas encore les arbres, branches, autres insectes ou obstacles dynamiques.
+- La fuite représente une réaction visuelle à un unique caméléon ; elle ne simule ni occlusion par la végétation, ni apprentissage, ni stratégie collective.
 - Il n’existe qu’un clip de vol. `FEED` et `REST` conservent le même clip, avec un mouvement spatial plus discret.
 - Les durées et seuils sont conçus pour la lisibilité du jeu, pas pour représenter une espèce précise.
 
@@ -169,6 +184,8 @@ Les changements de nombre, d’échelle, de vitesse, de teinte ou d’ombres ré
 - `BUTTERFLY-SIM-009` : absence de hasard ambiant et d’allocation de collection dans la boucle chaude.
 
 `test/butterfly-integration.test.js` protège le contrat de l’asset, le budget VAT, l’unique draw instancié, la capacité fixe, le partage des fleurs, le masquage souterrain et le chargement conditionnel. `POLLINATOR-010` vérifie en complément les drapeaux indépendants de projection et de réception d’ombre jusque dans la façade et l’UI.
+
+`test/butterfly-predator-avoidance.test.js` protège la perception distance/FOV, l’invisibilité immédiate du camouflage, la fuite continue bornée, l’anticipation du prédateur, le déterminisme, la cadence de scan, l’absence d’allocation chaude et le mapping sélection/rendu.
 
 Les preuves `CHAMELEON-SIM-021` à `024` protègent en complément le verrou
 de capture, la position pilotée par la langue, la consommation atomique, le

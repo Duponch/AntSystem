@@ -28,6 +28,7 @@ import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js
 import { createPollinators } from './pollinators.js';
 import { createRagdoll } from './ragdoll.js';
 import { createAntFollow } from './antfollow.js';
+import { createWildlifeInspector } from './wildlife-inspector.js';
 import { createSimulationGuide } from './guide.js';
 import { createUI } from './ui.js';
 import { tryAcquireReadback, releaseReadback } from './readback.js';
@@ -214,6 +215,7 @@ async function main() {
 
 	// suivi de fourmi au clic (outil de débogage des déplacements — antfollow.js)
 	const antfollow = createAntFollow( { sim, pose: ants.pose, renderer, camera, controls } );
+	const wildlife = createWildlifeInspector( { scene, pollinators: bees } );
 	// Manuel fonctionnel indépendant des réglages lil-gui. Il consomme les
 	// mêmes fichiers Markdown que doc/guide et contextualise la sélection.
 	const guide = createSimulationGuide( { antfollow, mount: document.getElementById( 'app' ) } );
@@ -500,13 +502,25 @@ async function main() {
 			const ny = - ( ( e.clientY - rect.top ) / rect.height ) * 2 + 1;
 			const ro = camera.position.clone();
 			const rd = new THREE.Vector3( nx, ny, 0.5 ).unproject( camera ).sub( ro ).normalize();
+			if ( wildlife.pick( ro, rd ) ) {
+
+				antfollow.clear();
+				return;
+
+			}
+			wildlife.clear();
 			antfollow.requestPick( ro, rd );
 
 		} );
 
 		window.addEventListener( 'keydown', ( e ) => {
 
-			if ( e.key === 'Escape' ) antfollow.clear();
+			if ( e.key === 'Escape' ) {
+
+				antfollow.clear();
+				wildlife.clear();
+
+			}
 
 		} );
 
@@ -753,6 +767,7 @@ async function main() {
 		// Underground fauna and colony meshes remain available.
 		const dived = underground.dive;
 		bees.renderFrame( rawDt, ! dived );
+		wildlife.update( rawDt, ! dived );
 		if ( dived !== wasDived ) {
 
 			wasDived = dived;
@@ -894,7 +909,7 @@ async function main() {
 		get latestStats() { return latestAuthorityStats; },
 		get timing() { return lastClockSnapshot; },
 	};
-	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, bees, colony, underground, antfollow, guide, layout, tests, warden, simulationClock, authority, envu: { uShowWalls, uTrailGamma } };
+	window.__antsys = { THREE, renderer, scene, camera, controls, sim, params, gfx, ants, ragdoll, nestVolume, sky, grass, props, foodballs, godrays, cinematic, bench, cones, editor, spiders, bees, colony, underground, antfollow, wildlife, guide, layout, tests, warden, simulationClock, authority, envu: { uShowWalls, uTrailGamma } };
 
 	// banc d'essai automatique : ?bench=5x90
 	const benchMatch = location.search.match( /bench=(\d+)x(\d+)/ );

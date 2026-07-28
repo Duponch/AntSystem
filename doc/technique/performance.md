@@ -107,3 +107,11 @@ La bascule vers ce profil paie une transaction ponctuelle, pas un surcoût perma
 La frontière des araignées réutilise un `ReadbackBuffer` préalloué de **48 KiB** pendant toute la vie du système. À une échéance combinée, les données de proies, dégâts, alarmes, compteurs de morts et victime élue sont copiées dans un seul snapshot puis acquittées par un seul mapping, au lieu de plusieurs mappings et allocations de staging successifs. En mode fluide, ces copies partent après l’image visible, peuvent avoir une frame de retard, et une tentative occupée est coalescée puis retentée sans bloquer ; en mode strict, le même snapshot devient une barrière FIFO. Le buffer est libéré après lecture mais pas réalloué, et sa capacité reste indépendante du nombre de fourmis actives.
 
 Les tests `HYBRID-TIME` protègent le pas unique à `×1`, le découpage `×4/×15/×22`, le plafond fixe à `×100`, la conservation `temps consommé + temps non simulé = temps demandé` et le submit pose/LOD groupé. Les scénarios `TIME-SCALE-ECO` conservent l’oracle bit à bit du mode strict sous plusieurs FPS et avec jitter. Le mutex de readback vérifie à la fois le refus opportuniste, le FIFO strict et la libération après erreur.
+
+### Dispatchs proportionnels à la population active
+
+Les capacités GPU restent préallouées pour le maximum, mais le chemin chaud ne lance plus les slots inactifs. Le nombre de threads de `kAnt` (deux ping-pong), de la pose, du classement LOD et du spawn ragdoll suit directement la population active. Modifier le nombre de fourmis met à jour `ComputeNode.count` sans reconstruire les buffers ni recompiler le pipeline. À la capacité maximale, le comportement et le coût redeviennent exactement ceux du plafond ; à une population ordinaire, les groupes vides disparaissent.
+
+Le filtre 3×3 du champ de phéromones réutilise aussi la lecture du texel central pour le centre local, soit une lecture texture de moins par cellule sans changer l’ordre des neuf additions. Enfin, la passe qui publie les arguments indirects du solveur ragdoll écrit désormais aussi le nombre d’instances à dessiner : la cadence physique utilise deux soumissions compute au lieu de trois.
+
+`test/gpu-dispatch-budget.test.js` protège ces trois invariants structurels. Il ne fixe pas un temps GPU absolu : le gain réel dépend toujours du navigateur, du GPU, du pilote et de la population.

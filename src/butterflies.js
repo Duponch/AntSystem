@@ -84,7 +84,12 @@ function createButterflyRenderer( vat ) {
 
 }
 
-export function createButterflies( { scene, vat, getFlowers } ) {
+export function createButterflies( {
+	scene,
+	vat,
+	getFlowers,
+	getPredatorThreat = null,
+} ) {
 
 	const group = new THREE.Group();
 	group.name = 'Butterflies';
@@ -102,8 +107,9 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		},
 		habitat,
 		flowers: null,
+		predator: null,
 	};
-	function createLifecycleSimulation() {
+	function createLifecycleSimulation( previous = null ) {
 
 		const count = clamp( Math.round( gfx.butterflyCount ), 0, MAX_BUTTERFLIES );
 		const next = createButterflySimulation( {
@@ -112,6 +118,14 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 			seed: 0xB0772026,
 			flightSpeed: gfx.butterflySpeed,
 			lifeSpeed: gfx.butterflyLifeSpeed,
+			predatorViewDistance: previous?.predatorViewDistance,
+			predatorViewFovDegrees: previous?.predatorViewFovDegrees,
+			predatorThreatScanFrequency: previous?.predatorThreatScanFrequency,
+			predatorPredictionTime: previous?.predatorPredictionTime,
+			predatorSeparationDistance: previous?.predatorSeparationDistance,
+			predatorFearMemory: previous?.predatorFearMemory,
+			predatorFleeSpeedMultiplier: previous?.predatorFleeSpeedMultiplier,
+			predatorTurnRate: previous?.predatorTurnRate,
 		} );
 		// The configured population represents lifecycle lineages. Starting them
 		// in four deterministic cohorts prevents every adult disappearing at once.
@@ -130,6 +144,17 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 	let simulation = createLifecycleSimulation();
 	let surfaceVisible = true;
 	let predationDirty = false;
+	let predatorThreatGetter = getPredatorThreat;
+	if ( predatorThreatGetter !== null && typeof predatorThreatGetter !== 'function' ) {
+
+		throw new TypeError( 'getPredatorThreat must be a function or null' );
+
+	}
+	let selectedIndex = - 1;
+	let appliedPredatorVisionDistance = NaN;
+	let appliedPredatorVisionAngle = NaN;
+	let appliedFleeSpeedMultiplier = NaN;
+	let appliedThreatScanFrequency = NaN;
 	const predationContext = {
 		count: simulation.count,
 		capacity: MAX_BUTTERFLIES,
@@ -194,6 +219,8 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 	const heading = new THREE.Vector3();
 	const modelForward = new THREE.Vector3( 0, 0, 1 );
 	const attitude = new THREE.Quaternion();
+	const renderedToLogical = new Int32Array( MAX_BUTTERFLIES );
+	renderedToLogical.fill( - 1 );
 
 	function writeInstances() {
 
@@ -240,6 +267,7 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 			renderer.quaternion.array[ offset + 3 ] = attitude.w;
 			renderer.phase.array[ rendered ] =
 				( views.animationTime[ butterfly ] / renderer.clip.duration ) % 1;
+			renderedToLogical[ rendered ] = butterfly;
 			rendered ++;
 
 		}
@@ -263,6 +291,22 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		context.flowers = getFlowers() || EMPTY_FLOWER_CONTEXT;
 		simulation.flightSpeed = gfx.butterflySpeed;
 		simulation.lifeSpeed = gfx.butterflyLifeSpeed;
+		context.predator = predatorThreatGetter ? predatorThreatGetter() : null;
+		if ( context.predator === undefined ) context.predator = null;
+		if (
+			appliedPredatorVisionDistance !== gfx.butterflyPredatorVisionDistance
+			|| appliedPredatorVisionAngle !== gfx.butterflyPredatorVisionAngle
+			|| appliedFleeSpeedMultiplier !== gfx.butterflyFleeSpeedMultiplier
+			|| appliedThreatScanFrequency !== gfx.butterflyThreatScanFrequency
+		) {
+
+			simulation.setPredatorPerception( gfx );
+			appliedPredatorVisionDistance = simulation.predatorViewDistance;
+			appliedPredatorVisionAngle = simulation.predatorViewFovDegrees;
+			appliedFleeSpeedMultiplier = simulation.predatorFleeSpeedMultiplier;
+			appliedThreatScanFrequency = simulation.predatorThreatScanFrequency;
+
+		}
 
 	}
 
@@ -301,7 +345,8 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 	function reset() {
 
-		simulation = createLifecycleSimulation();
+		simulation = createLifecycleSimulation( simulation );
+		selectedIndex = - 1;
 		syncPredationContext();
 		writeInstances();
 
@@ -313,8 +358,85 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		gfx.butterflyCount = count;
 		simulation.setCount( count, habitat );
 		syncPredationContext();
+		if ( selectedIndex >= count ) selectedIndex = - 1;
 		writeInstances();
 		return count;
+
+	}
+
+	function setPredatorThreatSource( getter ) {
+
+		if ( getter !== null && typeof getter !== 'function' ) {
+
+			throw new TypeError( 'predator threat source must be a function or null' );
+
+		}
+		predatorThreatGetter = getter;
+
+	}
+
+	function setPredatorPerception( settings ) {
+
+		simulation.setPredatorPerception( settings );
+		appliedPredatorVisionDistance = simulation.predatorViewDistance;
+		appliedPredatorVisionAngle = simulation.predatorViewFovDegrees;
+		appliedFleeSpeedMultiplier = simulation.predatorFleeSpeedMultiplier;
+		appliedThreatScanFrequency = simulation.predatorThreatScanFrequency;
+		return simulation;
+
+	}
+
+	function select( index ) {
+
+		if ( ! Number.isInteger( index ) || index < 0 || index >= simulation.count ) {
+
+			throw new RangeError( 'butterfly selection is outside the active range' );
+
+		}
+		selectedIndex = index;
+		return selectedIndex;
+
+	}
+
+	function clearSelection() {
+
+		selectedIndex = - 1;
+
+	}
+
+	function getSelectedIndex() {
+
+		return selectedIndex;
+
+	}
+
+	function getLogicalIndexForInstance( instanceId ) {
+
+		if ( ! Number.isInteger( instanceId ) || instanceId < 0
+			|| instanceId >= renderer.geometry.instanceCount ) return - 1;
+		return renderedToLogical[ instanceId ];
+
+	}
+
+	function selectInstance( instanceId ) {
+
+		const logicalIndex = getLogicalIndexForInstance( instanceId );
+		if ( logicalIndex < 0 ) return - 1;
+		return select( logicalIndex );
+
+	}
+
+	function writeSelectionDebugRecord( output ) {
+
+		if ( selectedIndex < 0 || selectedIndex >= simulation.count ) return null;
+		return simulation.writeDebugRecord( selectedIndex, output );
+
+	}
+
+	function getDebugSnapshot() {
+
+		if ( selectedIndex < 0 || selectedIndex >= simulation.count ) return null;
+		return simulation.snapshot( selectedIndex );
 
 	}
 
@@ -365,6 +487,15 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		renderFrame,
 		reset,
 		setCount,
+		setPredatorThreatSource,
+		setPredatorPerception,
+		select,
+		selectInstance,
+		clearSelection,
+		getSelectedIndex,
+		getLogicalIndexForInstance,
+		writeSelectionDebugRecord,
+		getDebugSnapshot,
 		setSurfaceVisible,
 		setTint,
 		setCastShadow,

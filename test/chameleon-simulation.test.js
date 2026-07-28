@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+	advanceChameleonCamouflageDwell,
+	CHAMELEON_CAMOUFLAGE_SETTLE_SECONDS,
 	CHAMELEON_MAX_SCAN_HZ,
 	CHAMELEON_MIN_SCAN_HZ,
 	CHAMELEON_STATE,
@@ -234,6 +236,51 @@ test( 'CHAMELEON-SIM-003 patrol remains on the pre-sampled log track and reverse
 	assert.ok( maximumTrackPosition > simulation.trackLength - 0.02 );
 	assert.ok( simulation.getTelemetry().trackReversals >= 2 );
 	assert.ok( simulation.getTelemetry().maxStepDistance <= 2 * 0.005 + 1e-5 );
+
+} );
+
+test( 'CHAMELEON-SIM-031 a local explorer can hold and replace a completed corridor without reversal', () => {
+
+	const simulation = createFastSimulation( {
+		holdAtTrackEnd: true,
+		patrolSpeed: 4,
+		restScanDuration: 0.01,
+	} );
+	run( simulation, { count: 0 }, 2, 0.01 );
+	assert.equal( simulation.routeCompleted, 1 );
+	assert.equal( simulation.getView().routeCompleted, 1 );
+	assert.ok( Math.abs( simulation.trackPosition - simulation.trackLength ) < 1e-9 );
+	assert.equal( simulation.patrolDirection, 1 );
+	assert.equal( simulation.getTelemetry().trackReversals, 0 );
+	const previousHeading = [
+		simulation.headingX, simulation.headingY, simulation.headingZ,
+	];
+
+	const next = {
+		count: 2,
+		x: Float32Array.of( 4, 4 ),
+		y: Float32Array.of( 0, 0 ),
+		z: Float32Array.of( 0, 3 ),
+		normalX: Float32Array.of( 0, 0 ),
+		normalY: Float32Array.of( 1, 1 ),
+		normalZ: Float32Array.of( 0, 0 ),
+	};
+	simulation.trackPosition = 0;
+	simulation.setTrackSamples( next );
+	simulation.setHeading( ... previousHeading );
+	assert.equal( simulation.routeCompleted, 0 );
+	assert.equal( simulation.x, 4 );
+	assert.equal( simulation.z, 0 );
+	assert.ok( Math.abs( simulation.headingX - previousHeading[ 0 ] ) < 1e-9 );
+	assert.ok( Math.abs( simulation.headingZ - previousHeading[ 2 ] ) < 1e-9 );
+
+	const xBeforeTurn = simulation.x;
+	const zBeforeTurn = simulation.z;
+	simulation.update( 0.01, { count: 0 } );
+	assert.equal( simulation.x, xBeforeTurn );
+	assert.equal( simulation.z, zBeforeTurn );
+	assert.ok( simulation.headingX > 0 && simulation.headingX < 1 );
+	assert.ok( simulation.headingZ > 0 && simulation.headingZ < 1 );
 
 } );
 
@@ -501,6 +548,9 @@ test( 'CHAMELEON-SIM-014 track buffers and public records remain stable across t
 	const trackX = simulation._trackX;
 	const trackY = simulation._trackY;
 	const trackZ = simulation._trackZ;
+	const trackNormalX = simulation._trackNormalX;
+	const trackNormalY = simulation._trackNormalY;
+	const trackNormalZ = simulation._trackNormalZ;
 	const trackCumulative = simulation._trackCumulative;
 
 	run( simulation, prey, 4, 0.002 );
@@ -510,6 +560,9 @@ test( 'CHAMELEON-SIM-014 track buffers and public records remain stable across t
 	assert.equal( simulation._trackX, trackX );
 	assert.equal( simulation._trackY, trackY );
 	assert.equal( simulation._trackZ, trackZ );
+	assert.equal( simulation._trackNormalX, trackNormalX );
+	assert.equal( simulation._trackNormalY, trackNormalY );
+	assert.equal( simulation._trackNormalZ, trackNormalZ );
 	assert.equal( simulation._trackCumulative, trackCumulative );
 
 	const source = await readFile(
@@ -521,5 +574,55 @@ test( 'CHAMELEON-SIM-014 track buffers and public records remain stable across t
 	const hotPath = source.slice( hotPathStart, hotPathEnd );
 	assert.doesNotMatch( hotPath, /\bnew\s+(?:Array|Object|Map|Set|Float32Array|Uint8Array)\b/ );
 	assert.doesNotMatch( hotPath, /\.(?:map|filter|reduce|slice|sort|forEach)\s*\(/ );
+
+} );
+
+test( 'CHAMELEON-SIM-029 logical mouth follows the baked support normal', () => {
+
+	const simulation = new ChameleonSimulation( {
+		mouthForward: 0.4,
+		mouthHeight: 0.3,
+	} );
+	const track = {
+		count: 2,
+		x: new Float32Array( [ 0, 4 ] ),
+		y: new Float32Array( [ 0, 0 ] ),
+		z: new Float32Array( [ 0, 0 ] ),
+		normalX: new Float32Array( [ 0, 0 ] ),
+		normalY: new Float32Array( [ 0, 0 ] ),
+		normalZ: new Float32Array( [ 1, 1 ] ),
+	};
+
+	simulation.setTrackSamples( track );
+	const view = simulation.getView();
+	assert.ok( Math.abs( view.mouthX - 0.4 ) < 1e-6 );
+	assert.ok( Math.abs( view.mouthY ) < 1e-6 );
+	assert.ok( Math.abs( view.mouthZ - 0.3 ) < 1e-6 );
+	assert.deepEqual( [ view.upX, view.upY, view.upZ ], [ 0, 0, 1 ] );
+	assert.throws(
+		() => simulation.setTrackSamples( { ...track, normalZ: null } ),
+		/track normals require/u,
+	);
+
+} );
+
+test( 'CHAMELEON-SIM-033 camouflage dwell survives acquisition and aim, then reveals on strike', () => {
+
+	let dwell = 0;
+	for ( let step = 0; step < 5; step ++ )
+		dwell = advanceChameleonCamouflageDwell( dwell, 0.02, true, true, false );
+	assert.ok( dwell >= CHAMELEON_CAMOUFLAGE_SETTLE_SECONDS );
+
+	const beforeAcquisition = dwell;
+	// REST_SCAN → TRACK_PREY → AIM_AND_BRACE must not create a visibility hole:
+	// the dedicated dwell is independent of each state's reset stateTime.
+	dwell = advanceChameleonCamouflageDwell( dwell, 1 / 60, true, true, false );
+	dwell = advanceChameleonCamouflageDwell( dwell, 1 / 60, true, true, false );
+	assert.ok( dwell > beforeAcquisition );
+
+	// STRIKE_EXTEND is revealing even if the body has not translated yet.
+	dwell = advanceChameleonCamouflageDwell( dwell, 1 / 60, true, true, true );
+	assert.equal( dwell, 0 );
+	assert.equal( advanceChameleonCamouflageDwell( 0, 1, false, true, false ), 0 );
 
 } );

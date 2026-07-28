@@ -750,6 +750,20 @@ export async function createAnts( sim ) {
 	const PASSES = [ pose.kPose, ... RENDER_PASSES ];
 	let poseReady = false;
 
+	function setActiveDispatchCount( value ) {
+
+		// Les buffers restent dimensionnés pour MAX_ANTS, mais seuls les slots
+		// réellement actifs doivent lancer un thread. ComputeNode.count est
+		// dynamique dans Three.js : il ajuste à la fois le dispatch et sa garde
+		// de borne, sans recompiler le pipeline.
+		const count = Math.max( 0, Math.min( MAX_ANTS, Math.ceil( Number( value ) || 0 ) ) );
+		pose.kPose.count = count;
+		kClassify.count = count;
+
+	}
+
+	setActiveDispatchCount( params.antCount );
+
 	function refreshPose() {
 
 		pose.tick( 0 );
@@ -838,6 +852,7 @@ export async function createAnts( sim ) {
 			grainGeo.instanceCount = n;
 			haloGeo.instanceCount = n;
 			hbGeo.instanceCount = n;
+			setActiveDispatchCount( n );
 
 		},
 		setShadows( on ) {

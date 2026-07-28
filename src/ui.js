@@ -5,7 +5,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
 import {
 	params, gfx, worldToGrid, MAX_ANTS, MAX_SPIDERS, TEXEL,
-	MAX_BEES, MAX_FLOWERS, MAX_BUTTERFLIES,
+	MAX_BEES, MAX_FLOWERS, MAX_BUTTERFLIES, WORLD,
 	MIN_NEST_DEPTH, MAX_NEST_DEPTH, saveSettings, clearSettings,
 } from './config.js';
 import { uGroundA, uGroundB, uFoodColor, uFoodGlow, uHaloStrength, uTrailGamma, uShowWalls } from './environment.js';
@@ -732,6 +732,13 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fButterflies.add( gfx, 'butterflyScale', 0.4, 2.5, 0.05 ).name( 'Taille papillons' );
 	fButterflies.add( gfx, 'butterflySpeed', 1.5, 10, 0.25 ).name( 'Vitesse de vol' );
 	fButterflies.add( gfx, 'butterflyLifeSpeed', 0.25, 4, 0.05 ).name( 'Vitesse du cycle' );
+	const fButterflyAvoidance = fButterflies.addFolder( 'Perception du caméléon' );
+	fButterflyAvoidance.add( gfx, 'butterflyPredatorVisionDistance', 1, 30, 0.25 ).name( 'Distance de vue' );
+	fButterflyAvoidance.add( gfx, 'butterflyPredatorVisionAngle', 30, 360, 5 ).name( 'Angle de vue (°)' );
+	fButterflyAvoidance.add( gfx, 'butterflyFleeSpeedMultiplier', 1, 4, 0.05 ).name( 'Accélération de fuite' );
+	fButterflyAvoidance.add( gfx, 'butterflyThreatScanFrequency', 1, 30, 1 ).name( 'Analyse menace (Hz)' );
+	fButterflyAvoidance.add( gfx, 'butterflyDebugVision' ).name( 'Zone du sélectionné' );
+	fButterflyAvoidance.close();
 	fButterflies.addColor( gfx, 'butterflyTint' ).name( 'Teinte papillons' )
 		.onChange( ( value ) => bees.setButterflyTint( value ) );
 	fButterflies.add( gfx, 'butterflyCastShadow' ).name( 'Projeter les ombres' )
@@ -745,11 +752,25 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fChameleon.add( gfx, 'chameleonEnabled' ).name( 'Activer' )
 		.onChange( ( value ) => bees.setChameleonEnabled( value ) );
 	fChameleon.add( gfx, 'chameleonScale', 0.4, 2.5, 0.05 ).name( 'Taille' );
-	fChameleon.add( gfx, 'chameleonPatrolSpeed', 0.05, 2, 0.05 ).name( 'Vitesse de marche' );
-	fChameleon.add( gfx, 'chameleonTrackingSpeed', 0.05, 3, 0.05 ).name( 'Vitesse de poursuite' );
+	fChameleon.add( gfx, 'chameleonPatrolSpeed', 0.05, 4, 0.05 ).name( 'Vitesse de mouvement' );
+	fChameleon.add( gfx, 'chameleonTrackingSpeed', 0.05, 5, 0.05 ).name( 'Vitesse de poursuite' );
+	fChameleon.add( gfx, 'chameleonAnimationSpeed', 0.1, 4, 0.05 ).name( 'Vitesse animation marche' );
 	fChameleon.add( gfx, 'chameleonTurnSpeed', 1, 15, 0.25 ).name( 'Réactivité orientation' );
+	const fChameleonRoaming = fChameleon.addFolder( 'Exploration et camouflage' );
+	fChameleonRoaming.add( gfx, 'chameleonRoamingEnabled' ).name( 'Explorer la carte' );
+	fChameleonRoaming.add(
+		gfx, 'chameleonRoamingRadius', 2, Math.ceil( WORLD * Math.SQRT2 ), 1,
+	).name( 'Rayon d\'exploration' );
+	fChameleonRoaming.add( gfx, 'chameleonCamouflageEnabled' ).name( 'Camouflage automatique' );
+	fChameleonRoaming.addColor( gfx, 'chameleonCamouflageColor' ).name( 'Signal camouflage' );
+	fChameleonRoaming.add( gfx, 'chameleonCamouflageInterval', 1, 60, 0.5 ).name( 'Intervalle camouflage' );
+	fChameleonRoaming.add( gfx, 'chameleonCamouflageMinDuration', 0.5, 30, 0.25 ).name( 'Camouflage min (s)' );
+	fChameleonRoaming.add( gfx, 'chameleonCamouflageMaxDuration', 0.5, 60, 0.25 ).name( 'Camouflage max (s)' );
+	fChameleonRoaming.add( gfx, 'chameleonSupportClearance', 0, 0.25, 0.001 ).name( 'Dégagement support' );
+	fChameleonRoaming.close();
 	fChameleon.add( gfx, 'chameleonDetectionDistance', 1, 12, 0.1 ).name( 'Distance de détection' );
 	fChameleon.add( gfx, 'chameleonAttackDistance', 0.5, 8, 0.1 ).name( 'Distance d\'attaque' );
+	fChameleon.add( gfx, 'chameleonDebugAttackRange' ).name( 'Zone attaque (sélection)' );
 	fChameleon.add( gfx, 'chameleonAimDuration', 0.2, 3, 0.05 ).name( 'Préparation attaque (s)' );
 	fChameleon.add( gfx, 'chameleonTongueRetractDuration', 0.15, 0.6, 0.01 ).name( 'Rétraction langue (s)' );
 	fChameleon.add( gfx, 'chameleonAttackCooldown', 0.3, 6, 0.1 ).name( 'Repos après attaque (s)' );

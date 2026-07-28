@@ -177,13 +177,14 @@ test( 'CHAMELEON-SIM-019 support relief rebuild is revision-driven and has no fr
 	const source = await readSource( '../src/chameleons.js' );
 
 	assert.match( source, /selectChameleonHost\(\s*props\.registry\s*\)/u );
-	assert.match( source, /buildChameleonTrack\(\s*host/u );
+	assert.match( source, /new ChameleonSurfaceGraphBaker\(\)/u );
+	assert.match( source, /surfaceGraphBaker\.update\(\s*props\.registry/u );
 	assert.match( source, /props\.getRevision/u );
-	assert.match(
-		source,
-		/if\s*\(\s*! force && revision === propRevision && scale === obstacleScale\s*\)\s*return false/u,
-	);
-	assert.match( source, /simulation\.setTrackSamples\(\s*track\.x,\s*track\.y,\s*track\.z/u );
+	assert.match( source, /revision !== propRevision/u );
+	assert.match( source, /nextTreeScale !== treeScale/u );
+	assert.match( source, /nextRockScale !== rockScale/u );
+	assert.match( source, /if\s*\(\s*! changed\s*\)\s*return false/u );
+	assert.match( source, /simulation\.setTrackSamples\(\s*track\s*\)/u );
 	assert.match( source, /localX\.copy\(\s*forward\s*\)\.multiplyScalar\(\s*-\s*1\s*\)/u );
 	assert.match( source, /rotationMatrix\.makeBasis\(\s*localX,\s*up,\s*localZ\s*\)/u );
 	assert.doesNotMatch( source, /Raycaster|raycast|intersectObject|intersectObjects/u );

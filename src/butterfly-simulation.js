@@ -38,6 +38,14 @@ export const BUTTERFLY_FLOWER_CANDIDATE_SAMPLES = 4;
 const UINT32_SCALE = 1 / 4294967296;
 const NO_TARGET = - 1;
 const MAX_LIFECYCLE_TRANSITIONS_PER_UPDATE = 8;
+const DEFAULT_PREDATOR_VIEW_DISTANCE = 6;
+const DEFAULT_PREDATOR_VIEW_FOV_DEGREES = 280;
+const DEFAULT_PREDATOR_SCAN_FREQUENCY = 12;
+const DEFAULT_PREDATOR_PREDICTION_TIME = 0.28;
+const DEFAULT_PREDATOR_SEPARATION_DISTANCE = 2.2;
+const DEFAULT_PREDATOR_FEAR_MEMORY = 0.32;
+const DEFAULT_PREDATOR_FLEE_SPEED_MULTIPLIER = 1.35;
+const DEFAULT_PREDATOR_TURN_RATE = 9;
 const DEFAULT_WEATHER = Object.freeze( {
 	temperatureC: 22,
 	rain: 0,
@@ -137,6 +145,14 @@ export class ButterflySimulation {
 		feedDurationSpread = 1.2,
 		flightTimeout = 16,
 		flightTimeoutSpread = 8,
+		predatorViewDistance = DEFAULT_PREDATOR_VIEW_DISTANCE,
+		predatorViewFovDegrees = DEFAULT_PREDATOR_VIEW_FOV_DEGREES,
+		predatorThreatScanFrequency = DEFAULT_PREDATOR_SCAN_FREQUENCY,
+		predatorPredictionTime = DEFAULT_PREDATOR_PREDICTION_TIME,
+		predatorSeparationDistance = DEFAULT_PREDATOR_SEPARATION_DISTANCE,
+		predatorFearMemory = DEFAULT_PREDATOR_FEAR_MEMORY,
+		predatorFleeSpeedMultiplier = DEFAULT_PREDATOR_FLEE_SPEED_MULTIPLIER,
+		predatorTurnRate = DEFAULT_PREDATOR_TURN_RATE,
 		staggerInitialLifecycle = true,
 	} = {} ) {
 
@@ -164,6 +180,27 @@ export class ButterflySimulation {
 		this.feedDurationSpread = Math.max( 0, feedDurationSpread );
 		this.flightTimeout = Math.max( 0.01, flightTimeout );
 		this.flightTimeoutSpread = Math.max( 0, flightTimeoutSpread );
+		this.predatorViewDistance = DEFAULT_PREDATOR_VIEW_DISTANCE;
+		this.predatorViewFovDegrees = DEFAULT_PREDATOR_VIEW_FOV_DEGREES;
+		this.predatorViewCosHalfFov = - 1;
+		this.predatorThreatScanFrequency = DEFAULT_PREDATOR_SCAN_FREQUENCY;
+		this.predatorThreatScanInterval = 1 / DEFAULT_PREDATOR_SCAN_FREQUENCY;
+		this.predatorPredictionTime = DEFAULT_PREDATOR_PREDICTION_TIME;
+		this.predatorSeparationDistance = DEFAULT_PREDATOR_SEPARATION_DISTANCE;
+		this.predatorFearMemory = DEFAULT_PREDATOR_FEAR_MEMORY;
+		this.predatorFleeSpeedMultiplier = DEFAULT_PREDATOR_FLEE_SPEED_MULTIPLIER;
+		this.predatorTurnRate = DEFAULT_PREDATOR_TURN_RATE;
+		this.predatorCamouflaged = false;
+		this.setPredatorPerception( {
+			viewDistance: predatorViewDistance,
+			viewFovDegrees: predatorViewFovDegrees,
+			predictionTime: predatorPredictionTime,
+			threatScanFrequency: predatorThreatScanFrequency,
+			separationDistance: predatorSeparationDistance,
+			fearMemory: predatorFearMemory,
+			fleeSpeedMultiplier: predatorFleeSpeedMultiplier,
+			turnRate: predatorTurnRate,
+		} );
 		this.staggerInitialLifecycle = !! staggerInitialLifecycle;
 
 		this._stageDuration = new Float32Array( 4 );
@@ -182,6 +219,7 @@ export class ButterflySimulation {
 		this.behavior = new Uint8Array( capacity );
 		this.visible = new Uint8Array( capacity );
 		this.captured = new Uint8Array( capacity );
+		this.threatVisible = new Uint8Array( capacity );
 		this.targetFlower = new Int32Array( capacity );
 		this.lastPatch = new Int32Array( capacity );
 		this.rngState = new Uint32Array( capacity );
@@ -197,9 +235,16 @@ export class ButterflySimulation {
 		this.behaviorTime = new Float32Array( capacity );
 		this.age = new Float32Array( capacity );
 		this.animationTime = new Float32Array( capacity );
+		this.fearTime = new Float32Array( capacity );
+		this.threatDistance = new Float32Array( capacity );
+		this.threatScanTime = new Float32Array( capacity );
+		this.threatX = new Float32Array( capacity );
+		this.threatY = new Float32Array( capacity );
+		this.threatZ = new Float32Array( capacity );
 
 		this.targetFlower.fill( NO_TARGET );
 		this.lastPatch.fill( NO_TARGET );
+		this.threatDistance.fill( Infinity );
 
 		this._stageCounts = new Uint32Array( BUTTERFLY_STAGE_NAMES.length );
 		this._behaviorCounts = new Uint32Array( BUTTERFLY_BEHAVIOR_NAMES.length );
@@ -218,6 +263,10 @@ export class ButterflySimulation {
 			adultsEmerged: 0,
 			cyclesCompleted: 0,
 			predated: 0,
+			fleeing: 0,
+			threatDetections: 0,
+			threatScans: 0,
+			fleeDistance: 0,
 			distanceTravelled: 0,
 			lifecycleCatchupClamps: 0,
 			stageCounts: this._stageCounts,
@@ -229,6 +278,7 @@ export class ButterflySimulation {
 			behavior: this.behavior,
 			visible: this.visible,
 			captured: this.captured,
+			threatVisible: this.threatVisible,
 			targetFlower: this.targetFlower,
 			x: this.x,
 			y: this.y,
@@ -240,10 +290,77 @@ export class ButterflySimulation {
 			behaviorTime: this.behaviorTime,
 			age: this.age,
 			animationTime: this.animationTime,
+			fearTime: this.fearTime,
+			threatDistance: this.threatDistance,
 			generation: this.generation,
 		} );
 
 		this.addButterflies( initialCount, DEFAULT_HABITAT, initialStage );
+
+	}
+
+	setPredatorPerception( settings = {} ) {
+
+		if ( ! settings || typeof settings !== 'object' ) {
+
+			throw new TypeError( 'predator perception settings object is required' );
+
+		}
+		const viewDistance = settings.butterflyPredatorVisionDistance
+			?? settings.visionDistance
+			?? settings.viewDistance
+			?? this.predatorViewDistance;
+		const viewFovDegrees = settings.butterflyPredatorVisionAngle
+			?? settings.visionAngle
+			?? settings.viewFovDegrees
+			?? this.predatorViewFovDegrees;
+		const threatScanFrequency = settings.butterflyThreatScanFrequency
+			?? settings.threatScanFrequency
+			?? this.predatorThreatScanFrequency;
+		const fleeSpeedMultiplier = settings.butterflyFleeSpeedMultiplier
+			?? settings.fleeSpeedMultiplier
+			?? this.predatorFleeSpeedMultiplier;
+		const predictionTime = settings.predictionTime ?? this.predatorPredictionTime;
+		const separationDistance = settings.separationDistance ?? this.predatorSeparationDistance;
+		const fearMemory = settings.fearMemory ?? this.predatorFearMemory;
+		const turnRate = settings.turnRate ?? this.predatorTurnRate;
+
+		if ( ! Number.isFinite( viewDistance )
+			|| ! Number.isFinite( viewFovDegrees )
+			|| ! Number.isFinite( threatScanFrequency )
+			|| ! Number.isFinite( fleeSpeedMultiplier )
+			|| ! Number.isFinite( predictionTime )
+			|| ! Number.isFinite( separationDistance )
+			|| ! Number.isFinite( fearMemory )
+			|| ! Number.isFinite( turnRate ) ) {
+
+			throw new TypeError( 'predator perception values must be finite' );
+
+		}
+		this.predatorViewDistance = Math.max( 0.01, viewDistance );
+		this.predatorViewFovDegrees = Math.min( 360, Math.max( 1, viewFovDegrees ) );
+		this.predatorViewCosHalfFov = Math.cos( this.predatorViewFovDegrees * Math.PI / 360 );
+		this.predatorThreatScanFrequency = Math.min( 60, Math.max( 1, threatScanFrequency ) );
+		this.predatorThreatScanInterval = 1 / this.predatorThreatScanFrequency;
+		this.predatorFleeSpeedMultiplier = Math.max( 0.1, fleeSpeedMultiplier );
+		this.predatorPredictionTime = Math.max( 0, predictionTime );
+		this.predatorSeparationDistance = Math.max( 0.01, separationDistance );
+		this.predatorFearMemory = Math.max( 0, fearMemory );
+		this.predatorTurnRate = Math.max( 0.1, turnRate );
+		return this;
+
+	}
+
+	_clearThreat( index, resetScan = false ) {
+
+		this.threatVisible[ index ] = 0;
+		this.fearTime[ index ] = 0;
+		this.threatDistance[ index ] = Infinity;
+		if ( resetScan ) {
+
+			this.threatScanTime[ index ] = ( index & 7 ) * this.predatorThreatScanInterval * 0.125;
+
+		}
 
 	}
 
@@ -284,6 +401,7 @@ export class ButterflySimulation {
 		this.stageTime[ index ] = duration;
 		this.targetFlower[ index ] = NO_TARGET;
 		this.captured[ index ] = 0;
+		this._clearThreat( index, true );
 
 		if ( stage === BUTTERFLY_STAGE.ADULT ) {
 
@@ -380,6 +498,7 @@ export class ButterflySimulation {
 		if ( this.visible[ index ] !== 1 || this.captured[ index ] === 1 ) return false;
 		this.captured[ index ] = 1;
 		this.targetFlower[ index ] = NO_TARGET;
+		this._clearThreat( index );
 		return true;
 
 	}
@@ -537,6 +656,159 @@ export class ButterflySimulation {
 
 	}
 
+	_updatePredatorAvoidance( index, predator, dt ) {
+
+		if ( ! predator || predator.active === false || predator.enabled === false || predator.visible === false
+			|| predator.camouflaged === true || predator.isCamouflaged === true ) {
+
+			this._clearThreat( index );
+			return false;
+
+		}
+
+		this.fearTime[ index ] = Math.max( 0, this.fearTime[ index ] - dt );
+		this.threatScanTime[ index ] -= dt;
+		if ( this.threatScanTime[ index ] <= 0 ) {
+
+			this.threatScanTime[ index ] = this.predatorThreatScanInterval;
+			this._telemetry.threatScans ++;
+			const predatorX = predator.x;
+			const predatorY = predator.y;
+			const predatorZ = predator.z;
+			let seen = Number.isFinite( predatorX )
+				&& Number.isFinite( predatorY )
+				&& Number.isFinite( predatorZ );
+			let toX = 0;
+			let toY = 0;
+			let toZ = 0;
+			let distance = Infinity;
+			if ( seen ) {
+
+				toX = predatorX - this.x[ index ];
+				toY = predatorY - this.y[ index ];
+				toZ = predatorZ - this.z[ index ];
+				const distanceSquared = toX * toX + toY * toY + toZ * toZ;
+				seen = distanceSquared <= this.predatorViewDistance * this.predatorViewDistance;
+				if ( seen ) {
+
+					distance = Math.sqrt( distanceSquared );
+					if ( distance > 0.000001 ) {
+
+						const headingLength = Math.hypot(
+							this.headingX[ index ],
+							this.headingY[ index ],
+							this.headingZ[ index ],
+						);
+						if ( headingLength > 0.000001 ) {
+
+							const facing = (
+								this.headingX[ index ] * toX
+								+ this.headingY[ index ] * toY
+								+ this.headingZ[ index ] * toZ
+							) / ( headingLength * distance );
+							seen = facing >= this.predatorViewCosHalfFov;
+
+						}
+
+					}
+
+				}
+
+			}
+
+			const wasVisible = this.threatVisible[ index ] === 1;
+			this.threatVisible[ index ] = seen ? 1 : 0;
+			if ( seen ) {
+
+				if ( ! wasVisible ) this._telemetry.threatDetections ++;
+				this.fearTime[ index ] = this.predatorFearMemory + this.predatorThreatScanInterval;
+				this.threatDistance[ index ] = distance;
+				let velocityX = Number.isFinite( predator.velocityX ) ? predator.velocityX : 0;
+				let velocityY = Number.isFinite( predator.velocityY ) ? predator.velocityY : 0;
+				let velocityZ = Number.isFinite( predator.velocityZ ) ? predator.velocityZ : 0;
+				if ( velocityX === 0 && velocityY === 0 && velocityZ === 0 ) {
+
+					const speed = Number.isFinite( predator.speed ) ? predator.speed : 0;
+					velocityX = Number.isFinite( predator.headingX ) ? predator.headingX * speed : 0;
+					velocityY = Number.isFinite( predator.headingY ) ? predator.headingY * speed : 0;
+					velocityZ = Number.isFinite( predator.headingZ ) ? predator.headingZ * speed : 0;
+
+				}
+				let predictionScale = this.predatorPredictionTime;
+				const predictedDisplacement = Math.hypot( velocityX, velocityY, velocityZ ) * predictionScale;
+				const maximumPrediction = this.predatorViewDistance * 0.5;
+				if ( predictedDisplacement > maximumPrediction && predictedDisplacement > 0 ) {
+
+					predictionScale *= maximumPrediction / predictedDisplacement;
+
+				}
+				this.threatX[ index ] = predatorX + velocityX * predictionScale;
+				this.threatY[ index ] = predatorY + velocityY * predictionScale;
+				this.threatZ[ index ] = predatorZ + velocityZ * predictionScale;
+
+			}
+
+		}
+
+		if ( this.fearTime[ index ] <= 0 ) {
+
+			this._clearThreat( index );
+			return false;
+
+		}
+
+		let awayX = this.x[ index ] - this.threatX[ index ];
+		let awayY = this.y[ index ] - this.threatY[ index ];
+		let awayZ = this.z[ index ] - this.threatZ[ index ];
+		let awayLength = Math.hypot( awayX, awayY, awayZ );
+		if ( awayLength <= 0.000001 ) {
+
+			awayX = ( index & 1 ) === 0 ? 1 : - 1;
+			awayY = 0.35;
+			awayZ = ( index & 2 ) === 0 ? - 0.65 : 0.65;
+			awayLength = Math.hypot( awayX, awayY, awayZ );
+
+		}
+		awayX /= awayLength;
+		awayY /= awayLength;
+		awayZ /= awayLength;
+		const urgency = clamp01( 1 - awayLength / this.predatorSeparationDistance );
+		awayY += 0.12 + urgency * 0.28;
+		const awayAdjustedLength = Math.hypot( awayX, awayY, awayZ ) || 1;
+		awayX /= awayAdjustedLength;
+		awayY /= awayAdjustedLength;
+		awayZ /= awayAdjustedLength;
+
+		const turnBlend = Math.min( 1, this.predatorTurnRate * ( 1 + urgency ) * dt );
+		let headingX = this.headingX[ index ] + ( awayX - this.headingX[ index ] ) * turnBlend;
+		let headingY = this.headingY[ index ] + ( awayY - this.headingY[ index ] ) * turnBlend;
+		let headingZ = this.headingZ[ index ] + ( awayZ - this.headingZ[ index ] ) * turnBlend;
+		const headingLength = Math.hypot( headingX, headingY, headingZ ) || 1;
+		headingX /= headingLength;
+		headingY /= headingLength;
+		headingZ /= headingLength;
+
+		const step = this.flightSpeed * this.predatorFleeSpeedMultiplier * ( 0.9 + urgency * 0.25 ) * dt;
+		this.x[ index ] += headingX * step;
+		this.y[ index ] += headingY * step;
+		this.z[ index ] += headingZ * step;
+		this.headingX[ index ] = headingX;
+		this.headingY[ index ] = headingY;
+		this.headingZ[ index ] = headingZ;
+		this.threatDistance[ index ] = Math.hypot(
+			this.x[ index ] - this.threatX[ index ],
+			this.y[ index ] - this.threatY[ index ],
+			this.z[ index ] - this.threatZ[ index ],
+		);
+		this.targetFlower[ index ] = NO_TARGET;
+		this.behavior[ index ] = BUTTERFLY_BEHAVIOR.FLY;
+		this.behaviorTime[ index ] = Math.max( this.behaviorTime[ index ], this.fearTime[ index ] );
+		this._telemetry.fleeDistance += step;
+		this._telemetry.distanceTravelled += step;
+		return true;
+
+	}
+
 	_advanceLifecycle( index, lifeDelta, habitat ) {
 
 		let remaining = this.stageTime[ index ] - lifeDelta;
@@ -592,6 +864,7 @@ export class ButterflySimulation {
 		let flying = 0;
 		let feeding = 0;
 		let resting = 0;
+		let fleeing = 0;
 
 		for ( let i = 0; i < this.count; i ++ ) {
 
@@ -600,6 +873,7 @@ export class ButterflySimulation {
 			if ( stage !== BUTTERFLY_STAGE.ADULT ) continue;
 
 			visibleAdults ++;
+			if ( this.fearTime[ i ] > 0 ) fleeing ++;
 			const behavior = this.behavior[ i ];
 			this._behaviorCounts[ behavior ] ++;
 			if ( behavior === BUTTERFLY_BEHAVIOR.FLY ) flying ++;
@@ -613,6 +887,7 @@ export class ButterflySimulation {
 		this._telemetry.flying = flying;
 		this._telemetry.feeding = feeding;
 		this._telemetry.resting = resting;
+		this._telemetry.fleeing = fleeing;
 
 	}
 
@@ -624,6 +899,15 @@ export class ButterflySimulation {
 		const weather = activeContext.weather || DEFAULT_WEATHER;
 		const habitat = activeContext.habitat || DEFAULT_HABITAT;
 		const flowers = activeContext.flowers || EMPTY_FLOWERS;
+		const predator = activeContext.predator || null;
+		this.predatorCamouflaged = !! predator
+			&& ( predator.camouflaged === true || predator.isCamouflaged === true );
+		const predatorActive = !! predator
+			&& predator.active !== false
+			&& predator.enabled !== false
+			&& predator.visible !== false
+			&& ! this.predatorCamouflaged;
+		const clearPredatorFear = ! predatorActive && this._telemetry.fleeing > 0;
 		const flightCondition = this._flightCondition( daylight, weather );
 		const canFly = flightCondition >= 0.22;
 		const lifeDelta = dt * this.lifeSpeed;
@@ -644,6 +928,13 @@ export class ButterflySimulation {
 			if ( lifeDelta > 0 ) this._advanceLifecycle( i, lifeDelta, habitat );
 			if ( this.stage[ i ] !== BUTTERFLY_STAGE.ADULT ) continue;
 
+			if ( ( predatorActive || clearPredatorFear )
+				&& this._updatePredatorAvoidance( i, predatorActive ? predator : null, dt ) ) {
+
+				this.animationTime[ i ] += dt;
+				continue;
+
+			}
 			this.behaviorTime[ i ] -= dt;
 			if ( this.behavior[ i ] === BUTTERFLY_BEHAVIOR.FLY ) {
 
@@ -817,6 +1108,15 @@ export class ButterflySimulation {
 		output.behaviorCode = this.behavior[ index ];
 		output.visible = this.visible[ index ] === 1;
 		output.captured = this.captured[ index ] === 1;
+		output.threat = this.fearTime[ index ] > 0 ? 'CHAMELEON' : null;
+		output.threatVisible = this.threatVisible[ index ] === 1;
+		output.threatDistance = this.threatDistance[ index ];
+		output.fearRemaining = this.fearTime[ index ];
+		output.predatorCamouflaged = this.predatorCamouflaged;
+		output.visionDistance = this.predatorViewDistance;
+		output.visionFovDegrees = this.predatorViewFovDegrees;
+		output.threatScanFrequency = this.predatorThreatScanFrequency;
+		output.fleeSpeedMultiplier = this.predatorFleeSpeedMultiplier;
 		output.positionX = this.x[ index ];
 		output.positionY = this.y[ index ];
 		output.positionZ = this.z[ index ];
@@ -827,6 +1127,18 @@ export class ButterflySimulation {
 		output.stageTime = this.stageTime[ index ];
 		output.age = this.age[ index ];
 		output.generation = this.generation[ index ];
+		output.behaviorTime = this.behaviorTime[ index ];
+		output.intention = output.captured
+			? 'CAPTURED'
+			: this.stage[ index ] !== BUTTERFLY_STAGE.ADULT
+				? 'DEVELOPING'
+				: this.fearTime[ index ] > 0
+					? 'FLEE_CHAMELEON'
+					: this.behavior[ index ] === BUTTERFLY_BEHAVIOR.FLY
+						? 'FLY_TO_FLOWER'
+						: this.behavior[ index ] === BUTTERFLY_BEHAVIOR.FEED
+							? 'FEED_AT_FLOWER'
+							: 'REST';
 		return output;
 
 	}
