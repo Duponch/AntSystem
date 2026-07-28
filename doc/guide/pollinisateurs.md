@@ -18,21 +18,23 @@ Le nombre **Abeilles visibles** règle des représentantes graphiques, pas la po
 Une abeille suit ce cycle :
 
 ```text
-ruche → orientation → fleur → récolte → retour → déchargement → repos
+ruche → orientation → fleur → pose → récolte → décollage → retour → déchargement → repos
 ```
 
 - **Dans la ruche**, elle attend des conditions favorables et récupère de l’énergie.
 - **En orientation**, une nouvelle butineuse décrit un court vol autour de l’entrée avant de partir loin.
 - **À l’aller**, elle rejoint une fleur précise.
-- **En approche**, elle ralentit et descend sur la cible.
-- **En récolte**, elle prélève du nectar ou du pollen. Elle peut ensuite visiter une autre fleur.
-- **Au retour**, elle rejoint directement l’entrée.
+- **En approche**, elle ralentit et descend vers un point de contact précis de la fleur.
+- **À la pose**, sa trajectoire et son orientation se raccordent progressivement à la composition de butinage créée dans Blender.
+- **En récolte**, l’animation de butinage reste active pendant environ 10 secondes par défaut. Elle prélève du nectar ou du pollen et peut ensuite visiter une autre fleur.
+- **Au décollage**, elle quitte le contact à vitesse nulle, prend de la hauteur en douceur puis s’aligne sur son prochain trajet.
+- **Au retour**, elle rejoint directement l’entrée sans changement instantané de position.
 - **Au déchargement**, elle livre sa charge.
 - **Au repos**, elle récupère avant un autre trajet.
 
-Les états d’orientation, d’aller, d’approche et de retour utilisent le même cycle de vol : changer d’étape ne redémarre pas brusquement le battement des ailes. La phase ne repart qu’au véritable passage entre l’animation de vol et celle de récolte.
+Les états d’orientation, d’aller, d’approche, de décollage, de départ et de retour utilisent le même cycle de vol : changer d’étape ne redémarre pas brusquement le battement des ailes. La pose lance l’animation de butinage, qui continue sans redémarrage pendant la récolte. En vol, le corps s’aligne progressivement presque à l’horizontale sur la vitesse réelle ; sur la fleur, il retrouve l’orientation et le contact de référence de la scène Blender.
 
-L’attente dans la ruche et le repos sont cachés. Une abeille peut donc disparaître à l’entrée puis ressortir plus tard sans qu’il s’agisse d’un bug. Un retour trop long possède aussi une sécurité : l’abeille termine à la ruche au lieu de rester définitivement bloquée.
+L’attente dans la ruche et le repos sont cachés. Une abeille peut donc disparaître à l’entrée puis ressortir plus tard sans qu’il s’agisse d’un bug. Tous les raccords visibles — pose, décollage, départ et arrivée — sont continus : aucun état ne replace instantanément l’abeille ailleurs.
 
 ## Vie de la colonie
 
@@ -75,12 +77,14 @@ Ouvrez **Graphismes → 🌼 Pollinisateurs** :
 
 - **Activer** affiche et avance le système. S’il est sauvegardé désactivé, les modèles et animations ne sont pas chargés au prochain lancement ; le réactiver déclenche leur chargement en arrière-plan ;
 - **Abeilles visibles** contrôle le nombre de représentantes, sans modifier les 32 000 ouvrières agrégées ; **Taille abeilles** et **Vitesse de vol** règlent leur lecture à l’écran ;
-- **Durée des cycles** multiplie les temps d’attente, de récolte et de repos : une valeur élevée ralentit le cycle ;
+- **Butinage sur fleur (s)** règle la durée centrale de la récolte de 2 à 40 secondes. La durée réelle d’une visite varie de façon déterministe entre 0,7× et 1,5× cette valeur ;
 - **Lumière du jour**, **Température**, **Pluie** et **Vent** changent la possibilité de partir ;
 - **Fleurs**, **Taille fleurs** et **Variation fleurs** reconstruisent le champ lorsque le curseur est relâché ;
 - **Mouvement fleurs** règle leur balancement sans reconstruire le décor ;
 - les quatre teintes modifient pétales, tiges, abeilles et ailes en direct ;
-- **Taille ruche** redimensionne la ruche et recalcule son point de départ.
+- **Ombres abeilles** sépare la projection d’ombre de la réception d’ombre ;
+- **Taille ruche** redimensionne la ruche et recalcule son point de départ ;
+- **Ombres ruche** sépare également projection et réception pour tous les maillages de la ruche.
 
 Les limites visibles du panneau sont sûres : au maximum 128 abeilles et 256 fleurs. Les fleurs partagent un seul rendu instancié, comme les abeilles en vol ; augmenter leur nombre n’ajoute pas un draw par objet.
 
@@ -88,6 +92,6 @@ Les limites visibles du panneau sont sûres : au maximum 128 abeilles et 256 fle
 
 La reine, les œufs, les larves, les nymphes, les émergences et la mortalité adulte sont suivis uniquement comme quantités agrégées. Ils n’ont ni modèle 3D ni comportement individuel. Le système ne simule pas les mâles, les nourrices, les tâches internes, les rayons de cire, l’essaimage, les maladies ou la danse de recrutement. Les abeilles ne nourrissent pas les fourmis et les fourmis n’attaquent pas la ruche.
 
-Une visite florale est une animation de récolte avec un stock nectar/pollen. Elle ne féconde pas encore la plante, ne crée pas de graine et ne modifie pas le paysage. Les abeilles ne s’évitent pas entre elles et ne calculent pas de chemin autour des branches : leur vol est un trajet continu vers la cible, enrichi d’un léger arc visuel.
+Une visite florale est une animation de récolte avec un stock nectar/pollen. Elle ne féconde pas encore la plante, ne crée pas de graine et ne modifie pas le paysage. Les abeilles ne s’évitent pas entre elles et ne calculent pas de chemin autour des branches : leur vol reste un trajet vectoriel continu vers la cible, avec des raccords de pose et de décollage lissés.
 
 Le système vise donc une scène de butinage cohérente, déterministe et performante. Il ne faut pas interpréter ses compteurs, ses âges accélérés ou ses seuils comme une prédiction scientifique d’une ruche réelle.

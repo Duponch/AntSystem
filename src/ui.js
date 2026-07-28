@@ -58,7 +58,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		setPopulation( v );
 
 	} );
-	fColony.add( params, 'simSpeed', 0, 4, 0.1 ).name( 'Vitesse ×' );
+	fColony.add( params, 'simSpeed', 0, 100, 0.1 ).name( 'Vitesse ×' );
 	fColony.add( params, 'paused' ).name( 'Pause' );
 	fColony.add( { reset: onReset }, 'reset' ).name( '🔄 Réinitialiser' );
 
@@ -670,7 +670,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( value ) => bees.setBeeCount( value ) );
 	fPollinators.add( gfx, 'beeScale', 0.4, 2.5, 0.05 ).name( 'Taille abeilles' );
 	fPollinators.add( gfx, 'beeSpeed', 2, 16, 0.25 ).name( 'Vitesse de vol' );
-	fPollinators.add( gfx, 'beeForageDuration', 0.35, 3, 0.05 ).name( 'Durée des cycles' );
+	fPollinators.add( gfx, 'beeForageDuration', 2, 40, 0.5 ).name( 'Butinage sur fleur (s)' );
 	fPollinators.add( gfx, 'beeDaylight', 0, 1, 0.02 ).name( 'Lumière du jour' );
 	fPollinators.add( gfx, 'beeTemperature', 5, 38, 0.5 ).name( 'Température (°C)' );
 	fPollinators.add( gfx, 'beeRain', 0, 1, 0.02 ).name( 'Pluie' );
@@ -690,8 +690,20 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		.onChange( ( value ) => bees.setBeeTint( value ) );
 	fPollinators.addColor( gfx, 'beeWingColor' ).name( 'Teinte ailes' )
 		.onChange( ( value ) => bees.setBeeWingColor( value ) );
+	const fBeeShadows = fPollinators.addFolder( 'Ombres abeilles' );
+	fBeeShadows.add( gfx, 'beeCastShadow' ).name( 'Projeter' )
+		.onChange( ( value ) => bees.setBeeCastShadow( value ) );
+	fBeeShadows.add( gfx, 'beeReceiveShadow' ).name( 'Recevoir' )
+		.onChange( ( value ) => bees.setBeeReceiveShadow( value ) );
+	fBeeShadows.close();
 	fPollinators.add( gfx, 'hiveScale', 0.35, 1.5, 0.05 ).name( 'Taille ruche' )
 		.onChange( ( value ) => bees.setHiveScale( value ) );
+	const fHiveShadows = fPollinators.addFolder( 'Ombres ruche' );
+	fHiveShadows.add( gfx, 'hiveCastShadow' ).name( 'Projeter' )
+		.onChange( ( value ) => bees.setHiveCastShadow( value ) );
+	fHiveShadows.add( gfx, 'hiveReceiveShadow' ).name( 'Recevoir' )
+		.onChange( ( value ) => bees.setHiveReceiveShadow( value ) );
+	fHiveShadows.close();
 
 	const fButterflies = fPollinators.addFolder( '🦋 Papillons' );
 	fButterflies.add( gfx, 'butterflies' ).name( 'Activer les papillons' );
@@ -702,8 +714,30 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fButterflies.add( gfx, 'butterflyLifeSpeed', 0.25, 4, 0.05 ).name( 'Vitesse du cycle' );
 	fButterflies.addColor( gfx, 'butterflyTint' ).name( 'Teinte papillons' )
 		.onChange( ( value ) => bees.setButterflyTint( value ) );
+	fButterflies.add( gfx, 'butterflyCastShadow' ).name( 'Projeter les ombres' )
+		.onChange( ( value ) => bees.setButterflyCastShadow( value ) );
+	fButterflies.add( gfx, 'butterflyReceiveShadow' ).name( 'Recevoir les ombres' )
+		.onChange( ( value ) => bees.setButterflyReceiveShadow( value ) );
 	fButterflies.close();
 	fPollinators.close();
+
+	const fChameleon = fGfx.addFolder( 'Caméléon' );
+	fChameleon.add( gfx, 'chameleonEnabled' ).name( 'Activer' )
+		.onChange( ( value ) => bees.setChameleonEnabled( value ) );
+	fChameleon.add( gfx, 'chameleonScale', 0.4, 2.5, 0.05 ).name( 'Taille' );
+	fChameleon.add( gfx, 'chameleonPatrolSpeed', 0.05, 2, 0.05 ).name( 'Vitesse de marche' );
+	fChameleon.add( gfx, 'chameleonTrackingSpeed', 0.05, 3, 0.05 ).name( 'Vitesse de poursuite' );
+	fChameleon.add( gfx, 'chameleonTurnSpeed', 1, 15, 0.25 ).name( 'Réactivité orientation' );
+	fChameleon.add( gfx, 'chameleonDetectionDistance', 1, 12, 0.1 ).name( 'Distance de détection' );
+	fChameleon.add( gfx, 'chameleonAttackDistance', 0.5, 8, 0.1 ).name( 'Distance d\'attaque' );
+	fChameleon.add( gfx, 'chameleonAimDuration', 0.2, 3, 0.05 ).name( 'Préparation attaque (s)' );
+	fChameleon.add( gfx, 'chameleonTongueRetractDuration', 0.15, 0.6, 0.01 ).name( 'Rétraction langue (s)' );
+	fChameleon.add( gfx, 'chameleonAttackCooldown', 0.3, 6, 0.1 ).name( 'Repos après attaque (s)' );
+	fChameleon.add( gfx, 'chameleonCastShadow' ).name( 'Projeter les ombres' )
+		.onChange( ( value ) => bees.setChameleonCastShadow( value ) );
+	fChameleon.add( gfx, 'chameleonReceiveShadow' ).name( 'Recevoir les ombres' )
+		.onChange( ( value ) => bees.setChameleonReceiveShadow( value ) );
+	fChameleon.close();
 	const fGrass = fGfx.addFolder( 'Herbe' );
 	fGrass.add( gfx, 'grass' ).name( 'Herbe' );
 	fGrass.add( gfx, 'grassDensity', 5, grass.MAX_DENSITY, 1 ).name( 'Densité (brins/m²)' );

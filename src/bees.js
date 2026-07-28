@@ -19,10 +19,33 @@ const FLOWER_STOCK = 18;
 // Tree meshes are normalized to one unit of height. Keep the hive below the
 // foliage so both the entrance and the flight corridor remain readable.
 const TREE_SOCKET = new THREE.Vector3( 0.058, 0.275, 0.022 );
+// Contact authored in Blender between BeeForageRig and Flower_Forage_Root,
+// expressed in the normalized Flower.glb frame. Keeping it explicit makes the
+// runtime pose reproduce the reference scene instead of guessing the blossom
+// center from an axis-aligned bounding box.
+const FLOWER_CONTACT_X = - 0.0887;
+const FLOWER_CONTACT_Y = 0.761;
+const FLOWER_CONTACT_Z = - 0.176;
+const FORAGE_ATTITUDE = new THREE.Quaternion(
+	- 0.4121364, 0.734995, - 0.2633494, 0.4696521,
+).normalize();
+const WORLD_UP = new THREE.Vector3( 0, 1, 0 );
 
 function clamp( value, low, high ) {
 
 	return Math.min( high, Math.max( low, value ) );
+
+}
+
+function setHierarchyShadows( root, castShadow, receiveShadow ) {
+
+	root.traverse( ( object ) => {
+
+		if ( ! object.isMesh ) return;
+		object.castShadow = !! castShadow;
+		object.receiveShadow = !! receiveShadow;
+
+	} );
 
 }
 
@@ -40,11 +63,10 @@ function prepareHive( source ) {
 
 		if ( ! object.isMesh ) return;
 		object.material = material;
-		object.castShadow = true;
-		object.receiveShadow = true;
 
 	} );
 
+	setHierarchyShadows( model, gfx.hiveCastShadow, gfx.hiveReceiveShadow );
 	model.updateMatrixWorld( true );
 	const attach = model.getObjectByName( 'Beehive_AttachPoint' );
 	const flight = model.getObjectByName( 'Beehive_FlightPoint' );
@@ -238,8 +260,8 @@ function createBeeRenderer( vat ) {
 	const mesh = new THREE.Mesh( geometry, material );
 	mesh.name = 'HoneyBeeVATInstances';
 	mesh.frustumCulled = false;
-	mesh.castShadow = false;
-	mesh.receiveShadow = false;
+	mesh.castShadow = !! gfx.beeCastShadow;
+	mesh.receiveShadow = !! gfx.beeReceiveShadow;
 
 	return {
 		mesh,
@@ -278,11 +300,18 @@ export function createBees( { scene, props, assets } ) {
 	const renderPosition = new THREE.Vector3();
 	const modelForward = new THREE.Vector3( - 1, 0, 0 );
 	const attitude = new THREE.Quaternion();
+	const targetAttitude = new THREE.Quaternion();
+	const flowerYawAttitude = new THREE.Quaternion();
 	const flowerContext = {
 		count: 0,
 		x: new Float32Array(),
 		y: new Float32Array(),
 		z: new Float32Array(),
+		contactX: new Float32Array(),
+		contactY: new Float32Array(),
+		contactZ: new Float32Array(),
+		yaw: new Float32Array(),
+		scale: new Float32Array(),
 		active: new Uint8Array(),
 		patch: new Uint16Array(),
 		quality: new Float32Array(),
@@ -302,6 +331,11 @@ export function createBees( { scene, props, assets } ) {
 	const transitionLeft = new Float32Array( MAX_BEES );
 	const blendFromPhase = new Float32Array( MAX_BEES );
 	const lastPhase = new Float32Array( MAX_BEES );
+	const attitudeX = new Float32Array( MAX_BEES );
+	const attitudeY = new Float32Array( MAX_BEES );
+	const attitudeZ = new Float32Array( MAX_BEES );
+	const attitudeW = new Float32Array( MAX_BEES );
+	const attitudeReady = new Uint8Array( MAX_BEES );
 	currentClip.fill( BEE_CLIP.HIDDEN );
 	blendFromClip.fill( BEE_CLIP.HIDDEN );
 
@@ -310,7 +344,8 @@ export function createBees( { scene, props, assets } ) {
 		initialCount: 0,
 		seed: 0xBEE2026,
 		flightSpeed: gfx.beeSpeed,
-		durationScale: gfx.beeForageDuration,
+		durationScale: 1,
+		forageDurationSeconds: gfx.beeForageDuration,
 		initialAdultWorkers: 32000,
 		initialEggs: 3600,
 		initialLarvae: 6500,
@@ -376,6 +411,11 @@ export function createBees( { scene, props, assets } ) {
 		const x = new Float32Array( count );
 		const y = new Float32Array( count );
 		const z = new Float32Array( count );
+		const contactX = new Float32Array( count );
+		const contactY = new Float32Array( count );
+		const contactZ = new Float32Array( count );
+		const yaw = new Float32Array( count );
+		const flowerScale = new Float32Array( count );
 		const active = new Uint8Array( count );
 		const quality = new Float32Array( count );
 		const nectar = new Float32Array( count );
@@ -399,6 +439,13 @@ export function createBees( { scene, props, assets } ) {
 			x[ i ] = dummy.position.x;
 			y[ i ] = scale * 0.88;
 			z[ i ] = dummy.position.z;
+			yaw[ i ] = flowerLayout.yaws[ i ];
+			flowerScale[ i ] = scale;
+			const cosine = Math.cos( yaw[ i ] );
+			const sine = Math.sin( yaw[ i ] );
+			contactX[ i ] = x[ i ] + ( FLOWER_CONTACT_X * cosine + FLOWER_CONTACT_Z * sine ) * scale;
+			contactY[ i ] = FLOWER_CONTACT_Y * scale;
+			contactZ[ i ] = z[ i ] + ( - FLOWER_CONTACT_X * sine + FLOWER_CONTACT_Z * cosine ) * scale;
 			active[ i ] = 1;
 			quality[ i ] = 0.72 + ( ( i * 73 ) % 29 ) / 100;
 			nectar[ i ] = FLOWER_STOCK;
@@ -410,7 +457,7 @@ export function createBees( { scene, props, assets } ) {
 		flowerRenderer.mesh.instanceMatrix.needsUpdate = true;
 		flowerRenderer.mesh.computeBoundingSphere();
 		Object.assign( flowerContext, {
-			count, x, y, z, active,
+			count, x, y, z, contactX, contactY, contactZ, yaw, scale: flowerScale, active,
 			patch: flowerLayout.patchIds,
 			quality, nectar, pollen,
 		} );
@@ -480,6 +527,7 @@ export function createBees( { scene, props, assets } ) {
 				transitionLeft[ bee ] = 0;
 				blendFromPhase[ bee ] = 0;
 				lastPhase[ bee ] = 0;
+				attitudeReady[ bee ] = 0;
 				continue;
 
 			}
@@ -501,38 +549,40 @@ export function createBees( { scene, props, assets } ) {
 
 			renderPosition.set( views.x[ bee ], views.y[ bee ], views.z[ bee ] );
 			const state = views.state[ bee ];
+			const target = views.targetFlower[ bee ];
 			if (
-				state === BEE_STATE.ORIENTATION ||
-				state === BEE_STATE.OUTBOUND ||
-				state === BEE_STATE.APPROACH ||
-				state === BEE_STATE.RETURN
+				( state === BEE_STATE.TOUCHDOWN || state === BEE_STATE.FORAGE ) &&
+				target >= 0 &&
+				target < flowerContext.count
 			) {
 
-				const dxHive = renderPosition.x - context.hive.x;
-				const dzHive = renderPosition.z - context.hive.z;
-				const distanceHive = Math.hypot( dxHive, dzHive );
-				let distanceFlower = distanceHive;
-				const target = views.targetFlower[ bee ];
-				if ( target >= 0 && target < flowerContext.count ) {
+				flowerYawAttitude.setFromAxisAngle( WORLD_UP, flowerContext.yaw[ target ] );
+				targetAttitude.multiplyQuaternions( flowerYawAttitude, FORAGE_ATTITUDE );
 
-					distanceFlower = Math.hypot(
-						renderPosition.x - flowerContext.x[ target ],
-						renderPosition.z - flowerContext.z[ target ],
-					);
+			} else {
 
-				}
-				renderPosition.y += Math.min( 3.2, Math.min( distanceHive, distanceFlower ) * 0.18 );
-				const sway = Math.sin( simulation.time * 3.1 + bee * 2.399 ) * 0.18;
-				renderPosition.x -= views.headingZ[ bee ] * sway;
-				renderPosition.z += views.headingX[ bee ] * sway;
-				renderPosition.y += Math.sin( simulation.time * 4.3 + bee ) * 0.06;
+				heading.set( views.headingX[ bee ], views.headingY[ bee ], views.headingZ[ bee ] );
+				if ( heading.lengthSq() < 1e-6 ) heading.copy( modelForward );
+				else heading.normalize();
+				targetAttitude.setFromUnitVectors( modelForward, heading );
 
 			}
 
-			heading.set( views.headingX[ bee ], views.headingY[ bee ], views.headingZ[ bee ] );
-			if ( heading.lengthSq() < 1e-6 ) heading.copy( modelForward );
-			else heading.normalize();
-			attitude.setFromUnitVectors( modelForward, heading );
+			if ( attitudeReady[ bee ] === 0 ) {
+
+				attitude.copy( targetAttitude );
+
+			} else {
+
+				attitude.set( attitudeX[ bee ], attitudeY[ bee ], attitudeZ[ bee ], attitudeW[ bee ] );
+				attitude.slerp( targetAttitude, 1 - Math.exp( - dt * 8 ) );
+
+			}
+			attitudeX[ bee ] = attitude.x;
+			attitudeY[ bee ] = attitude.y;
+			attitudeZ[ bee ] = attitude.z;
+			attitudeW[ bee ] = attitude.w;
+			attitudeReady[ bee ] = 1;
 
 			const poseOffset = rendered * 4;
 			beeRenderer.pose.array[ poseOffset ] = renderPosition.x;
@@ -597,7 +647,7 @@ export function createBees( { scene, props, assets } ) {
 		context.weather.rain = gfx.beeRain;
 		context.weather.windSpeed = gfx.beeWind;
 		simulation.flightSpeed = gfx.beeSpeed;
-		simulation.durationScale = gfx.beeForageDuration;
+		simulation.forageDurationSeconds = gfx.beeForageDuration;
 		flowerRenderer.uTime.value += dt;
 		flowerRenderer.uWind.value = gfx.flowerWind;
 		updateStocks( dt );
@@ -615,7 +665,8 @@ export function createBees( { scene, props, assets } ) {
 			initialCount: 0,
 			seed: 0xBEE2026,
 			flightSpeed: gfx.beeSpeed,
-			durationScale: gfx.beeForageDuration,
+			durationScale: 1,
+			forageDurationSeconds: gfx.beeForageDuration,
 			initialAdultWorkers: 32000,
 			initialEggs: 3600,
 			initialLarvae: 6500,
@@ -626,6 +677,7 @@ export function createBees( { scene, props, assets } ) {
 		transitionLeft.fill( 0 );
 		blendFromPhase.fill( 0 );
 		lastPhase.fill( 0 );
+		attitudeReady.fill( 0 );
 		refreshHiveAnchor( true );
 		refreshFlowers();
 		setBeeCount();
@@ -678,6 +730,34 @@ export function createBees( { scene, props, assets } ) {
 
 	}
 
+	function setBeeCastShadow( value ) {
+
+		gfx.beeCastShadow = !! value;
+		beeRenderer.mesh.castShadow = gfx.beeCastShadow;
+
+	}
+
+	function setBeeReceiveShadow( value ) {
+
+		gfx.beeReceiveShadow = !! value;
+		beeRenderer.mesh.receiveShadow = gfx.beeReceiveShadow;
+
+	}
+
+	function setHiveCastShadow( value ) {
+
+		gfx.hiveCastShadow = !! value;
+		setHierarchyShadows( hiveAsset.model, gfx.hiveCastShadow, gfx.hiveReceiveShadow );
+
+	}
+
+	function setHiveReceiveShadow( value ) {
+
+		gfx.hiveReceiveShadow = !! value;
+		setHierarchyShadows( hiveAsset.model, gfx.hiveCastShadow, gfx.hiveReceiveShadow );
+
+	}
+
 	refreshHiveAnchor( true );
 	refreshFlowers();
 	setBeeCount();
@@ -704,6 +784,10 @@ export function createBees( { scene, props, assets } ) {
 		setFlowerStemColor,
 		setBeeTint,
 		setBeeWingColor,
+		setBeeCastShadow,
+		setBeeReceiveShadow,
+		setHiveCastShadow,
+		setHiveReceiveShadow,
 		getSimulation: () => simulation,
 		getTelemetry: () => simulation.getTelemetry(),
 		getFlowerContext: () => flowerContext,

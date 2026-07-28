@@ -19,7 +19,7 @@ La fonctionnalité est divisée en quatre couches :
 1. `butterfly-simulation.js` avance le cycle de vie et l’activité adulte sans dépendre de Three.js ;
 2. `pollinator-assets.js` transforme `Butterfly.glb` en animation de sommets VAT ;
 3. `butterflies.js` écrit les adultes visibles dans un unique rendu instancié ;
-4. `pollinators.js` partage les fleurs et les conditions météo des abeilles, puis charge le papillon à la demande.
+4. `pollinators.js` partage les fleurs et les conditions météo des abeilles, charge le papillon à la demande et ordonne le pont avec le caméléon.
 
 Le champ floral est celui de `BEE-SIM`. Les papillons lisent les mêmes positions, parcelles, qualités et stocks de nectar que les abeilles. Une visite prélève une faible quantité du stock partagé. Aucun champ de fleurs, maillage ou recherche spatiale supplémentaire n’est créé pour eux.
 
@@ -73,6 +73,35 @@ Chaque slot possède un générateur pseudo-aléatoire dérivé de la graine glo
 
 Ajouter ou retirer des lignées ajuste seulement le préfixe actif des buffers fixes. Aucune capacité n’est redimensionnée.
 
+## Transaction de prédation
+
+Le tableau SoA contient un drapeau `captured[]` par slot. Le caméléon ne reçoit
+pas des objets papillon : `butterflies.js` lui fournit une vue stable sur les
+positions, visibilités, directions et drapeaux, accompagnée de quatre
+opérations bornées :
+
+```text
+tryCapture(index)
+setCapturedPosition(index, x, y, z)
+releaseCapture(index)
+consume(index)
+```
+
+Le pont `consume(index)` délègue à `consumeCaptured()` dans le noyau.
+`tryCapture` accepte uniquement un adulte visible qui n’est pas déjà réservé.
+Dès cet instant, la boucle de cycle et de vol ignore ce slot : la langue devient
+son unique autorité de position. `setCapturedPosition` écrit le contact puis la
+rétraction continue sans recréer d’instance. `consumeCaptured` n’est appelé
+qu’au passage dans la bouche ; il incrémente la prédation et la génération,
+puis recycle atomiquement la lignée au stade œuf. `releaseCapture` restitue un
+adulte valide si le caméléon est désactivé ou si l’attaque est annulée.
+
+L’ordre d’une image est volontairement papillons → caméléon → écriture du
+rendu papillon. Une position modifiée par la langue est donc visible dans la
+même image et ne produit ni téléportation, ni image de retard. L’écriture
+supplémentaire n’est déclenchée que lorsqu’une capture a effectivement déplacé
+ou consommé une proie.
+
 ## Asset, VAT et rendu
 
 `Butterfly.glb` contient :
@@ -110,8 +139,10 @@ Dans **Graphismes → 🌼 Pollinisateurs → 🦋 Papillons** :
 | Vitesse de vol | 4,8 | vitesse des trajets adultes |
 | Vitesse du cycle | 1 | multiplicateur du vieillissement des quatre stades |
 | Teinte | blanc | multiplicateur appliqué à l’atlas d’origine |
+| Projeter les ombres | oui | active la passe d’ombre du draw VAT |
+| Recevoir les ombres | oui | applique l’éclairage ombré aux instances |
 
-Les changements de nombre, d’échelle, de vitesse et de teinte réutilisent les allocations existantes. Désactiver les papillons les masque et fige leur noyau ; si le réglage est persisté avant un rechargement, `Butterfly.glb` et sa VAT ne sont pas chargés.
+Les changements de nombre, d’échelle, de vitesse, de teinte ou d’ombres réutilisent les allocations existantes. Les deux drapeaux d’ombre agissent sur l’unique maillage VAT et n’ajoutent aucune instance ni draw de surface ; activer la projection l’inscrit seulement dans la passe d’ombre déjà gérée par le moteur. Désactiver les papillons les masque et fige leur noyau ; si le réglage est persisté avant un rechargement, `Butterfly.glb` et sa VAT ne sont pas chargés.
 
 ## Limites connues
 
@@ -119,6 +150,7 @@ Les changements de nombre, d’échelle, de vitesse et de teinte réutilisent le
 - La ponte est la transition abstraite adulte → œuf ; accouplement, sexe et choix d’un site de ponte ne sont pas simulés.
 - Les adultes partagent le nectar floral des abeilles, mais ne pollinisent pas encore le paysage et ne modifient aucune économie.
 - Le vol est un trajet vectoriel continu ; il n’évite pas les arbres, branches, insectes ou obstacles dynamiques.
+- La seule interaction de prédation est l’attaque du caméléon ; les papillons ne disposent pas d’un comportement de fuite.
 - Il n’existe qu’un clip de vol. `FEED` et `REST` conservent le même clip, avec un mouvement spatial plus discret.
 - Les durées et seuils sont conçus pour la lisibilité du jeu, pas pour représenter une espèce précise.
 
@@ -136,6 +168,13 @@ Les changements de nombre, d’échelle, de vitesse et de teinte réutilisent le
 - `BUTTERFLY-SIM-008` : diagnostic explicite du stade et du comportement ;
 - `BUTTERFLY-SIM-009` : absence de hasard ambiant et d’allocation de collection dans la boucle chaude.
 
-`test/butterfly-integration.test.js` protège le contrat de l’asset, le budget VAT, l’unique draw instancié, la capacité fixe, le partage des fleurs, le masquage souterrain et le chargement conditionnel.
+`test/butterfly-integration.test.js` protège le contrat de l’asset, le budget VAT, l’unique draw instancié, la capacité fixe, le partage des fleurs, le masquage souterrain et le chargement conditionnel. `POLLINATOR-010` vérifie en complément les drapeaux indépendants de projection et de réception d’ombre jusque dans la façade et l’UI.
 
-Toute modification du cycle, des décisions, de l’asset, des capacités, du chargement ou du rendu doit mettre à jour dans la même livraison les tests, ce document technique et le guide utilisateur. Une retouche artistique pure peut rester validée visuellement si elle ne change aucun invariant fonctionnel ou de performance.
+Les preuves `CHAMELEON-SIM-021` à `024` protègent en complément le verrou
+de capture, la position pilotée par la langue, la consommation atomique, le
+rejet des slots invalides et le relâchement. Toute modification du cycle, des
+décisions, de l’asset, des capacités, du chargement, de la prédation ou du
+rendu doit mettre à jour dans la même livraison les tests, ce document
+technique et le guide utilisateur. Une retouche artistique pure peut rester
+validée visuellement si elle ne change aucun invariant fonctionnel ou de
+performance.

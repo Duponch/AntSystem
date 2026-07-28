@@ -181,6 +181,7 @@ export class ButterflySimulation {
 		this.stage = new Uint8Array( capacity );
 		this.behavior = new Uint8Array( capacity );
 		this.visible = new Uint8Array( capacity );
+		this.captured = new Uint8Array( capacity );
 		this.targetFlower = new Int32Array( capacity );
 		this.lastPatch = new Int32Array( capacity );
 		this.rngState = new Uint32Array( capacity );
@@ -216,6 +217,7 @@ export class ButterflySimulation {
 			larvaePupated: 0,
 			adultsEmerged: 0,
 			cyclesCompleted: 0,
+			predated: 0,
 			distanceTravelled: 0,
 			lifecycleCatchupClamps: 0,
 			stageCounts: this._stageCounts,
@@ -226,6 +228,7 @@ export class ButterflySimulation {
 			stage: this.stage,
 			behavior: this.behavior,
 			visible: this.visible,
+			captured: this.captured,
 			targetFlower: this.targetFlower,
 			x: this.x,
 			y: this.y,
@@ -280,6 +283,7 @@ export class ButterflySimulation {
 		if ( stagger ) duration *= 0.1 + this._random( index ) * 0.9;
 		this.stageTime[ index ] = duration;
 		this.targetFlower[ index ] = NO_TARGET;
+		this.captured[ index ] = 0;
 
 		if ( stage === BUTTERFLY_STAGE.ADULT ) {
 
@@ -366,6 +370,56 @@ export class ButterflySimulation {
 	getTelemetry() {
 
 		return this._telemetry;
+
+	}
+
+	tryCapture( index ) {
+
+		if ( ! Number.isInteger( index ) || index < 0 || index >= this.count ) return false;
+		if ( this.stage[ index ] !== BUTTERFLY_STAGE.ADULT ) return false;
+		if ( this.visible[ index ] !== 1 || this.captured[ index ] === 1 ) return false;
+		this.captured[ index ] = 1;
+		this.targetFlower[ index ] = NO_TARGET;
+		return true;
+
+	}
+
+	setCapturedPosition( index, x, y, z ) {
+
+		if ( ! Number.isInteger( index ) || index < 0 || index >= this.count ) return false;
+		if ( this.captured[ index ] !== 1 ) return false;
+		if ( ! Number.isFinite( x ) || ! Number.isFinite( y ) || ! Number.isFinite( z ) ) return false;
+		this.x[ index ] = x;
+		this.y[ index ] = y;
+		this.z[ index ] = z;
+		return true;
+
+	}
+
+	releaseCapture( index ) {
+
+		if ( ! Number.isInteger( index ) || index < 0 || index >= this.count ) return false;
+		if ( this.captured[ index ] !== 1 ) return false;
+		this.captured[ index ] = 0;
+		this._setBehavior(
+			index,
+			BUTTERFLY_BEHAVIOR.REST,
+			this._randomDuration( index, this.restDuration, this.restDurationSpread ),
+		);
+		return true;
+
+	}
+
+	consumeCaptured( index, habitat = DEFAULT_HABITAT ) {
+
+		if ( ! Number.isInteger( index ) || index < 0 || index >= this.count ) return false;
+		if ( this.captured[ index ] !== 1 || this.stage[ index ] !== BUTTERFLY_STAGE.ADULT ) return false;
+		this._telemetry.predated ++;
+		this._telemetry.cyclesCompleted ++;
+		this.generation[ index ] ++;
+		this._setStage( index, BUTTERFLY_STAGE.EGG, habitat, false );
+		this._refreshTelemetryCounts();
+		return true;
 
 	}
 
@@ -580,6 +634,12 @@ export class ButterflySimulation {
 
 		for ( let i = 0; i < this.count; i ++ ) {
 
+			if ( this.captured[ i ] === 1 ) {
+
+				this.animationTime[ i ] += dt;
+				continue;
+
+			}
 			this.age[ i ] += lifeDelta;
 			if ( lifeDelta > 0 ) this._advanceLifecycle( i, lifeDelta, habitat );
 			if ( this.stage[ i ] !== BUTTERFLY_STAGE.ADULT ) continue;
@@ -756,6 +816,7 @@ export class ButterflySimulation {
 		output.behavior = BUTTERFLY_BEHAVIOR_NAMES[ this.behavior[ index ] ];
 		output.behaviorCode = this.behavior[ index ];
 		output.visible = this.visible[ index ] === 1;
+		output.captured = this.captured[ index ] === 1;
 		output.positionX = this.x[ index ];
 		output.positionY = this.y[ index ];
 		output.positionZ = this.z[ index ];

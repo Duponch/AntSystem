@@ -40,6 +40,19 @@ Au départ, il compare toujours un petit échantillon de quatre fleurs. Il préf
 
 Les papillons et les abeilles partagent le même champ et ses stocks. Une visite de papillon prélève donc une petite quantité de nectar disponible. Elle ne produit pas encore de graines, de nouvelles plantes ou de nourriture pour les fourmis.
 
+## Quand un caméléon attaque
+
+Le caméléon ne vise que les adultes visibles. Un papillon touché reste accroché
+au bout de la langue et suit sa rétraction sans saut de position. Il ne
+disparaît qu’à l’entrée effective dans la bouche. Le slot de sa lignée
+recommence alors au stade œuf : la baisse momentanée du nombre de papillons
+visibles est donc une conséquence du cycle, pas un despawn graphique.
+
+Pendant cette très courte capture, le vol et le vieillissement du papillon
+sont suspendus afin que deux systèmes ne déplacent pas la même proie. Si
+l’attaque est annulée avant consommation, il est relâché proprement et reprend
+son cycle adulte.
+
 ## Lumière et météo
 
 Les papillons reprennent les réglages **Lumière du jour**, **Température**, **Pluie** et **Vent** du panneau des pollinisateurs. Des conditions défavorables empêchent de nouveaux vols et gardent les adultes au repos.
@@ -55,12 +68,13 @@ Ouvrez **Graphismes → 🌼 Pollinisateurs → 🦋 Papillons** :
 - **Échelle** modifie leur taille visuelle ;
 - **Vitesse de vol** modifie la vitesse de déplacement des adultes ;
 - **Vitesse du cycle** accélère ou ralentit les quatre stades : une valeur élevée fait tourner les générations plus vite ;
-- **Teinte** colore le modèle tout en conservant son atlas et son éclairage.
+- **Teinte** colore le modèle tout en conservant son atlas et son éclairage ;
+- **Projeter les ombres** et **Recevoir les ombres** règlent indépendamment sa contribution aux ombres de la scène.
 
 Le modèle animé n’est chargé que lorsque Pollinisateurs et Papillons sont tous deux actifs. Une partie lancée avec les papillons désactivés évite donc ce coût ; une activation ultérieure les charge une seule fois en arrière-plan.
 
 ## Ce que la simulation ne représente pas encore
 
-Les stades immatures sont des états logiques : aucune chenille ne rampe, aucune chrysalide ne s’accroche et aucun œuf n’est placé sur une plante. Accouplement, espèces, plantes hôtes, prédateurs et migration ne sont pas modélisés. Les adultes n’évitent pas physiquement les branches ou les autres insectes.
+Les stades immatures sont des états logiques : aucune chenille ne rampe, aucune chrysalide ne s’accroche et aucun œuf n’est placé sur une plante. Accouplement, espèces, plantes hôtes et migration ne sont pas modélisés. Le caméléon est le seul prédateur ; les adultes n’évitent pas physiquement les branches, les autres insectes ou sa zone d’attaque.
 
 Le système cherche surtout à rendre un cycle simple, compréhensible, reproductible et peu coûteux. Les durées accélérées et les décisions ne doivent pas être interprétées comme une prédiction scientifique d’une espèce réelle.

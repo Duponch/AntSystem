@@ -78,8 +78,8 @@ function createButterflyRenderer( vat ) {
 	const mesh = new THREE.Mesh( geometry, material );
 	mesh.name = 'ButterflyVATInstances';
 	mesh.frustumCulled = false;
-	mesh.castShadow = false;
-	mesh.receiveShadow = false;
+	mesh.castShadow = !! gfx.butterflyCastShadow;
+	mesh.receiveShadow = !! gfx.butterflyReceiveShadow;
 	return { mesh, geometry, material, pose, quaternion, phase, uTint, clip };
 
 }
@@ -129,6 +129,69 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 	let simulation = createLifecycleSimulation();
 	let surfaceVisible = true;
+	let predationDirty = false;
+	const predationX = new Float32Array( MAX_BUTTERFLIES );
+	const predationY = new Float32Array( MAX_BUTTERFLIES );
+	const predationZ = new Float32Array( MAX_BUTTERFLIES );
+	const predationContext = {
+		count: simulation.count,
+		capacity: MAX_BUTTERFLIES,
+		x: predationX,
+		y: predationY,
+		z: predationZ,
+		visible: null,
+		captured: null,
+		headingX: null,
+		headingY: null,
+		headingZ: null,
+		tryCapture( index ) {
+
+			const accepted = simulation.tryCapture( index );
+			if ( accepted ) predationDirty = true;
+			return accepted;
+
+		},
+		setCapturedPosition( index, x, y, z ) {
+
+			const accepted = simulation.setCapturedPosition( index, x, y, z );
+			if ( accepted ) {
+
+				predationX[ index ] = x;
+				predationY[ index ] = y;
+				predationZ[ index ] = z;
+				predationDirty = true;
+
+			}
+			return accepted;
+
+		},
+		releaseCapture( index ) {
+
+			const accepted = simulation.releaseCapture( index );
+			if ( accepted ) predationDirty = true;
+			return accepted;
+
+		},
+		consume( index ) {
+
+			const accepted = simulation.consumeCaptured( index, habitat );
+			if ( accepted ) predationDirty = true;
+			return accepted;
+
+		},
+	};
+
+	function syncPredationContext() {
+
+		const views = simulation.getViews();
+		predationContext.count = simulation.count;
+		predationContext.visible = views.visible;
+		predationContext.captured = views.captured;
+		predationContext.headingX = views.headingX;
+		predationContext.headingY = views.headingY;
+		predationContext.headingZ = views.headingZ;
+
+	}
 
 	const renderPosition = new THREE.Vector3();
 	const heading = new THREE.Vector3();
@@ -144,18 +207,24 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 			if ( views.visible[ butterfly ] !== 1 ) continue;
 			renderPosition.set( views.x[ butterfly ], views.y[ butterfly ], views.z[ butterfly ] );
-			if ( views.behavior[ butterfly ] === BUTTERFLY_BEHAVIOR.FLY ) {
+			if (
+				views.captured[ butterfly ] !== 1
+				&& views.behavior[ butterfly ] === BUTTERFLY_BEHAVIOR.FLY
+			) {
 
 				const sway = Math.sin( simulation.time * 3.7 + butterfly * 2.173 ) * 0.22;
 				renderPosition.x -= views.headingZ[ butterfly ] * sway;
 				renderPosition.z += views.headingX[ butterfly ] * sway;
 				renderPosition.y += Math.sin( simulation.time * 5.1 + butterfly * 0.83 ) * 0.12;
 
-			} else {
+			} else if ( views.captured[ butterfly ] !== 1 ) {
 
 				renderPosition.y += Math.sin( simulation.time * 1.9 + butterfly ) * 0.025;
 
 			}
+			predationX[ butterfly ] = renderPosition.x;
+			predationY[ butterfly ] = renderPosition.y;
+			predationZ[ butterfly ] = renderPosition.z;
 
 			heading.set(
 				views.headingX[ butterfly ],
@@ -185,6 +254,8 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		renderer.pose.needsUpdate = true;
 		renderer.quaternion.needsUpdate = true;
 		renderer.phase.needsUpdate = true;
+		predationContext.count = simulation.count;
+		predationDirty = false;
 		return rendered;
 
 	}
@@ -211,6 +282,7 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 	function reset() {
 
 		simulation = createLifecycleSimulation();
+		syncPredationContext();
 		writeInstances();
 
 	}
@@ -220,8 +292,16 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		const count = clamp( Math.round( value ), 0, MAX_BUTTERFLIES );
 		gfx.butterflyCount = count;
 		simulation.setCount( count, habitat );
+		syncPredationContext();
 		writeInstances();
 		return count;
+
+	}
+
+	function flushPredationRender() {
+
+		if ( predationDirty ) writeInstances();
+		return renderer.geometry.instanceCount;
 
 	}
 
@@ -239,6 +319,21 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 
 	}
 
+	function setCastShadow( value ) {
+
+		gfx.butterflyCastShadow = !! value;
+		renderer.mesh.castShadow = gfx.butterflyCastShadow;
+
+	}
+
+	function setReceiveShadow( value ) {
+
+		gfx.butterflyReceiveShadow = !! value;
+		renderer.mesh.receiveShadow = gfx.butterflyReceiveShadow;
+
+	}
+
+	syncPredationContext();
 	writeInstances();
 	setSurfaceVisible( true );
 
@@ -250,6 +345,11 @@ export function createButterflies( { scene, vat, getFlowers } ) {
 		setCount,
 		setSurfaceVisible,
 		setTint,
+		setCastShadow,
+		setReceiveShadow,
+		flushPredationRender,
+		getPredationContext: () =>
+			gfx.pollinators && gfx.butterflies && surfaceVisible ? predationContext : null,
 		getSimulation: () => simulation,
 		getTelemetry: () => simulation.getTelemetry(),
 	};

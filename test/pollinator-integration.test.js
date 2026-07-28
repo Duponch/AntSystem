@@ -408,3 +408,58 @@ test( 'POLLINATOR-009 disabled pollinators skip asset loading and can lazy-start
 	assert.match( facadeSource, /if\s*\(\s*gfx\.pollinators\s*\)\s*void ensureLoaded\(\)/u );
 
 } );
+
+test( 'POLLINATOR-010 Blender flower contact, VAT clips and independent shadows are wired end to end', async () => {
+
+	const [ beeSource, simulationSource, butterflySource, facadeSource, configSource, uiSource ] = await Promise.all( [
+		readSource( '../src/bees.js' ),
+		readSource( '../src/bee-simulation.js' ),
+		readSource( '../src/butterflies.js' ),
+		readSource( '../src/pollinators.js' ),
+		readSource( '../src/config.js' ),
+		readSource( '../src/ui.js' ),
+	] );
+
+	assert.match( beeSource, /FLOWER_CONTACT_X = - 0\.0887/u );
+	assert.match( beeSource, /FLOWER_CONTACT_Y = 0\.761/u );
+	assert.match( beeSource, /FLOWER_CONTACT_Z = - 0\.176/u );
+	assert.match( beeSource, /FORAGE_ATTITUDE = new THREE\.Quaternion\(\s*- 0\.4121364, 0\.734995, - 0\.2633494, 0\.4696521/u );
+	assert.match( beeSource, /contactX\[ i \] = x\[ i \] \+ \( FLOWER_CONTACT_X \* cosine \+ FLOWER_CONTACT_Z \* sine \) \* scale/u );
+	assert.match( beeSource, /state === BEE_STATE\.TOUCHDOWN \|\| state === BEE_STATE\.FORAGE/u );
+	assert.match( beeSource, /targetAttitude\.multiplyQuaternions\( flowerYawAttitude, FORAGE_ATTITUDE \)/u );
+	assert.match( beeSource, /targetAttitude\.setFromUnitVectors\( modelForward, heading \)/u );
+	assert.match( beeSource, /attitude\.slerp\( targetAttitude, 1 - Math\.exp\( - dt \* 8 \) \)/u );
+	assert.doesNotMatch( beeSource, /renderPosition\.y\s*\+=/u );
+
+	assert.match( simulationSource, /state === BEE_STATE\.TOUCHDOWN \|\| state === BEE_STATE\.FORAGE/u );
+	assert.match( simulationSource, /case BEE_STATE\.TOUCHDOWN:[\s\S]*?_advanceHermite/u );
+	assert.match( simulationSource, /case BEE_STATE\.TAKEOFF:[\s\S]*?_beginDepart/u );
+	assert.match( simulationSource, /case BEE_STATE\.DEPART:[\s\S]*?_advanceHermite/u );
+	assert.match( simulationSource, /forageDurationSeconds \* \( 0\.7 \+ this\._random\( index \) \* 0\.8 \)/u );
+
+	for ( const key of [
+		'beeCastShadow', 'beeReceiveShadow',
+		'hiveCastShadow', 'hiveReceiveShadow',
+		'butterflyCastShadow', 'butterflyReceiveShadow',
+	] ) {
+
+		assert.match( configSource, new RegExp( key + ': true' ) );
+		assert.match( uiSource, new RegExp( "'" + key + "'" ) );
+
+	}
+	assert.match( beeSource, /mesh\.castShadow = !! gfx\.beeCastShadow/u );
+	assert.match( beeSource, /mesh\.receiveShadow = !! gfx\.beeReceiveShadow/u );
+	assert.match( beeSource, /setHierarchyShadows\( model, gfx\.hiveCastShadow, gfx\.hiveReceiveShadow \)/u );
+	assert.match( butterflySource, /mesh\.castShadow = !! gfx\.butterflyCastShadow/u );
+	assert.match( butterflySource, /mesh\.receiveShadow = !! gfx\.butterflyReceiveShadow/u );
+	for ( const setter of [
+		'setBeeCastShadow', 'setBeeReceiveShadow',
+		'setHiveCastShadow', 'setHiveReceiveShadow',
+		'setButterflyCastShadow', 'setButterflyReceiveShadow',
+	] ) assert.match( facadeSource, new RegExp( setter + '\\( value \\)' ) );
+
+	assert.match( configSource, /beeForageDuration: 10/u );
+	assert.match( configSource, /beeForageDuration = clampSetting\( gfx\.beeForageDuration, 2, 40 \)/u );
+	assert.match( uiSource, /'beeForageDuration', 2, 40, 0\.5/u );
+
+} );

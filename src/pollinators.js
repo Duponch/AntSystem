@@ -1,6 +1,7 @@
 import { gfx } from './config.js';
 import { createBees } from './bees.js';
 import { createButterflies } from './butterflies.js';
+import { createChameleons } from './chameleons.js';
 import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js';
 
 /**
@@ -23,7 +24,10 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 		: null;
 	let loadPromise = null;
 	let butterflyLoadPromise = null;
+	let chameleonSystem = null;
+	let chameleonLoadPromise = null;
 	let surfaceVisible = true;
+	let chameleonWasEnabled = !! gfx.chameleonEnabled;
 
 	function ensureLoaded() {
 
@@ -95,12 +99,50 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 
 	}
 
+	function ensureChameleon() {
+
+		if ( chameleonSystem ) return Promise.resolve( chameleonSystem );
+		if ( ! gfx.chameleonEnabled ) return Promise.resolve( null );
+		if ( chameleonLoadPromise ) return chameleonLoadPromise;
+		chameleonLoadPromise = createChameleons( {
+			scene,
+			props,
+			getButterflyPredationContext: () => butterflySystem?.getPredationContext() || null,
+		} )
+			.then( ( loaded ) => {
+
+				chameleonSystem = loaded;
+				chameleonSystem.setSurfaceVisible( surfaceVisible );
+				return chameleonSystem;
+
+			} )
+			.catch( ( error ) => {
+
+				chameleonLoadPromise = null;
+				gfx.chameleonEnabled = false;
+				console.error( 'Chargement du caméléon impossible.', error );
+				return null;
+
+			} );
+		return chameleonLoadPromise;
+
+	}
+
+	function releaseCapturedButterfly() {
+
+		const index = chameleonSystem?.getSimulation().getView().capturedIndex ?? - 1;
+		if ( index < 0 ) return false;
+		return butterflySystem?.getPredationContext().releaseCapture( index ) || false;
+
+	}
+
 	return {
 		preload() {
 
 			return Promise.all( [
 				ensureLoaded(),
 				gfx.butterflies ? ensureButterflies() : Promise.resolve( null ),
+				gfx.chameleonEnabled ? ensureChameleon() : Promise.resolve( null ),
 			] );
 
 		},
@@ -113,6 +155,18 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 
 			if ( butterflySystem ) butterflySystem.update( dt, visible );
 			else if ( gfx.pollinators && gfx.butterflies ) void ensureButterflies();
+
+			const chameleonEnabled = !! gfx.chameleonEnabled;
+			if ( ! chameleonEnabled && chameleonWasEnabled && chameleonSystem ) {
+
+				releaseCapturedButterfly();
+				chameleonSystem.reset();
+
+			}
+			chameleonWasEnabled = chameleonEnabled;
+			if ( chameleonSystem ) chameleonSystem.update( dt );
+			else if ( chameleonEnabled ) void ensureChameleon();
+			if ( butterflySystem ) butterflySystem.flushPredationRender();
 			return telemetry;
 
 		},
@@ -128,7 +182,12 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 				: gfx.pollinators && gfx.butterflies
 					? ensureButterflies().then( ( loaded ) => loaded?.reset() )
 					: null;
-			return Promise.all( [ beeReset, butterflyReset ] );
+			const chameleonReset = chameleonSystem
+				? chameleonSystem.reset()
+				: gfx.chameleonEnabled
+					? ensureChameleon().then( ( loaded ) => loaded?.reset() )
+					: null;
+			return Promise.all( [ beeReset, butterflyReset, chameleonReset ] );
 
 		},
 		setBeeCount( value ) {
@@ -158,6 +217,7 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			surfaceVisible = visible;
 			if ( system ) system.setSurfaceVisible( visible );
 			if ( butterflySystem ) butterflySystem.setSurfaceVisible( visible );
+			if ( chameleonSystem ) chameleonSystem.setSurfaceVisible( visible );
 
 		},
 		setFlowerPetalColor( value ) {
@@ -184,6 +244,30 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			if ( system ) system.setBeeWingColor( value );
 
 		},
+		setBeeCastShadow( value ) {
+
+			gfx.beeCastShadow = !! value;
+			if ( system ) system.setBeeCastShadow( value );
+
+		},
+		setBeeReceiveShadow( value ) {
+
+			gfx.beeReceiveShadow = !! value;
+			if ( system ) system.setBeeReceiveShadow( value );
+
+		},
+		setHiveCastShadow( value ) {
+
+			gfx.hiveCastShadow = !! value;
+			if ( system ) system.setHiveCastShadow( value );
+
+		},
+		setHiveReceiveShadow( value ) {
+
+			gfx.hiveReceiveShadow = !! value;
+			if ( system ) system.setHiveReceiveShadow( value );
+
+		},
 		setButterflyCount( value ) {
 
 			gfx.butterflyCount = value;
@@ -198,16 +282,60 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 			if ( butterflySystem ) butterflySystem.setTint( value );
 
 		},
+		setButterflyCastShadow( value ) {
+
+			gfx.butterflyCastShadow = !! value;
+			if ( butterflySystem ) butterflySystem.setCastShadow( value );
+
+		},
+		setButterflyReceiveShadow( value ) {
+
+			gfx.butterflyReceiveShadow = !! value;
+			if ( butterflySystem ) butterflySystem.setReceiveShadow( value );
+
+		},
+		setChameleonEnabled( value ) {
+
+			gfx.chameleonEnabled = !! value;
+			chameleonWasEnabled = gfx.chameleonEnabled;
+			if ( ! gfx.chameleonEnabled && chameleonSystem ) {
+
+				releaseCapturedButterfly();
+				chameleonSystem.reset();
+				chameleonSystem.setSurfaceVisible( surfaceVisible );
+
+			} else if ( gfx.chameleonEnabled ) {
+
+				void ensureChameleon();
+
+			}
+
+		},
+		setChameleonCastShadow( value ) {
+
+			gfx.chameleonCastShadow = !! value;
+			if ( chameleonSystem ) chameleonSystem.setCastShadow( value );
+
+		},
+		setChameleonReceiveShadow( value ) {
+
+			gfx.chameleonReceiveShadow = !! value;
+			if ( chameleonSystem ) chameleonSystem.setReceiveShadow( value );
+
+		},
 		getSimulation: () => system?.getSimulation() || null,
 		getTelemetry: () => system?.getTelemetry() || null,
 		getFlowerContext: () => system?.getFlowerContext() || null,
 		getButterflySimulation: () => butterflySystem?.getSimulation() || null,
 		getButterflyTelemetry: () => butterflySystem?.getTelemetry() || null,
+		getChameleonSimulation: () => chameleonSystem?.getSimulation() || null,
+		getChameleonTelemetry: () => chameleonSystem?.getTelemetry() || null,
 		get group() { return system?.group || null; },
 		get flowerMesh() { return system?.flowerMesh || null; },
 		get beeMesh() { return system?.beeMesh || null; },
 		get hive() { return system?.hive || null; },
 		get butterflyMesh() { return butterflySystem?.mesh || null; },
+		get chameleon() { return chameleonSystem?.model || null; },
 	};
 
 }

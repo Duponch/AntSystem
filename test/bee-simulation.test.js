@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 
 import {
+	BEE_CLIP,
 	BEE_STATE,
 	BEE_STATE_NAMES,
 	BeeSimulation,
@@ -119,7 +120,7 @@ test( 'BEE-SIM-003 the complete visible foraging cycle is reachable and producti
 
 	}
 
-	for ( let state = BEE_STATE.IN_HIVE; state <= BEE_STATE.REST; state ++ ) {
+	for ( let state = 0; state < BEE_STATE_NAMES.length; state ++ ) {
 
 		assert.equal( observed[ state ], 1, `${ BEE_STATE_NAMES[ state ] } was never observed` );
 
@@ -417,5 +418,145 @@ test( 'BEE-SIM-014 animation phase only resets when the visual clip changes', ()
 	simulation.animationTime[ 0 ] = 0.375;
 	simulation._setState( 0, BEE_STATE.RETURN, 1 );
 	assert.equal( simulation.animationTime[ 0 ], 0 );
+
+} );
+test( 'BEE-SIM-015 foraging duration is independently configurable with bounded deterministic variation', () => {
+
+	const simulation = new BeeSimulation( {
+		capacity: 1,
+		initialCount: 1,
+		seed: 2026,
+		forageDurationSeconds: 10,
+	} );
+	let minimum = Infinity;
+	let maximum = - Infinity;
+	for ( let sample = 0; sample < 128; sample ++ ) {
+
+		const duration = simulation._forageDuration( 0 );
+		minimum = Math.min( minimum, duration );
+		maximum = Math.max( maximum, duration );
+		assert.ok( duration >= 7 && duration < 15 );
+
+	}
+	assert.ok( minimum < 8 );
+	assert.ok( maximum > 14 );
+
+} );
+
+test( 'BEE-SIM-016 touchdown, forage, takeoff and departure stay spatially continuous', () => {
+
+	const simulation = new BeeSimulation( {
+		capacity: 1,
+		initialCount: 1,
+		seed: 773,
+		durationScale: 0.12,
+		forageDurationSeconds: 2,
+		flightSpeed: 10,
+		approachSpeed: 5,
+	} );
+	const context = createContext();
+	context.flowers.contactX = new Float32Array( [ 3.88, 4.92, - 4.1, - 5.08 ] );
+	context.flowers.contactY = new Float32Array( [ 1.05, 1.2, 0.98, 1.12 ] );
+	context.flowers.contactZ = new Float32Array( [ - 0.2, 1.85, 0.16, - 2.12 ] );
+	simulation.orientationTrips[ 0 ] = 0;
+	simulation.stateTime[ 0 ] = 0;
+	simulation.energy[ 0 ] = 1;
+
+	const observed = new Uint8Array( BEE_STATE_NAMES.length );
+	let previousX = simulation.x[ 0 ];
+	let previousY = simulation.y[ 0 ];
+	let previousZ = simulation.z[ 0 ];
+	let largestVisibleStep = 0;
+	let forageSamples = 0;
+	for ( let step = 0; step < 4000; step ++ ) {
+
+		simulation.update( 0.02, context );
+		const state = simulation.state[ 0 ];
+		observed[ state ] = 1;
+		const distance = Math.hypot(
+			simulation.x[ 0 ] - previousX,
+			simulation.y[ 0 ] - previousY,
+			simulation.z[ 0 ] - previousZ,
+		);
+		if ( simulation.clip[ 0 ] !== BEE_CLIP.HIDDEN ) largestVisibleStep = Math.max( largestVisibleStep, distance );
+		previousX = simulation.x[ 0 ];
+		previousY = simulation.y[ 0 ];
+		previousZ = simulation.z[ 0 ];
+
+		if ( state === BEE_STATE.FORAGE ) {
+
+			const target = simulation.targetFlower[ 0 ];
+			assert.equal( simulation.clip[ 0 ], BEE_CLIP.FORAGE );
+			assert.equal( simulation.x[ 0 ], context.flowers.contactX[ target ] );
+			assert.equal( simulation.y[ 0 ], context.flowers.contactY[ target ] );
+			assert.equal( simulation.z[ 0 ], context.flowers.contactZ[ target ] );
+			forageSamples ++;
+
+		}
+		if (
+			forageSamples > 10 &&
+			observed[ BEE_STATE.TOUCHDOWN ] &&
+			observed[ BEE_STATE.TAKEOFF ] &&
+			observed[ BEE_STATE.DEPART ]
+		) break;
+
+	}
+
+	assert.equal( observed[ BEE_STATE.TOUCHDOWN ], 1 );
+	assert.equal( observed[ BEE_STATE.FORAGE ], 1 );
+	assert.equal( observed[ BEE_STATE.TAKEOFF ], 1 );
+	assert.equal( observed[ BEE_STATE.DEPART ], 1 );
+	assert.ok( forageSamples > 10 );
+	assert.ok( largestVisibleStep < 0.27, `visible step ${ largestVisibleStep } is a teleport` );
+
+} );
+
+test( 'BEE-SIM-017 Hermite landing and lift-off preserve endpoint positions and velocities', () => {
+
+	const simulation = new BeeSimulation( {
+		capacity: 1,
+		initialCount: 1,
+		seed: 81,
+		approachSpeed: 4,
+		flightSpeed: 9,
+	} );
+	const context = createContext();
+	context.flowers.contactX = new Float32Array( [ 4, 5, - 4, - 5 ] );
+	context.flowers.contactY = new Float32Array( [ 1.1, 1.3, 1, 1.2 ] );
+	context.flowers.contactZ = new Float32Array( [ 0, 2, 0, - 2 ] );
+	simulation.targetFlower[ 0 ] = 0;
+	simulation.x[ 0 ] = 3.45;
+	simulation.y[ 0 ] = 1.35;
+	simulation.z[ 0 ] = 0;
+	const dx = context.flowers.contactX[ 0 ] - simulation.x[ 0 ];
+	const dy = context.flowers.contactY[ 0 ] - simulation.y[ 0 ];
+	const inverse = 1 / Math.hypot( dx, dy );
+	simulation.headingX[ 0 ] = dx * inverse;
+	simulation.headingY[ 0 ] = dy * inverse;
+	simulation.headingZ[ 0 ] = 0;
+	simulation._beginTouchdown( 0, context.flowers, 0 );
+
+	const epsilon = 1e-4;
+	const startX = simulation.x[ 0 ];
+	const startY = simulation.y[ 0 ];
+	simulation._advanceHermite( 0, epsilon );
+	assert.ok( Math.abs( ( simulation.x[ 0 ] - startX ) / epsilon - dx * inverse * 4 ) < 0.02 );
+	assert.ok( Math.abs( ( simulation.y[ 0 ] - startY ) / epsilon - dy * inverse * 4 ) < 0.02 );
+
+	simulation._advanceHermite( 0, simulation.transitionDuration[ 0 ] );
+	assert.equal( simulation.x[ 0 ], context.flowers.contactX[ 0 ] );
+	assert.equal( simulation.y[ 0 ], context.flowers.contactY[ 0 ] );
+	assert.equal( simulation.z[ 0 ], context.flowers.contactZ[ 0 ] );
+
+	simulation._beginTakeoff( 0, BEE_STATE.RETURN, context.flowers, context.hive );
+	const liftX = simulation.x[ 0 ];
+	const liftY = simulation.y[ 0 ];
+	const liftZ = simulation.z[ 0 ];
+	simulation._advanceHermite( 0, epsilon );
+	assert.ok( Math.hypot(
+		simulation.x[ 0 ] - liftX,
+		simulation.y[ 0 ] - liftY,
+		simulation.z[ 0 ] - liftZ,
+	) < 1e-5, 'lift-off must start at zero velocity on the flower' );
 
 } );

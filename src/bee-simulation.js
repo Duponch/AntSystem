@@ -15,6 +15,9 @@ export const BEE_STATE = Object.freeze( {
 	RETURN: 5,
 	UNLOAD: 6,
 	REST: 7,
+	TAKEOFF: 8,
+	TOUCHDOWN: 9,
+	DEPART: 10,
 } );
 
 export const BEE_STATE_NAMES = Object.freeze( [
@@ -26,6 +29,9 @@ export const BEE_STATE_NAMES = Object.freeze( [
 	'RETURN',
 	'UNLOAD',
 	'REST',
+	'TAKEOFF',
+	'TOUCHDOWN',
+	'DEPART',
 ] );
 
 export const BEE_RESOURCE = Object.freeze( {
@@ -46,6 +52,7 @@ export const FLOWER_CANDIDATE_SAMPLES = 4;
 const UINT32_SCALE = 1 / 4294967296;
 const TWO_PI = Math.PI * 2;
 const NO_TARGET = - 1;
+const ARRIVAL_EPSILON = 1e-4;
 const DEFAULT_WEATHER = Object.freeze( {
 	temperatureC: 20,
 	rain: 0,
@@ -132,6 +139,7 @@ export class BeeSimulation {
 		flightEnergyPerUnit = 0.0018,
 		biologicalDaysPerSecond = 0.0125,
 		durationScale = 1,
+		forageDurationSeconds = 10,
 		queenPresent = true,
 		queenEggsPerDay = 1200,
 		initialAdultWorkers = 12000,
@@ -173,6 +181,7 @@ export class BeeSimulation {
 		this.flightEnergyPerUnit = Math.max( 0, flightEnergyPerUnit );
 		this.biologicalDaysPerSecond = Math.max( 0, biologicalDaysPerSecond );
 		this.durationScale = Math.max( 0.01, durationScale );
+		this.forageDurationSeconds = Math.max( 0.1, forageDurationSeconds );
 		this.queenPresent = !! queenPresent;
 		this.queenEggsPerDay = Math.max( 0, queenEggsPerDay );
 		this.adultWorkers = Math.max( 0, initialAdultWorkers );
@@ -213,6 +222,7 @@ export class BeeSimulation {
 		this.clip = new Uint8Array( capacity );
 		this.resource = new Uint8Array( capacity );
 		this.orientationTrips = new Uint8Array( capacity );
+		this.takeoffNextState = new Uint8Array( capacity );
 		this.targetFlower = new Int32Array( capacity );
 		this.targetPatch = new Int32Array( capacity );
 		this.lastPatch = new Int32Array( capacity );
@@ -225,6 +235,20 @@ export class BeeSimulation {
 		this.headingX = new Float32Array( capacity );
 		this.headingY = new Float32Array( capacity );
 		this.headingZ = new Float32Array( capacity );
+		this.transitionStartX = new Float32Array( capacity );
+		this.transitionStartY = new Float32Array( capacity );
+		this.transitionStartZ = new Float32Array( capacity );
+		this.takeoffX = new Float32Array( capacity );
+		this.takeoffY = new Float32Array( capacity );
+		this.takeoffZ = new Float32Array( capacity );
+		this.transitionStartVelocityX = new Float32Array( capacity );
+		this.transitionStartVelocityY = new Float32Array( capacity );
+		this.transitionStartVelocityZ = new Float32Array( capacity );
+		this.transitionEndVelocityX = new Float32Array( capacity );
+		this.transitionEndVelocityY = new Float32Array( capacity );
+		this.transitionEndVelocityZ = new Float32Array( capacity );
+		this.transitionElapsed = new Float32Array( capacity );
+		this.transitionDuration = new Float32Array( capacity );
 		this.stateTime = new Float32Array( capacity );
 		this.animationTime = new Float32Array( capacity );
 		this.ageDays = new Float32Array( capacity );
@@ -271,6 +295,9 @@ export class BeeSimulation {
 			headingX: this.headingX,
 			headingY: this.headingY,
 			headingZ: this.headingZ,
+			takeoffX: this.takeoffX,
+			takeoffY: this.takeoffY,
+			takeoffZ: this.takeoffZ,
 			animationTime: this.animationTime,
 			ageDays: this.ageDays,
 			experience: this.experience,
@@ -328,11 +355,35 @@ export class BeeSimulation {
 
 	}
 
+	_forageDuration( index ) {
+
+		return this.forageDurationSeconds * ( 0.7 + this._random( index ) * 0.8 );
+
+	}
+
+	_flowerContactX( flowers, index ) {
+
+		return flowers.contactX ? flowers.contactX[ index ] : flowers.x[ index ];
+
+	}
+
+	_flowerContactY( flowers, index ) {
+
+		return flowers.contactY ? flowers.contactY[ index ] : flowers.y[ index ];
+
+	}
+
+	_flowerContactZ( flowers, index ) {
+
+		return flowers.contactZ ? flowers.contactZ[ index ] : flowers.z[ index ];
+
+	}
+
 	_setState( index, state, duration ) {
 
 		this.state[ index ] = state;
 		this.stateTime[ index ] = duration;
-		const nextClip = state === BEE_STATE.FORAGE || state === BEE_STATE.UNLOAD ?
+		const nextClip = state === BEE_STATE.TOUCHDOWN || state === BEE_STATE.FORAGE || state === BEE_STATE.UNLOAD ?
 			BEE_CLIP.FORAGE :
 			state === BEE_STATE.IN_HIVE || state === BEE_STATE.REST ?
 				BEE_CLIP.HIDDEN :
@@ -650,11 +701,279 @@ export class BeeSimulation {
 
 	}
 
-	_startTrip( index, flowers, demand ) {
+	_beginHermite(
+		index,
+		state,
+		duration,
+		endX,
+		endY,
+		endZ,
+		startVelocityX,
+		startVelocityY,
+		startVelocityZ,
+		endVelocityX,
+		endVelocityY,
+		endVelocityZ,
+	) {
+
+		this.transitionStartX[ index ] = this.x[ index ];
+		this.transitionStartY[ index ] = this.y[ index ];
+		this.transitionStartZ[ index ] = this.z[ index ];
+		this.takeoffX[ index ] = endX;
+		this.takeoffY[ index ] = endY;
+		this.takeoffZ[ index ] = endZ;
+		this.transitionStartVelocityX[ index ] = startVelocityX;
+		this.transitionStartVelocityY[ index ] = startVelocityY;
+		this.transitionStartVelocityZ[ index ] = startVelocityZ;
+		this.transitionEndVelocityX[ index ] = endVelocityX;
+		this.transitionEndVelocityY[ index ] = endVelocityY;
+		this.transitionEndVelocityZ[ index ] = endVelocityZ;
+		this.transitionElapsed[ index ] = 0;
+		this.transitionDuration[ index ] = Math.max( 1e-4, duration );
+		this._setState( index, state, this.transitionDuration[ index ] );
+
+	}
+
+	_advanceHermite( index, dt ) {
+
+		const duration = this.transitionDuration[ index ];
+		const previousX = this.x[ index ];
+		const previousY = this.y[ index ];
+		const previousZ = this.z[ index ];
+		const elapsed = Math.min( duration, this.transitionElapsed[ index ] + dt );
+		this.transitionElapsed[ index ] = elapsed;
+		const phase = elapsed / duration;
+		const phase2 = phase * phase;
+		const phase3 = phase2 * phase;
+		const h00 = 2 * phase3 - 3 * phase2 + 1;
+		const h10 = phase3 - 2 * phase2 + phase;
+		const h01 = - 2 * phase3 + 3 * phase2;
+		const h11 = phase3 - phase2;
+		const tangentScale = duration;
+
+		this.x[ index ] =
+			h00 * this.transitionStartX[ index ] +
+			h10 * tangentScale * this.transitionStartVelocityX[ index ] +
+			h01 * this.takeoffX[ index ] +
+			h11 * tangentScale * this.transitionEndVelocityX[ index ];
+		this.y[ index ] =
+			h00 * this.transitionStartY[ index ] +
+			h10 * tangentScale * this.transitionStartVelocityY[ index ] +
+			h01 * this.takeoffY[ index ] +
+			h11 * tangentScale * this.transitionEndVelocityY[ index ];
+		this.z[ index ] =
+			h00 * this.transitionStartZ[ index ] +
+			h10 * tangentScale * this.transitionStartVelocityZ[ index ] +
+			h01 * this.takeoffZ[ index ] +
+			h11 * tangentScale * this.transitionEndVelocityZ[ index ];
+
+		const dh00 = 6 * phase2 - 6 * phase;
+		const dh10 = 3 * phase2 - 4 * phase + 1;
+		const dh01 = - dh00;
+		const dh11 = 3 * phase2 - 2 * phase;
+		const velocityX =
+			dh00 * this.transitionStartX[ index ] / duration +
+			dh10 * this.transitionStartVelocityX[ index ] +
+			dh01 * this.takeoffX[ index ] / duration +
+			dh11 * this.transitionEndVelocityX[ index ];
+		const velocityY =
+			dh00 * this.transitionStartY[ index ] / duration +
+			dh10 * this.transitionStartVelocityY[ index ] +
+			dh01 * this.takeoffY[ index ] / duration +
+			dh11 * this.transitionEndVelocityY[ index ];
+		const velocityZ =
+			dh00 * this.transitionStartZ[ index ] / duration +
+			dh10 * this.transitionStartVelocityZ[ index ] +
+			dh01 * this.takeoffZ[ index ] / duration +
+			dh11 * this.transitionEndVelocityZ[ index ];
+		const speed = Math.hypot( velocityX, velocityY, velocityZ );
+		if ( speed > 1e-6 ) {
+
+			this.headingX[ index ] = velocityX / speed;
+			this.headingY[ index ] = velocityY / speed;
+			this.headingZ[ index ] = velocityZ / speed;
+
+		}
+		const travelled = Math.hypot(
+			this.x[ index ] - previousX,
+			this.y[ index ] - previousY,
+			this.z[ index ] - previousZ,
+		);
+		this._telemetry.distanceTravelled += travelled;
+		this.energy[ index ] = Math.max( 0, this.energy[ index ] - travelled * this.flightEnergyPerUnit );
+		return elapsed >= duration;
+
+	}
+
+	_beginTouchdown( index, flowers, target ) {
+
+		const endX = this._flowerContactX( flowers, target );
+		const endY = this._flowerContactY( flowers, target );
+		const endZ = this._flowerContactZ( flowers, target );
+		const distance = Math.hypot(
+			endX - this.x[ index ],
+			endY - this.y[ index ],
+			endZ - this.z[ index ],
+		);
+		if ( distance <= ARRIVAL_EPSILON ) {
+
+			this._setState( index, BEE_STATE.FORAGE, this._forageDuration( index ) );
+			return;
+
+		}
+		const duration = Math.min( 0.9, Math.max( 0.32, distance * 1.5 / this.approachSpeed ) );
+		this._beginHermite(
+			index,
+			BEE_STATE.TOUCHDOWN,
+			duration,
+			endX,
+			endY,
+			endZ,
+			this.headingX[ index ] * this.approachSpeed,
+			this.headingY[ index ] * this.approachSpeed,
+			this.headingZ[ index ] * this.approachSpeed,
+			0,
+			0,
+			0,
+		);
+
+	}
+
+	_routeTarget( index, nextState, flowers, hive ) {
+
+		const target = this.targetFlower[ index ];
+		if ( nextState === BEE_STATE.OUTBOUND && flowers && target >= 0 && target < ( flowers.count | 0 ) ) {
+
+			this.takeoffX[ index ] = flowers.x[ target ];
+			this.takeoffY[ index ] = flowers.y[ target ] + 0.55;
+			this.takeoffZ[ index ] = flowers.z[ target ];
+			return true;
+
+		}
+		this.takeoffX[ index ] = hive.x;
+		this.takeoffY[ index ] = hive.y + 0.12;
+		this.takeoffZ[ index ] = hive.z;
+		return nextState === BEE_STATE.RETURN;
+
+	}
+
+	_beginTakeoff( index, nextState, flowers, hive ) {
+
+		if ( ! this._routeTarget( index, nextState, flowers, hive ) ) nextState = BEE_STATE.RETURN;
+		const routeX = this.takeoffX[ index ];
+		const routeZ = this.takeoffZ[ index ];
+		let directionX = routeX - this.x[ index ];
+		let directionZ = routeZ - this.z[ index ];
+		const horizontalDistance = Math.hypot( directionX, directionZ );
+		if ( horizontalDistance > 1e-6 ) {
+
+			directionX /= horizontalDistance;
+			directionZ /= horizontalDistance;
+
+		} else {
+
+			directionX = this.headingX[ index ];
+			directionZ = this.headingZ[ index ];
+			const headingLength = Math.hypot( directionX, directionZ );
+			if ( headingLength > 1e-6 ) {
+
+				directionX /= headingLength;
+				directionZ /= headingLength;
+
+			} else {
+
+				directionX = 1;
+				directionZ = 0;
+
+			}
+
+		}
+
+		const deltaX = directionX * 0.68;
+		const deltaY = 0.58;
+		const deltaZ = directionZ * 0.68;
+		const distance = Math.hypot( deltaX, deltaY, deltaZ );
+		const inverseDistance = 1 / distance;
+		const velocityX = deltaX * inverseDistance * this.approachSpeed;
+		const velocityY = deltaY * inverseDistance * this.approachSpeed;
+		const velocityZ = deltaZ * inverseDistance * this.approachSpeed;
+		this.takeoffNextState[ index ] = nextState;
+		this._beginHermite(
+			index,
+			BEE_STATE.TAKEOFF,
+			2 * distance / this.approachSpeed,
+			this.x[ index ] + deltaX,
+			this.y[ index ] + deltaY,
+			this.z[ index ] + deltaZ,
+			0,
+			0,
+			0,
+			velocityX,
+			velocityY,
+			velocityZ,
+		);
+
+	}
+
+	_beginDepart( index, flowers, hive ) {
+
+		let nextState = this.takeoffNextState[ index ];
+		if ( ! this._routeTarget( index, nextState, flowers, hive ) ) nextState = BEE_STATE.RETURN;
+		const destinationX = this.takeoffX[ index ];
+		const destinationY = this.takeoffY[ index ];
+		const destinationZ = this.takeoffZ[ index ];
+		let directionX = destinationX - this.x[ index ];
+		let directionY = destinationY - this.y[ index ];
+		let directionZ = destinationZ - this.z[ index ];
+		const distance = Math.hypot( directionX, directionY, directionZ );
+		if ( distance > 1e-6 ) {
+
+			directionX /= distance;
+			directionY /= distance;
+			directionZ /= distance;
+
+		} else {
+
+			directionX = this.headingX[ index ];
+			directionY = this.headingY[ index ];
+			directionZ = this.headingZ[ index ];
+
+		}
+		const duration = 0.55;
+		const startVelocityX = this.transitionEndVelocityX[ index ];
+		const startVelocityY = this.transitionEndVelocityY[ index ];
+		const startVelocityZ = this.transitionEndVelocityZ[ index ];
+		const endVelocityX = directionX * this.flightSpeed;
+		const endVelocityY = directionY * this.flightSpeed;
+		const endVelocityZ = directionZ * this.flightSpeed;
+		const startSpeed = Math.hypot( startVelocityX, startVelocityY, startVelocityZ );
+		const departureDistance = Math.min(
+			( startSpeed + this.flightSpeed ) * duration * 0.5,
+			Math.max( 0.05, distance * 0.55 ),
+		);
+		this.takeoffNextState[ index ] = nextState;
+		this._beginHermite(
+			index,
+			BEE_STATE.DEPART,
+			duration,
+			this.x[ index ] + directionX * departureDistance,
+			this.y[ index ] + directionY * departureDistance,
+			this.z[ index ] + directionZ * departureDistance,
+			startVelocityX,
+			startVelocityY,
+			startVelocityZ,
+			endVelocityX,
+			endVelocityY,
+			endVelocityZ,
+		);
+
+	}
+	_startTrip( index, flowers, demand, hive = null ) {
 
 		this._chooseResource( index, demand );
 		if ( ! this._assignFlower( index, flowers ) ) return false;
-		this._setState( index, BEE_STATE.OUTBOUND, this._duration( index, 12, 10 ) );
+		if ( hive ) this._beginTakeoff( index, BEE_STATE.OUTBOUND, flowers, hive );
+		else this._setState( index, BEE_STATE.OUTBOUND, this._duration( index, 12, 10 ) );
 		this._telemetry.tripsStarted ++;
 		return true;
 
@@ -743,7 +1062,7 @@ export class BeeSimulation {
 							this.orientationTrips[ i ] --;
 							this._setState( i, BEE_STATE.ORIENTATION, this._duration( i, 1.4, 1.2 ) );
 
-						} else if ( ! this._startTrip( i, flowers, demand ) ) {
+						} else if ( ! this._startTrip( i, flowers, demand, hive ) ) {
 
 							this._setState( i, BEE_STATE.REST, this._duration( i, 1.5, 3 ) );
 
@@ -821,23 +1140,31 @@ export class BeeSimulation {
 					}
 					const remaining = this._moveToward(
 						i,
-						flowers.x[ target ],
-						flowers.y[ target ] + 0.08,
-						flowers.z[ target ],
+						this._flowerContactX( flowers, target ),
+						this._flowerContactY( flowers, target ),
+						this._flowerContactZ( flowers, target ),
 						this.approachSpeed,
 						dt,
 						true,
 					);
-					if ( remaining <= this.landingRadius ) {
+					if ( remaining <= this.approachRadius ) {
 
-						this.x[ i ] = flowers.x[ target ];
-						this.y[ i ] = flowers.y[ target ] + 0.08;
-						this.z[ i ] = flowers.z[ target ];
-						this._setState( i, BEE_STATE.FORAGE, this._duration( i, 0.7, 1.1 ) );
+						this._beginTouchdown( i, flowers, target );
 
 					} else if ( this.stateTime[ i ] <= 0 ) {
 
 						this._abortToHive( i );
+
+					}
+					break;
+
+				}
+
+				case BEE_STATE.TOUCHDOWN: {
+
+					if ( this._advanceHermite( i, dt ) ) {
+
+						this._setState( i, BEE_STATE.FORAGE, this._forageDuration( i ) );
 
 					}
 					break;
@@ -849,9 +1176,9 @@ export class BeeSimulation {
 					const target = this.targetFlower[ i ];
 					if ( target >= 0 && flowers && target < ( flowers.count | 0 ) ) {
 
-						this.x[ i ] = flowers.x[ target ];
-						this.y[ i ] = flowers.y[ target ] + 0.08;
-						this.z[ i ] = flowers.z[ target ];
+						this.x[ i ] = this._flowerContactX( flowers, target );
+						this.y[ i ] = this._flowerContactY( flowers, target );
+						this.z[ i ] = this._flowerContactZ( flowers, target );
 
 					}
 					if ( this.stateTime[ i ] <= 0 ) {
@@ -865,15 +1192,40 @@ export class BeeSimulation {
 
 						if ( keepForaging ) {
 
-							this._setState( i, BEE_STATE.APPROACH, this._duration( i, 2, 1.5 ) );
+							this._beginTakeoff( i, BEE_STATE.OUTBOUND, flowers, hive );
 
 						} else {
 
 							this.targetFlower[ i ] = NO_TARGET;
 							this.targetPatch[ i ] = NO_TARGET;
-							this._setState( i, BEE_STATE.RETURN, this._duration( i, 10, 8 ) );
+							this._beginTakeoff( i, BEE_STATE.RETURN, flowers, hive );
 
 						}
+
+					}
+					break;
+
+				}
+
+				case BEE_STATE.TAKEOFF: {
+
+					if ( this._advanceHermite( i, dt ) ) this._beginDepart( i, flowers, hive );
+					break;
+
+				}
+
+				case BEE_STATE.DEPART: {
+
+					if ( this._advanceHermite( i, dt ) ) {
+
+						const nextState = this.takeoffNextState[ i ];
+						this._setState(
+							i,
+							nextState,
+							nextState === BEE_STATE.OUTBOUND ?
+								this._duration( i, 12, 10 ) :
+								this._duration( i, 10, 8 ),
+						);
 
 					}
 					break;
@@ -891,20 +1243,8 @@ export class BeeSimulation {
 						dt,
 						true,
 					);
-					if ( remaining <= this.landingRadius * 2.5 ) {
+					if ( remaining <= ARRIVAL_EPSILON ) {
 
-						this.x[ i ] = hive.x;
-						this.y[ i ] = hive.y;
-						this.z[ i ] = hive.z;
-						this._setState( i, BEE_STATE.UNLOAD, this._duration( i, 0.55, 0.85 ) );
-
-					} else if ( this.stateTime[ i ] <= 0 ) {
-
-						// Navigation fails safe at the hive instead of leaving a
-						// permanently stuck bee in the world.
-						this.x[ i ] = hive.x;
-						this.y[ i ] = hive.y;
-						this.z[ i ] = hive.z;
 						this._setState( i, BEE_STATE.UNLOAD, this._duration( i, 0.55, 0.85 ) );
 
 					}
@@ -942,7 +1282,7 @@ export class BeeSimulation {
 					this.energy[ i ] = Math.min( 1, this.energy[ i ] + dt * 0.06 );
 					if ( this.stateTime[ i ] <= 0 ) {
 
-						if ( canDepart && this.energy[ i ] >= 0.35 && this._startTrip( i, flowers, demand ) ) {
+						if ( canDepart && this.energy[ i ] >= 0.35 && this._startTrip( i, flowers, demand, hive ) ) {
 
 							// State set by _startTrip.
 
@@ -967,7 +1307,10 @@ export class BeeSimulation {
 				currentState === BEE_STATE.ORIENTATION ||
 				currentState === BEE_STATE.OUTBOUND ||
 				currentState === BEE_STATE.APPROACH ||
-				currentState === BEE_STATE.RETURN
+				currentState === BEE_STATE.RETURN ||
+				currentState === BEE_STATE.TAKEOFF ||
+				currentState === BEE_STATE.TOUCHDOWN ||
+				currentState === BEE_STATE.DEPART
 			) {
 
 				this._telemetry.airborne ++;

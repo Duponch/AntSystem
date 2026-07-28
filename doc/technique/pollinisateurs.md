@@ -24,7 +24,7 @@ La ruche choisit son arbre hôte de manière stable : placement portant le tag `
 
 ## Abstraction biologique
 
-Le noyau conserve huit états explicites :
+Le noyau conserve onze états explicites :
 
 | État | Interprétation | Position visible |
 |---|---|---|
@@ -32,14 +32,17 @@ Le noyau conserve huit états explicites :
 | `ORIENTATION` | un ou deux premiers vols locaux pour acquérir des repères | autour de l’entrée |
 | `OUTBOUND` | vol principal vers une fleur assignée | entre ruche et parcelle |
 | `APPROACH` | descente lente et précise vers la fleur | près de la cible |
+| `TOUCHDOWN` | pose amortie par une courbe de Hermite C1 | contact progressif avec la fleur |
 | `FORAGE` | récolte sur la fleur | posée sur la cible |
+| `TAKEOFF` | retrait fluide depuis la fleur, vitesse initiale nulle | juste au-dessus de la cible |
+| `DEPART` | raccord C1 entre le décollage et le vol principal | sortie de la fleur ou de la ruche |
 | `RETURN` | retour direct vers l’entrée | entre parcelle et ruche |
 | `UNLOAD` | déchargement de nectar ou pollen | brièvement à l’entrée |
 | `REST` | récupération après un trajet | cachée |
 
 Les slots visibles sont des représentantes de la population adulte agrégée, pas des abeilles suivies une à une dans toute la ruche. À leur première génération, elles commencent à la ruche à un âge abstrait de 18 à 26 jours et effectuent une ou deux orientations avant leur premier trajet productif. Lorsqu’une représentante atteint son âge de retrait, le même slot préalloué est recyclé à l’entrée comme une génération suivante : âge, expérience, énergie, charge, préférence et mémoire sont réinitialisés, sans créer ni détruire d’objet de rendu.
 
-Les durées de comportement sont exprimées en secondes de jeu ; l’âge biologique avance par défaut de `0,0125` jour par seconde simulée. Les valeurs produisent une cadence lisible et une évolution cohérente, mais ne constituent pas une prédiction démographique calibrée d’une ruche réelle.
+Les durées de comportement sont exprimées en secondes de jeu ; le séjour sur une fleur vaut 10 s par défaut, avec une variation déterministe de 0,7× à 1,5×. Ce temps de butinage est indépendant des attentes et trajets. L’âge biologique avance par défaut de `0,0125` jour par seconde simulée. Ces valeurs produisent une cadence lisible, mais ne constituent pas une prédiction démographique calibrée d’une ruche réelle.
 
 ### Démographie agrégée
 
@@ -67,7 +70,7 @@ condition =
   × vent(3 → 7 m/s)
 ```
 
-Chaque terme est lissé entre 0 et 1. Un départ est autorisé lorsque le produit atteint `0,16` et que l’énergie vaut au moins `0,35`. Une abeille déjà dehors ne se téléporte pas si les conditions se dégradent : elle termine son état courant ou rentre lorsqu’une cible devient invalide, que son énergie devient trop faible ou que son délai de sécurité expire.
+Chaque terme est lissé entre 0 et 1. Un départ est autorisé lorsque le produit atteint `0,16` et que l’énergie vaut au moins `0,35`. Une abeille déjà dehors ne se téléporte pas si les conditions se dégradent : elle termine son état courant ou rentre lorsqu’une cible devient invalide ou que son énergie devient trop faible.
 
 Le réglage **Lumière du jour** alimente directement `context.daylight` à chaque frame, comme la température, la pluie et le vent. Une valeur de `0` empêche tout nouveau départ ; `1` représente le plein jour. Ce contrôle reste manuel et n’est pas automatiquement synchronisé avec l’heure visuelle du ciel. Le vent limite les départs mais ne déforme pas physiquement les trajectoires.
 
@@ -121,9 +124,11 @@ Toutes les abeilles extérieures partagent ensuite :
 - un matériau TSL ;
 - quatre attributs d’instance dynamiques : pose, quaternion, animation et fondu.
 
-Le shader interpole deux lignes VAT du clip courant et peut fondre le clip précédent pendant `0,18` seconde. Le corps échantillonne son atlas puis reçoit la teinte utilisateur, les yeux conservent leur atlas dédié, les ailes combinent leur propre atlas avec leur teinte et la trompe conserve une couleur fixe. Ce découpage reste dans le matériau instancié unique. Les oscillations latérales et verticales ajoutées par `bees.js` ne modifient pas les positions autoritatives de la simulation.
+Le shader interpole deux lignes VAT du clip courant et peut fondre le clip précédent pendant `0,18` seconde. Le corps échantillonne son atlas puis reçoit la teinte utilisateur, les yeux conservent leur atlas dédié, les ailes combinent leur propre atlas avec leur teinte et la trompe conserve une couleur fixe. Ce découpage reste dans le matériau instancié unique. Le rendu reprend directement les positions autoritatives de la simulation : aucune surélévation ou oscillation secondaire ne peut introduire un saut lors d’un changement d’état.
 
-La phase d’animation est attachée au clip visuel, pas au nom de l’état comportemental. `ORIENTATION`, `OUTBOUND`, `APPROACH` et `RETURN` partagent `FLIGHT` : passer de l’un à l’autre conserve donc la phase des ailes. Parmi les états visibles, seule une vraie transition `FLIGHT` ↔ `FORAGE` remet la phase à zéro avant le fondu ; un changement d’état qui garde le même clip ne provoque aucun redémarrage perceptible.
+La phase d’animation est attachée au clip visuel, pas au nom de l’état comportemental. `ORIENTATION`, `OUTBOUND`, `APPROACH`, `TAKEOFF`, `DEPART` et `RETURN` partagent `FLIGHT`; `TOUCHDOWN`, `FORAGE` et `UNLOAD` utilisent `FORAGE`. Le clip de butinage démarre donc pendant la pose et continue sur la fleur sans redémarrage. Le quaternion du corps est lissé vers la direction de vitesse en vol — l’axe tête-abdomen reste presque horizontal — puis vers la pose de référence Blender pendant le butinage.
+
+La pose sur la fleur n’est pas estimée au centre du modèle. `FLOWER_CONTACT_*` et `FORAGE_ATTITUDE` proviennent de la matrice relative mesurée entre `BeeForageRig` et `Flower_Forage_Root` dans `bestiaire_backup.blend`, puis convertie dans le repère normalisé de `Flower.glb`. La rotation aléatoire de chaque fleur est appliquée au point de contact et au quaternion. Ainsi la trompe, les pattes et le corps retrouvent la composition validée dans Blender.
 
 Les fleurs partagent une géométrie unique normalisée à une unité de haut et fusionnée avec ses couleurs de sommets. Un seul `InstancedMesh` contient jusqu’à 256 fleurs. Le balancement est calculé dans le matériau TSL à partir du temps, de l’index d’instance et de la hauteur du sommet ; aucun squelette ni mise à jour individuelle n’est nécessaire.
 
@@ -155,7 +160,7 @@ Dans **Graphismes → 🌼 Pollinisateurs** :
 | Abeilles visibles | 48 | 0–128 | nombre de représentantes simulées et rendues ; celles dans la ruche restent cachées |
 | Taille abeilles | 1 | 0,4–2,5 | échelle des instances |
 | Vitesse de vol | 8 | 2–16 | vitesse du trajet principal |
-| Durée des cycles | 1 | 0,35–3 | multiplicateur de toutes les durées d’état |
+| Butinage sur fleur | 10 s | 2–40 s | durée centrale du clip et de la récolte ; variation déterministe de 0,7× à 1,5× |
 | Lumière du jour | 1 | 0–1 | condition lumineuse manuelle ; `0` interdit les nouveaux départs |
 | Température | 22 °C | 5–38 °C | facteur de départ |
 | Pluie | 0 | 0–1 | inhibition progressive des départs |
@@ -166,7 +171,9 @@ Dans **Graphismes → 🌼 Pollinisateurs** :
 | Mouvement fleurs | 0,32 | 0–1,5 | amplitude du balancement TSL |
 | Teintes pétales/tiges | palette claire/verte | couleurs | uniformes du matériau des fleurs |
 | Teintes abeilles/ailes | blanc/bleu clair | couleurs | uniformes conservant l’atlas |
+| Ombres abeilles — projeter/recevoir | oui/oui | booléens indépendants | active séparément la passe de projection et la réception sur le draw VAT |
 | Taille ruche | 0,72 | 0,35–1,5 | échelle de la ruche et de son point de vol |
+| Ombres ruche — projeter/recevoir | oui/oui | booléens indépendants | applique les drapeaux à chaque maillage de la hiérarchie GLB |
 
 Les valeurs persistées sont ramenées dans des bornes de sécurité légèrement plus larges dans `config.js`. Les couleurs, le mouvement des fleurs, la taille des abeilles et la météo sont appliqués en direct. Nombre, taille et variation des fleurs reconstruisent uniquement leurs matrices et stocks lorsque l’utilisateur relâche le contrôle.
 
@@ -180,7 +187,7 @@ Les valeurs persistées sont ramenées dans des bornes de sécurité légèremen
 - Il n’existe ni danse frétillante, ni recrutement, ni connaissance collective des parcelles.
 - La demande nectar/pollen reste fixe. Reine, nutrition, saison et multiplicateur de ponte ne disposent pas encore de contrôles dédiés dans l’UI.
 - **Lumière du jour** agit bien sur les départs, mais reste un réglage manuel indépendant du cycle visuel du ciel.
-- Les trajectoires sont des déplacements vectoriels continus avec un arc graphique. Elles n’évitent pas les branches, les accessoires, les autres abeilles ou des obstacles dynamiques.
+- Les trajectoires sont continues ; pose, décollage et raccord au vol utilisent des courbes de Hermite C1 sans correction graphique ni téléportation. Elles n’évitent toutefois pas les branches, les accessoires, les autres abeilles ou des obstacles dynamiques.
 - Le vent et la pluie modulent le départ ; ils ne poussent pas physiquement une abeille déjà en vol.
 - L’inspecteur principal suit les fourmis. Les instantanés d’abeille existent dans l’API de débogage, mais pas encore dans une fiche UI dédiée.
 - Désactiver **Activer** fige le sous-système et le cache. Si cette valeur est persistée puis le jeu relancé, les assets ne sont pas chargés ; une réactivation les charge une seule fois en arrière-plan. La plongée sous terre masque le système mais continue de l’avancer tant qu’il reste activé.
@@ -204,8 +211,11 @@ Les valeurs persistées sont ramenées dans des bornes de sécurité légèremen
 - `BEE-SIM-012` : recyclage déterministe des représentantes arrivées à leur âge de retrait ;
 - `BEE-SIM-013` : répartition initiale uniforme et déterministe du couvain dans les cohortes ;
 - `BEE-SIM-014` : phase conservée entre états partageant `FLIGHT`, remise à zéro seulement lors d’un changement de clip visible `FLIGHT` ↔ `FORAGE`.
+- `BEE-SIM-015` : durée de butinage indépendante, configurable et variation déterministe bornée ;
+- `BEE-SIM-016` : cycle pose–butinage–décollage–départ sans saut visible ;
+- `BEE-SIM-017` : raccords Hermite avec positions et vitesses de bord cohérentes ;
 
-`test/pollinator-integration.test.js` complète ce noyau avec `POLLINATOR-001` à `009` : layout et fallback bornés, priorité de l’arbre hôte, contrats réels des GLB (ancres, clips, atlas distincts et canal `COLOR_0` brun non uniforme), budget VAT maximal de 12 Mio, trois draws de surface, masquage souterrain, exclusions sensibles aux échelles du décor et démarrage paresseux lorsque le système est désactivé.
+`test/pollinator-integration.test.js` complète ce noyau avec `POLLINATOR-001` à `010` : layout et fallback bornés, priorité de l’arbre hôte, contrats réels des GLB (ancres, clips, atlas distincts et canal `COLOR_0` brun non uniforme), budget VAT maximal de 12 Mio, trois draws de surface, masquage souterrain, exclusions sensibles aux échelles du décor, démarrage paresseux, ancrage Blender exact, clips de pose et six drapeaux d’ombre indépendants.
 
 Ces tests ne figent pas une image. L’orientation du modèle, les teintes, les fondus d’animation, l’accroche de la ruche, la lisibilité des fleurs et l’absence d’artefact WebGPU demandent une inspection visuelle ciblée.
 

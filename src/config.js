@@ -233,22 +233,41 @@ export const gfx = {
 	beeCount: 48,
 	beeScale: 1,
 	beeSpeed: 8,
-	beeForageDuration: 1,
+	beeForageDuration: 10,
 	beeDaylight: 1,
 	beeTemperature: 22,
 	beeRain: 0,
 	beeWind: 1,
+	beeCastShadow: true,
+	beeReceiveShadow: true,
 	flowerCount: 128,
 	flowerSize: 1.45,
 	flowerVariation: 0.35,
 	flowerWind: 0.32,
 	hiveScale: 0.72,
+	hiveCastShadow: true,
+	hiveReceiveShadow: true,
 	butterflies: true,
 	butterflyCount: 18,
 	butterflyScale: 1,
 	butterflySpeed: 4.8,
 	butterflyLifeSpeed: 1,
 	butterflyTint: '#ffffff',
+	butterflyCastShadow: true,
+	butterflyReceiveShadow: true,
+	chameleonEnabled: true,
+	chameleonScale: 1,
+	chameleonPatrolSpeed: 0.62,
+	chameleonTrackingSpeed: 0.95,
+	chameleonTurnSpeed: 6,
+	chameleonAttackDistance: 3.2,
+	chameleonDetectionDistance: 4.8,
+	chameleonAimDuration: 0.55,
+	chameleonTongueRetractDuration: 0.28,
+	chameleonAttackCooldown: 1.1,
+	chameleonCastShadow: true,
+	chameleonReceiveShadow: true,
+	chameleonTongueColor: '#d96a79',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
 	foodBallSpacing: 4,                // texels entre billes
@@ -409,7 +428,7 @@ gfx.undergroundArtifactExposure = clampSetting( gfx.undergroundArtifactExposure,
 gfx.beeCount = Math.round( clampSetting( gfx.beeCount, 0, MAX_BEES ) );
 gfx.beeScale = clampSetting( gfx.beeScale, 0.25, 3 );
 gfx.beeSpeed = clampSetting( gfx.beeSpeed, 1, 20 );
-gfx.beeForageDuration = clampSetting( gfx.beeForageDuration, 0.25, 4 );
+gfx.beeForageDuration = clampSetting( gfx.beeForageDuration, 2, 40 );
 gfx.beeDaylight = clampSetting( gfx.beeDaylight, 0, 1 );
 gfx.beeTemperature = clampSetting( gfx.beeTemperature, - 5, 45 );
 gfx.beeRain = clampSetting( gfx.beeRain, 0, 1 );
@@ -423,6 +442,18 @@ gfx.butterflyCount = Math.round( clampSetting( gfx.butterflyCount, 0, MAX_BUTTER
 gfx.butterflyScale = clampSetting( gfx.butterflyScale, 0.25, 3 );
 gfx.butterflySpeed = clampSetting( gfx.butterflySpeed, 1, 12 );
 gfx.butterflyLifeSpeed = clampSetting( gfx.butterflyLifeSpeed, 0.1, 8 );
+gfx.chameleonScale = clampSetting( gfx.chameleonScale, 0.4, 2.5 );
+gfx.chameleonPatrolSpeed = clampSetting( gfx.chameleonPatrolSpeed, 0.05, 2 );
+gfx.chameleonTrackingSpeed = clampSetting( gfx.chameleonTrackingSpeed, 0.05, 3 );
+gfx.chameleonTurnSpeed = clampSetting( gfx.chameleonTurnSpeed, 1, 15 );
+gfx.chameleonAttackDistance = clampSetting( gfx.chameleonAttackDistance, 0.5, 8 );
+gfx.chameleonDetectionDistance = Math.max(
+	gfx.chameleonAttackDistance,
+	clampSetting( gfx.chameleonDetectionDistance, 1, 12 ),
+);
+gfx.chameleonAimDuration = clampSetting( gfx.chameleonAimDuration, 0.2, 3 );
+gfx.chameleonTongueRetractDuration = clampSetting( gfx.chameleonTongueRetractDuration, 0.15, 0.6 );
+gfx.chameleonAttackCooldown = clampSetting( gfx.chameleonAttackCooldown, 0.3, 6 );
 
 // Surcharges d'URL, APRÈS la fusion des réglages sauvegardés : `?physics=0`
 // et `?physics=1` donnent deux onglets comparables sans toucher au panneau
