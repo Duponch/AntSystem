@@ -196,7 +196,7 @@ async function main() {
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
-	const bees = createPollinators( { scene, props, assets: pollinatorAssets, butterflyVat } );
+	const bees = createPollinators( { scene, renderer, camera, props, assets: pollinatorAssets, butterflyVat } );
 	await bees.preload();
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
 	spiders.setExternalAuthorityScheduling( params.timingMode === 'strict' );

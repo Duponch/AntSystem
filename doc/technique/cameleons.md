@@ -24,6 +24,7 @@ d’[Anderson (2016)](https://pmc.ncbi.nlm.nih.gov/articles/PMC4698635/).
 | `chameleon-track.js` | sélection du tronc et pré-calcul de son profil supérieur |
 | `chameleon-surface-graph.js` | bake CSR global, surfaces, transitions, routage local et corridors actifs |
 | `chameleon-assets.js` | chargement singleton et validation du GLB |
+| `chameleon-camouflage.js` | variantes perceptives, pigments du viewport, motifs cutanés, transition et ombre résiduelle |
 | `chameleons.js` | contrôleur de corridors, repère de surface, squelette, camouflage, langue et ombres |
 | `butterfly-simulation.js` | évitement perceptif, verrouillage puis consommation atomique d’un adulte |
 | `wildlife-inspector.js` | sélection ponctuelle, HUD et volumes de debug du seul animal suivi |
@@ -152,10 +153,61 @@ dans la décision. Le temps d’immobilité appartient à un verrou dédié, et 
 temps de l’état courant : l’acquisition puis la visée ne créent donc aucun
 clignotement perceptif. Le verrou est remis à zéro dès `STRIKE_EXTEND`.
 
-Pour le joueur, l’état applique une teinte de signal configurable — rouge par
-défaut — et un léger renfort émissif, puis restaure exactement les couleurs du
-matériau à la reprise. Ce signal visuel n’entre pas dans la décision : pour un
-papillon, seul le booléen logique `camouflaged` rend le prédateur imperceptible.
+Le rendu reste strictement séparé de cette autorité logique. Chaque matériau
+naturel du GLB possède une variante perceptive précréée. Toutes ces variantes —
+corps, yeux, bouche et autres parties visibles — partagent **la même instance**
+de `viewportSharedTexture()`. Une seule copie du viewport alimente donc toute
+la silhouette pendant une transition ou une pause camouflée.
+
+Deux ondes sinusoïdales bon marché, calculées depuis `positionGeometry`,
+produisent des taches larges et stables en espace objet. Elles modulent la force
+de l’adaptation et décalent légèrement l’UV échantillonné via **Diffusion des
+couleurs**. Le motif ne dépend ni du temps ni de la position monde : il ne glisse
+donc pas sur la peau et ne suit pas la caméra.
+
+Le facteur de correspondance locale est borné ainsi :
+
+```text
+pigment = mix(luminance(décor), couleurDécor, 0,78) × motif
+localMatch = transition × (adaptationDécor + variationMotif)
+localMatch *= 1 - angleRasant² × lisibilitéContours
+0 ≤ localMatch ≤ 0,86
+```
+
+Le plafond strict de `0,86` garantit qu’au moins 14 % de la réponse diffuse
+naturelle subsiste, même avec les réglages maximaux. Aux angles rasants, le
+facteur diminue encore afin de préserver un contour doux. Le pigment est injecté
+par `backdropNode` et `backdropAlphaNode` dans le pipeline éclairé ; les
+normales, la rugosité, les reflets et le relief PBR du modèle restent donc
+visibles. Le camouflage ne peut jamais devenir une copie pixel à pixel.
+
+Le matériau perceptif est techniquement placé dans la liste transparente pour
+être ordonné après le décor opaque, mais il produit une alpha de `1` et conserve
+`depthTest = true`, `depthWrite = true`, une opacité de `1` et
+`forceSinglePass = true`. La silhouette garde ainsi sa profondeur sans
+déclencher la double passe des matériaux transparents à double face.
+
+L’ombre projetée utilise un masque de dithering stable dans la géométrie. Elle
+s’atténue avec la transition, mais **Ombre résiduelle** conserve toujours une
+partie configurable de sa couverture et le runtime impose un minimum de 10 %.
+L’entrée et la sortie restent des transitions exponentielles monotones pilotées
+par le temps de rendu, donc indépendantes du multiplicateur de simulation et
+invariantes au découpage des frames.
+
+La variante perceptive est préchauffée une fois avec `renderer.compileAsync`.
+Le swap a lieu seulement quand la transition dépasse un epsilon ; au retour
+sous cet epsilon, les matériaux naturels sont restaurés. Hors transition et hors
+camouflage, aucun node de viewport n’est rendu et aucune copie de framebuffer
+n’est demandée.
+
+Pendant l’effet, la capture couleur partagée impose une interruption/reprise de
+la passe WebGPU. Ce n’est ni un second rendu de la scène, ni un draw, ni un
+dispatch compute supplémentaire : le coût est constant, dépend surtout de la
+résolution et reste nul une fois le camouflage et sa transition terminés.
+
+Pour un papillon, seul le booléen logique `camouflaged` rend néanmoins le
+prédateur imperceptible : aucun matériau, échantillon ou pixel n’entre dans sa
+décision.
 Un papillon adulte vérifie la menace à une cadence configurable, **10 Hz par
 défaut**. La distance, le champ de vision et l’accélération de fuite sont
 paramétrables. Les scans sont déphasés entre slots, utilisent la vue compacte
@@ -225,7 +277,14 @@ Le dossier **Graphismes → 🦎 Caméléon** expose :
 | Explorer la carte | oui | booléen |
 | Rayon d’exploration | `ceil(WORLD × √2)` | 2–diagonale monde |
 | Camouflage automatique | oui | booléen |
-| Signal camouflage | `#ef2b2b` | couleur |
+| Adaptation au décor | 0,68 | 0–0,86 |
+| Lisibilité des contours | 0,35 | 0–0,8 |
+| Motifs cutanés | 0,18 | 0–0,4 |
+| Échelle des motifs | 3 | 0,5–12 |
+| Diffusion des couleurs | 0,004 | 0–0,015 |
+| Ombre résiduelle | 0,28 | 0,1–0,6 |
+| Temps d’adaptation | 2,2 s | 0,1–6 s |
+| Retour naturel | 0,8 s | 0,1–4 s |
 | Intervalle camouflage | 14 s | 1–60 s |
 | Camouflage min / max | 7 / 13 s | 0,5–30 / 0,5–60 s |
 | Dégagement support | 0,006 | 0–0,25 |
@@ -276,6 +335,13 @@ pour toute la population.
 - volumes de debug et recherche de sélection actifs pour le seul individu suivi ;
 - sous-pas bornés pour les frappes courtes ;
 - aucun lien avec `antCount` et aucun coût proportionnel au nombre de fourmis ;
+- hors effet : matériaux naturels, **0 copie framebuffer** et aucun coût de
+  camouflage perceptif ;
+- effet actif : une seule copie du viewport partagée par tout l’animal, un
+  échantillon décalé et deux ondes en espace objet par fragment ;
+- variantes précréées et préchauffées, sans compilation pendant la transition ;
+- **0 draw supplémentaire**, **0 dispatch compute** et aucune passe de scène
+  additionnelle ; `forceSinglePass` interdit la double passe transparente ;
 - chargement du GLB évité lorsque le caméléon est désactivé.
 
 ## Preuves de non-régression
@@ -316,6 +382,16 @@ pour toute la population.
   uniquement pendant une pause explicitement planifiée ;
 - `CHAMELEON-SIM-033` : verrou de camouflage continu pendant acquisition et
   visée, puis révélation immédiate au lancement de la langue ;
+- `CHAMELEON-SIM-034` : transition perceptive bornée, monotone et invariante au
+  découpage du temps de rendu ;
+- `CHAMELEON-SIM-035` : variantes perceptives de tout l’animal, profondeur et
+  simple passe conservées, puis retour aux matériaux naturels à coût nul ;
+- `CHAMELEON-SIM-036` : une seule capture viewport partagée et légèrement
+  décalée, adaptation diffuse éclairée par `backdropNode`, ombre dither,
+  préchauffage et absence de mip/blur ;
+- `CHAMELEON-SIM-037` : plafond de correspondance à 0,86, contribution naturelle
+  d’au moins 14 %, contours plus lisibles aux angles rasants, profil borné et
+  motif déterministe en espace objet ;
 - `CHAMELEON-SURFACE-001` : toutes les instances reconnues sont bakées au-delà
   des anciens plafonds de 8 supports et 512 échantillons ;
 - `CHAMELEON-SURFACE-002` : corridors continus terrain→rocher→tronc→arbre,

@@ -12,7 +12,7 @@ import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js
  * valid before, during and after that load. Butterflies have their own lazy
  * singleton so disabling them does not disable bees or flowers.
  */
-export function createPollinators( { scene, props, assets = null, butterflyVat = null } ) {
+export function createPollinators( { scene, renderer = null, camera = null, props, assets = null, butterflyVat = null } ) {
 
 	let system = assets ? createBees( { scene, props, assets } ) : null;
 	let chameleonSystem = null;
@@ -110,6 +110,8 @@ export function createPollinators( { scene, props, assets = null, butterflyVat =
 		if ( chameleonLoadPromise ) return chameleonLoadPromise;
 		chameleonLoadPromise = createChameleons( {
 			scene,
+			renderer,
+			camera,
 			props,
 			getButterflyPredationContext: () => butterflySystem?.getPredationContext() || null,
 		} )

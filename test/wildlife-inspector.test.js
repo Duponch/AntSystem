@@ -227,7 +227,7 @@ test( 'WILDLIFE-INSPECTOR-003 HUD explains intention, threat, support and camouf
 	assert.match( chameleon.html, /Se cale avant l’attaque/ );
 	assert.match( chameleon.html, /Papillon #7 suivi/ );
 	assert.match( chameleon.html, /Log_02 · segment 12/ );
-	assert.match( chameleon.html, /Actif .* rouge .* invisible pour les papillons .* 2,4 s/u );
+	assert.match( chameleon.html, /Actif .* peau adapt\u00e9e au d\u00e9cor .* relief encore perceptible .* non d\u00e9tect\u00e9 par les papillons .* 2,4 s/u );
 	assert.match( chameleon.html, /Navigation<\/div><div>Locale/u );
 
 	const butterfly = buildWildlifeHudView( 'butterfly', {

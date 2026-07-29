@@ -762,7 +762,16 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		gfx, 'chameleonRoamingRadius', 2, Math.ceil( WORLD * Math.SQRT2 ), 1,
 	).name( 'Rayon d\'exploration' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageEnabled' ).name( 'Camouflage automatique' );
-	fChameleonRoaming.addColor( gfx, 'chameleonCamouflageColor' ).name( 'Signal camouflage' );
+	const fChameleonSkin = fChameleonRoaming.addFolder( 'Peau camoufl\u00e9e' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageEnvironmentMatch', 0, 0.86, 0.01 ).name( 'Adaptation au d\u00e9cor' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageEdgeReveal', 0, 0.8, 0.01 ).name( 'Lisibilit\u00e9 des contours' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflagePatternStrength', 0, 0.4, 0.01 ).name( 'Motifs cutan\u00e9s' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflagePatternScale', 0.5, 12, 0.1 ).name( '\u00c9chelle des motifs' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageSampleSpread', 0, 0.015, 0.0005 ).name( 'Diffusion des couleurs' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageShadowRetention', 0.1, 0.6, 0.01 ).name( 'Ombre r\u00e9siduelle' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageAdaptSeconds', 0.1, 6, 0.1 ).name( 'Temps d\'adaptation (s)' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageReleaseSeconds', 0.1, 4, 0.1 ).name( 'Retour naturel (s)' );
+	fChameleonSkin.close();
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageInterval', 1, 60, 0.5 ).name( 'Intervalle camouflage' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageMinDuration', 0.5, 30, 0.25 ).name( 'Camouflage min (s)' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageMaxDuration', 0.5, 60, 0.25 ).name( 'Camouflage max (s)' );

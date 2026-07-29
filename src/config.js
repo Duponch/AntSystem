@@ -271,7 +271,14 @@ export const gfx = {
 	chameleonRoamingEnabled: true,
 	chameleonRoamingRadius: Math.ceil( WORLD * Math.SQRT2 ),
 	chameleonCamouflageEnabled: true,
-	chameleonCamouflageColor: '#ef2b2b',
+	chameleonCamouflageEnvironmentMatch: 0.68,
+	chameleonCamouflageEdgeReveal: 0.35,
+	chameleonCamouflagePatternStrength: 0.18,
+	chameleonCamouflagePatternScale: 3,
+	chameleonCamouflageSampleSpread: 0.004,
+	chameleonCamouflageShadowRetention: 0.28,
+	chameleonCamouflageAdaptSeconds: 2.2,
+	chameleonCamouflageReleaseSeconds: 0.8,
 	chameleonCamouflageInterval: 14,
 	chameleonCamouflageMinDuration: 7,
 	chameleonCamouflageMaxDuration: 13,
@@ -404,6 +411,17 @@ if ( saved ) {
 
 	}
 
+	// The former optical fidelity could reach 100% and behave like an
+	// invisibility cloak. Preserve the player's intent while migrating it to a
+	// biologically plausible, strictly partial environment match.
+	const legacyOpticalFidelity = saved.gfx?.chameleonCamouflageOpticalFidelity;
+	if ( ! Object.hasOwn( saved.gfx || {}, 'chameleonCamouflageEnvironmentMatch' )
+		&& Number.isFinite( legacyOpticalFidelity ) ) {
+
+		gfx.chameleonCamouflageEnvironmentMatch = Math.min( 0.78, Math.max( 0, legacyOpticalFidelity * 0.68 ) );
+
+	}
+
 	// Preserve intentional player tuning while migrating the three former
 	// chameleon defaults. Old saves contain every gfx key but predate the
 	// independent animation-speed setting, which is our unambiguous version flag.
@@ -499,6 +517,14 @@ gfx.chameleonTurnSpeed = clampSetting( gfx.chameleonTurnSpeed, 1, 15 );
 gfx.chameleonRoamingRadius = clampSetting(
 	gfx.chameleonRoamingRadius, 2, Math.ceil( WORLD * Math.SQRT2 ),
 );
+gfx.chameleonCamouflageEnvironmentMatch = clampSetting( gfx.chameleonCamouflageEnvironmentMatch, 0, 0.86 );
+gfx.chameleonCamouflageEdgeReveal = clampSetting( gfx.chameleonCamouflageEdgeReveal, 0, 0.8 );
+gfx.chameleonCamouflagePatternStrength = clampSetting( gfx.chameleonCamouflagePatternStrength, 0, 0.4 );
+gfx.chameleonCamouflagePatternScale = clampSetting( gfx.chameleonCamouflagePatternScale, 0.5, 12 );
+gfx.chameleonCamouflageSampleSpread = clampSetting( gfx.chameleonCamouflageSampleSpread, 0, 0.015 );
+gfx.chameleonCamouflageShadowRetention = clampSetting( gfx.chameleonCamouflageShadowRetention, 0.1, 0.6 );
+gfx.chameleonCamouflageAdaptSeconds = clampSetting( gfx.chameleonCamouflageAdaptSeconds, 0.1, 6 );
+gfx.chameleonCamouflageReleaseSeconds = clampSetting( gfx.chameleonCamouflageReleaseSeconds, 0.1, 4 );
 gfx.chameleonCamouflageInterval = clampSetting( gfx.chameleonCamouflageInterval, 1, 60 );
 gfx.chameleonCamouflageMinDuration = clampSetting( gfx.chameleonCamouflageMinDuration, 0.5, 30 );
 gfx.chameleonCamouflageMaxDuration = Math.max(

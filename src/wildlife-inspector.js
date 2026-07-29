@@ -133,7 +133,7 @@ export function buildWildlifeHudView( kind, data ) {
 		const supportName = data?.supportModel || data?.supportKind || 'sol';
 		const support = `${ supportName } · segment ${ Math.max( 0, Math.round( data?.supportSegment || 0 ) ) }`;
 		const camouflage = data?.camouflaged
-			? `Actif \u00b7 rouge \u00b7 invisible pour les papillons${ data.camouflageRemaining > 0 ? ` \u00b7 ${ fixed( data.camouflageRemaining ) } s` : '' }`
+			? `Actif \u00b7 peau adapt\u00e9e au d\u00e9cor \u00b7 relief encore perceptible \u00b7 non d\u00e9tect\u00e9 par les papillons${ data.camouflageRemaining > 0 ? ` \u00b7 ${ fixed( data.camouflageRemaining ) } s` : '' }`
 			: 'Inactif \u00b7 visible des papillons';
 		const navigation = `Locale \u00b7 ${ fixed( data?.routePosition ) }/${ fixed( data?.routeLength ) } u \u00b7 ${ Math.round( data?.explorationDecisions || 0 ) } choix`;
 		return {
@@ -216,7 +216,7 @@ function createHud( documentRef ) {
 				pointer-events:none; display:none; user-select:none;
 			}
 			#wildlife-inspector[data-tone="danger"] { border-color:rgba(255, 109, 87, .75); }
-			#wildlife-inspector[data-tone="camouflage"] { border-color:rgba(239, 43, 43, .86); box-shadow:0 12px 36px rgba(120, 12, 12, .28); }
+			#wildlife-inspector[data-tone="camouflage"] { border-color:rgba(88, 220, 205, .86); box-shadow:0 12px 36px rgba(24, 116, 108, .28); }
 			.wildlife-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:7px; }
 			.wildlife-title { color:#f2d369; font-weight:760; letter-spacing:.025em; text-transform:uppercase; }
 			.wildlife-badge { padding:2px 7px; border-radius:999px; color:#bcd6a7; background:rgba(135,173,105,.16); font-size:10px; text-transform:uppercase; }

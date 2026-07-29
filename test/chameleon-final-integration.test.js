@@ -24,7 +24,14 @@ test( 'CHAMELEON-SIM-025 config and UI expose predator tuning and independent sh
 		'chameleonRoamingEnabled',
 		'chameleonRoamingRadius',
 		'chameleonCamouflageEnabled',
-		'chameleonCamouflageColor',
+		'chameleonCamouflageEnvironmentMatch',
+		'chameleonCamouflageEdgeReveal',
+		'chameleonCamouflagePatternStrength',
+		'chameleonCamouflagePatternScale',
+		'chameleonCamouflageSampleSpread',
+		'chameleonCamouflageShadowRetention',
+		'chameleonCamouflageAdaptSeconds',
+		'chameleonCamouflageReleaseSeconds',
 		'chameleonCamouflageInterval',
 		'chameleonCamouflageMinDuration',
 		'chameleonCamouflageMaxDuration',
@@ -49,7 +56,14 @@ test( 'CHAMELEON-SIM-025 config and UI expose predator tuning and independent sh
 	assert.match( ui, /\.setChameleonReceiveShadow\(\s*value\s*\)/u );
 	assert.match( config, /chameleonCamouflageMinDuration:\s*7/u );
 	assert.match( config, /chameleonCamouflageMaxDuration:\s*13/u );
-	assert.match( ui, /addColor\(\s*gfx,\s*'chameleonCamouflageColor'/u );
+	assert.match( config, /chameleonCamouflageEnvironmentMatch:\s*0\.68/u );
+	assert.match( config, /chameleonCamouflageShadowRetention:\s*0\.28/u );
+	assert.match( ui, /chameleonCamouflageEnvironmentMatch['"],\s*0,\s*0\.86,\s*0\.01/u );
+	assert.match( ui, /chameleonCamouflageShadowRetention['"],\s*0\.1,\s*0\.6,\s*0\.01/u );
+	assert.match( config, /legacyOpticalFidelity \* 0\.68/u );
+	assert.doesNotMatch( config, /chameleonCamouflageOpticalFidelity:\s*/u );
+	assert.doesNotMatch( config + ui, /chameleonCamouflageColor|Signal camouflage/u );
+	assert.doesNotMatch( config + ui, /chameleonCamouflageStrength|CamouflageBarkColor|CamouflageRockColor/u );
 
 } );
 
@@ -84,8 +98,9 @@ test( 'CHAMELEON-SIM-032 runtime uses reactive local surface exploration and exp
 	assert.match( source, /camouflageCandidate[\s\S]*?scheduledCamouflage/u );
 	assert.match( source, /camouflageStationaryTime\s*=\s*advanceChameleonCamouflageDwell/u );
 	assert.doesNotMatch( source, /view\.stateTime\s*>=\s*0\.08/u );
-	assert.match( source, /chameleonCamouflageColor/u );
-	assert.match( source, /material\.color\.copy\( camouflageTint \)/u );
+	assert.match( source, /createChameleonCamouflageController/u );
+	assert.match( source, /camouflageVisual\.update/u );
+	assert.doesNotMatch( source, /chameleonCamouflageColor|camouflageTint|material\.color\.copy/u );
 	assert.match( source, /simulation\.state !== CHAMELEON_STATE\.AIM_AND_BRACE/u );
 
 } );

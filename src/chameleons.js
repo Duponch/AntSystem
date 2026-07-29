@@ -11,6 +11,9 @@ import {
 	instantiateChameleonAsset,
 	loadChameleonAsset,
 } from './chameleon-assets.js';
+import {
+	createChameleonCamouflageController,
+} from './chameleon-camouflage.js';
 import { selectChameleonHost } from './chameleon-track.js';
 import {
 	CHAMELEON_SURFACE_KIND,
@@ -63,6 +66,8 @@ function deterministicUnit( index, salt ) {
  */
 export async function createChameleons( {
 	scene,
+	renderer = null,
+	camera = null,
 	props,
 	getButterflyPredationContext = null,
 	settings = gfx,
@@ -76,11 +81,7 @@ export async function createChameleons( {
 		castShadow: setting( settings, 'chameleonCastShadow', true ),
 		receiveShadow: setting( settings, 'chameleonReceiveShadow', true ),
 	} );
-	const baseMaterialColors = instance.materials.map( ( material ) => material.color.clone() );
-	const baseMaterialEmissive = instance.materials.map( ( material ) => material.emissive.clone() );
-	const baseMaterialEmissiveIntensity = instance.materials.map(
-		( material ) => material.emissiveIntensity,
-	);
+	const camouflageVisual = createChameleonCamouflageController( instance.meshes, settings );
 	const group = new THREE.Group();
 	group.name = 'ChameleonSystem';
 	const bodyRoot = new THREE.Group();
@@ -151,8 +152,6 @@ export async function createChameleons( {
 	let scheduledCamouflage = false;
 	let camouflageStationaryTime = 0;
 	let camouflaged = false;
-	let camouflageVisualActive = null;
-	let camouflageVisualColor = '';
 	let locomotionState = 'perch';
 	let lastNetworkRevision = 0;
 	let debugHasPosition = false;
@@ -170,7 +169,6 @@ export async function createChameleons( {
 	const authoredMouth = new THREE.Vector3();
 	const visualTongueTip = new THREE.Vector3();
 	const mouthCorrection = new THREE.Vector3();
-	const camouflageTint = new THREE.Color();
 	const targetBodyQuaternion = new THREE.Quaternion();
 
 	const supportFrontPosition = new THREE.Vector3();
@@ -873,32 +871,9 @@ export async function createChameleons( {
 		return debugView;
 
 	}
-	function syncCamouflageVisual( force = false ) {
+	function syncCamouflageVisual( renderDt = 0, force = false ) {
 
-		const requested = String( setting( settings, 'chameleonCamouflageColor', '#ef2b2b' ) );
-		if ( ! force && camouflageVisualActive === camouflaged
-			&& camouflageVisualColor === requested ) return;
-		camouflageVisualActive = camouflaged;
-		camouflageVisualColor = requested;
-		camouflageTint.set( requested );
-		for ( let index = 0; index < instance.materials.length; index ++ ) {
-
-			const material = instance.materials[ index ];
-			if ( camouflaged ) {
-
-				material.color.copy( camouflageTint );
-				material.emissive.copy( camouflageTint ).multiplyScalar( 0.16 );
-				material.emissiveIntensity = 0.55;
-
-			} else {
-
-				material.color.copy( baseMaterialColors[ index ] );
-				material.emissive.copy( baseMaterialEmissive[ index ] );
-				material.emissiveIntensity = baseMaterialEmissiveIntensity[ index ];
-
-			}
-
-		}
+		return camouflageVisual.update( renderDt, camouflaged, force );
 
 	}
 
@@ -966,7 +941,7 @@ export async function createChameleons( {
 		updateAnimation( renderDt, view );
 		updateTongue( view );
 		syncDebugView( view );
-		syncCamouflageVisual();
+		syncCamouflageVisual( renderDt );
 		return view;
 
 	}
@@ -1020,8 +995,7 @@ export async function createChameleons( {
 		scheduledCamouflage = false;
 		camouflageStationaryTime = 0;
 		camouflaged = false;
-		camouflageVisualActive = null;
-		camouflageVisualColor = '';
+		camouflageVisual.reset();
 		locomotionState = 'perch';
 		bodyOrientationReady = false;
 		debugHasPosition = false;
@@ -1037,7 +1011,7 @@ export async function createChameleons( {
 		updateAnimation( 0, view );
 		updateTongue( view );
 		syncDebugView( view );
-		syncCamouflageVisual( true );
+		syncCamouflageVisual( 0, true );
 
 	}
 
@@ -1049,6 +1023,7 @@ export async function createChameleons( {
 		avoidanceView.visible = false;
 		mixer.stopAllAction();
 		scene.remove( group );
+		camouflageVisual.dispose();
 		tongueTube.geometry.dispose();
 		tonguePad.geometry.dispose();
 		tongueMaterial.dispose();
@@ -1067,11 +1042,21 @@ export async function createChameleons( {
 	updateAnimation( 0, initialView );
 	updateTongue( initialView );
 	syncDebugView( initialView );
-	syncCamouflageVisual( true );
+	syncCamouflageVisual( 0, true );
 
 	group.userData.pickType = 'chameleon';
 	instance.model.userData.pickType = 'chameleon';
 	for ( const mesh of instance.meshes ) mesh.userData.pickType = 'chameleon';
+
+	try {
+
+		await camouflageVisual.prewarm( renderer, camera, instance.model, scene );
+
+	} catch ( error ) {
+
+		console.warn( 'Préchauffage du camouflage optique impossible.', error );
+
+	}
 
 	return {
 		group,

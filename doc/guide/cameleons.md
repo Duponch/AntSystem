@@ -68,10 +68,17 @@ Lorsque **Camouflage automatique** est actif, les pauses sont planifiées de
 façon déterministe. Un caméléon immobile et hors d’une phase révélatrice de
 l’attaque devient alors imperceptible pour les papillons.
 
-Le joueur voit une **couleur de signal**, rouge par défaut et configurable dans
-**Signal camouflage**. Cette teinte sert uniquement à rendre l’état lisible :
-la vision des papillons ne lit ni la couleur ni le matériau, seulement le
-booléen logique de camouflage. La couleur d’origine est restaurée à la reprise.
+Pour le joueur, le camouflage est **perceptif**, jamais une transparence
+parfaite. La peau prélève les grandes couleurs et valeurs du décor proche,
+puis les applique comme des pigments tout en conservant les normales, la
+rugosité, les reflets et une part minimale de sa couleur naturelle. Des motifs
+stables brisent les aplats, les angles rasants révèlent davantage le contour et
+une ombre de contact subsiste. Le caméléon se fond donc dans son support, mais
+reste discernable lorsqu’on sait où regarder.
+
+Cette apparence ne décide jamais de la perception. La vision des papillons ne
+lit ni une couleur ni un pixel : elle utilise seulement le booléen logique de
+camouflage. À la reprise, le rendu naturel revient progressivement.
 
 ## Pourquoi les papillons le fuient parfois
 
@@ -132,9 +139,17 @@ Ouvrez **Graphismes → 🦎 Caméléon** :
 - **Explorer la carte** active ou suspend l’exploration spontanée ;
 - **Rayon d’exploration** borne les choix locaux autour de l’hôte ;
 - **Camouflage automatique** active ou coupe les pauses perceptives ;
-- **Signal camouflage** choisit la couleur visible par le joueur ;
 - **Intervalle camouflage**, **Camouflage min** et **Camouflage max** règlent
   les pauses volontaires — 14 s d’intervalle et 7 à 13 s par défaut ;
+- **Adaptation au décor** règle la proximité entre les pigments et les couleurs
+  voisines, sans jamais autoriser une copie exacte ;
+- **Lisibilité des contours** révèle davantage la silhouette aux angles rasants ;
+- **Motifs cutanés** et **Échelle des motifs** règlent la force et la taille des
+  taches stables sur la peau ;
+- **Diffusion des couleurs** décale légèrement l’échantillon du décor afin
+  d’éviter l’effet d’écran transparent ;
+- **Ombre résiduelle** conserve une ombre de contact pendant le camouflage ;
+- **Temps d’adaptation** et **Retour naturel** règlent les transitions visuelles ;
 - **Dégagement support** affine la petite distance au-dessus des surfaces ;
 - **Distance de détection** définit quand il commence à suivre une proie ;
 - **Distance d’attaque** définit la portée maximale depuis la bouche ;
@@ -157,6 +172,13 @@ la boucle normale de locomotion.
 La perception reste bornée à 64 papillons, la langue suit une trajectoire
 analytique et un seul squelette glTF est animé. Le coût ne dépend jamais du
 nombre de fourmis.
+
+Les variantes naturelle et perceptive sont créées puis préchauffées une seule
+fois. Hors transition et hors camouflage, la variante naturelle ne copie aucun
+framebuffer. Quand l’effet est actif, toute la silhouette partage une seule
+copie du viewport. Les motifs reposent sur deux ondes peu coûteuses en espace
+objet ; aucun draw, dispatch compute ou rendu supplémentaire de la scène n’est
+ajouté.
 
 Quand la caméra descend sous terre, le caméléon, les papillons et leurs volumes
 de debug sont masqués avec les autres animaux extérieurs.

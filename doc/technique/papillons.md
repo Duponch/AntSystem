@@ -79,7 +79,7 @@ Chaque adulte teste une unique menace stable fournie par le caméléon. La perce
 
 Lorsqu’un caméléon visible entre dans cette zone, l’activité courante est interrompue, la cible florale est abandonnée et l’intention devient `FLEE_CHAMELEON`. La direction de fuite s’éloigne de la position anticipée du prédateur, tourne progressivement et reste strictement bornée par la vitesse configurée. Une courte mémoire évite un changement de cap instantané entre deux analyses. Il n’existe ni saut de position ni téléportation.
 
-Un caméléon immobile dans son état de camouflage est perceptuellement équivalent à une menace absente : la peur est effacée immédiatement et le papillon peut passer à portée d’attaque. Le matériau du prédateur reçoit parallèlement une teinte de signal configurable, rouge par défaut, pour informer le joueur. Cette couleur n’entre jamais dans la décision : la perception du papillon lit uniquement le booléen logique `camouflaged`.
+Un caméléon immobile dans son état de camouflage est perceptuellement équivalent à une menace absente : la peur est effacée immédiatement et le papillon peut passer à portée d’attaque. Pour le joueur, sa peau perceptive emprunte seulement les grandes couleurs et valeurs du viewport proche ; elle conserve au moins 14 % de sa réponse diffuse naturelle, son relief PBR, des contours renforcés aux angles rasants et une ombre résiduelle. Elle ne devient donc jamais une copie exacte du fond. Cette apparence n’entre jamais dans la décision : la perception du papillon lit uniquement le booléen logique `camouflaged`, sans échantillonner de matériau ni de pixel.
 
 Les tableaux `threatVisible`, `fearTime`, `threatDistance` et la position anticipée sont des SoA fixes. Avec 64 slots et 10 Hz par défaut, le travail reste borné à 640 tests simples par seconde.
 
@@ -185,7 +185,7 @@ Les changements de nombre, d’échelle, de vitesse, de teinte ou d’ombres ré
 
 `test/butterfly-integration.test.js` protège le contrat de l’asset, le budget VAT, l’unique draw instancié, la capacité fixe, le partage des fleurs, le masquage souterrain et le chargement conditionnel. `POLLINATOR-010` vérifie en complément les drapeaux indépendants de projection et de réception d’ombre jusque dans la façade et l’UI.
 
-`test/butterfly-predator-avoidance.test.js` protège la perception distance/FOV, l’invisibilité immédiate du camouflage, la fuite continue bornée, l’anticipation du prédateur, le déterminisme, la cadence de scan, l’absence d’allocation chaude et le mapping sélection/rendu.
+`test/butterfly-predator-avoidance.test.js` protège la perception distance/FOV, la suppression immédiate de la menace logique pendant le camouflage, la fuite continue bornée, l’anticipation du prédateur, le déterminisme, la cadence de scan, l’absence d’allocation chaude et le mapping sélection/rendu.
 
 Les preuves `CHAMELEON-SIM-021` à `024` protègent en complément le verrou
 de capture, la position pilotée par la langue, la consommation atomique, le
