@@ -235,7 +235,14 @@ export const gfx = {
 	beeCount: 48,
 	beeScale: 1,
 	beeSpeed: 8,
+	beeScoutRatio: 0.18,
+	beeFlightAcceleration: 18,
+	beeFlightFlutter: 0.28,
 	beeForageDuration: 10,
+	beeHoneyMaturationSeconds: 90,
+	beeInitialNectarStore: 48,
+	beeInitialHoneyStore: 180,
+	beeInitialPollenStore: 72,
 	beeDaylight: 1,
 	beeTemperature: 22,
 	beeRain: 0,
@@ -491,7 +498,14 @@ gfx.undergroundArtifactExposure = clampSetting( gfx.undergroundArtifactExposure,
 gfx.beeCount = Math.round( clampSetting( gfx.beeCount, 0, MAX_BEES ) );
 gfx.beeScale = clampSetting( gfx.beeScale, 0.25, 3 );
 gfx.beeSpeed = clampSetting( gfx.beeSpeed, 1, 20 );
+gfx.beeScoutRatio = clampSetting( gfx.beeScoutRatio, 0, 0.6 );
+gfx.beeFlightAcceleration = clampSetting( gfx.beeFlightAcceleration, 2, 50 );
+gfx.beeFlightFlutter = clampSetting( gfx.beeFlightFlutter, 0, 1.5 );
 gfx.beeForageDuration = clampSetting( gfx.beeForageDuration, 2, 40 );
+gfx.beeHoneyMaturationSeconds = clampSetting( gfx.beeHoneyMaturationSeconds, 10, 600 );
+gfx.beeInitialNectarStore = clampSetting( gfx.beeInitialNectarStore, 0, 1000 );
+gfx.beeInitialHoneyStore = clampSetting( gfx.beeInitialHoneyStore, 0, 5000 );
+gfx.beeInitialPollenStore = clampSetting( gfx.beeInitialPollenStore, 0, 1000 );
 gfx.beeDaylight = clampSetting( gfx.beeDaylight, 0, 1 );
 gfx.beeTemperature = clampSetting( gfx.beeTemperature, - 5, 45 );
 gfx.beeRain = clampSetting( gfx.beeRain, 0, 1 );

@@ -16,6 +16,10 @@ import {
 
 const TRANSITION_SECONDS = 0.18;
 const FLOWER_STOCK = 18;
+const HIVE_OUTSIDE_BASE = 0.32;
+const HIVE_OUTSIDE_SCALE = 0.45;
+const HIVE_INTERIOR_BASE = 0.18;
+const HIVE_INTERIOR_SCALE = 0.30;
 // Tree meshes are normalized to one unit of height. Keep the hive below the
 // foliage so both the entrance and the flight corridor remain readable.
 const TREE_SOCKET = new THREE.Vector3( 0.058, 0.275, 0.022 );
@@ -57,7 +61,6 @@ function prepareHive( source ) {
 		metalness: 0,
 		vertexColors: true,
 	} );
-	material.emissiveNode = attribute( 'color', 'vec3' ).mul( 0.18 );
 
 	model.traverse( ( object ) => {
 
@@ -296,11 +299,16 @@ export function createBees( { scene, props, assets } ) {
 	const worldMatrix = new THREE.Matrix4();
 	const hiveAnchor = new THREE.Vector3();
 	const hiveFlight = new THREE.Vector3();
+	const hiveDirection = new THREE.Vector3();
+	const hiveEntrance = new THREE.Vector3();
+	const hiveInterior = new THREE.Vector3();
+	const hiveOutside = new THREE.Vector3();
 	const heading = new THREE.Vector3();
 	const renderPosition = new THREE.Vector3();
 	const modelForward = new THREE.Vector3( - 1, 0, 0 );
 	const attitude = new THREE.Quaternion();
 	const targetAttitude = new THREE.Quaternion();
+	const bankAttitude = new THREE.Quaternion();
 	const flowerYawAttitude = new THREE.Quaternion();
 	const flowerContext = {
 		count: 0,
@@ -321,7 +329,20 @@ export function createBees( { scene, props, assets } ) {
 	const context = {
 		daylight: 1,
 		weather: { temperatureC: gfx.beeTemperature, rain: gfx.beeRain, windSpeed: gfx.beeWind },
-		hive: { x: 0, y: 1, z: 0 },
+		hive: {
+			x: 0,
+			y: 1,
+			z: 0,
+			entranceX: 0,
+			entranceY: 1,
+			entranceZ: 0,
+			interiorX: 0,
+			interiorY: 1,
+			interiorZ: 0,
+			outsideX: 0,
+			outsideY: 1,
+			outsideZ: 0,
+		},
 		demand: { nectar: 0.62, pollen: 0.38 },
 		colony: { queenPresent: true, nutrition: 1, season: 1, layingMultiplier: 1 },
 		flowers: flowerContext,
@@ -344,8 +365,15 @@ export function createBees( { scene, props, assets } ) {
 		initialCount: 0,
 		seed: 0xBEE2026,
 		flightSpeed: gfx.beeSpeed,
+		flightAcceleration: gfx.beeFlightAcceleration,
+		wanderStrength: gfx.beeFlightFlutter,
+		scoutRatio: gfx.beeScoutRatio,
 		durationScale: 1,
 		forageDurationSeconds: gfx.beeForageDuration,
+		honeyMaturationSeconds: gfx.beeHoneyMaturationSeconds,
+		initialRawNectar: gfx.beeInitialNectarStore,
+		initialHoney: gfx.beeInitialHoneyStore,
+		initialPollen: gfx.beeInitialPollenStore,
 		initialAdultWorkers: 32000,
 		initialEggs: 3600,
 		initialLarvae: 6500,
@@ -360,6 +388,40 @@ export function createBees( { scene, props, assets } ) {
 	let flowerStockAccumulator = 0;
 	let surfaceVisible = true;
 	let hiveAvailable = false;
+
+	function updateHiveContext() {
+
+		// The Blender flight marker is the mouth of the hive. The vector from
+		// the authored attachment socket to this marker gives the actual local
+		// entrance axis after tree placement, yaw and scale. Three explicit
+		// world-space points let the kernel cross the opening continuously:
+		// interior -> entrance -> outside (and the reverse on return).
+		hiveDirection.subVectors( hiveFlight, hiveAnchor );
+		if ( hiveDirection.lengthSq() < 1e-8 ) {
+
+			hiveDirection.set( 0, 0, 1 ).applyQuaternion( hivePivot.quaternion );
+
+		} else {
+
+			hiveDirection.normalize();
+
+		}
+		const visualScale = Math.max( 0.25, gfx.hiveScale );
+		hiveEntrance.copy( hiveFlight );
+		hiveOutside.copy( hiveFlight ).addScaledVector(
+			hiveDirection, HIVE_OUTSIDE_BASE + HIVE_OUTSIDE_SCALE * visualScale,
+		);
+		hiveInterior.copy( hiveFlight ).addScaledVector(
+			hiveDirection, - ( HIVE_INTERIOR_BASE + HIVE_INTERIOR_SCALE * visualScale ),
+		);
+		Object.assign( context.hive, {
+			x: hiveOutside.x, y: hiveOutside.y, z: hiveOutside.z,
+			entranceX: hiveEntrance.x, entranceY: hiveEntrance.y, entranceZ: hiveEntrance.z,
+			interiorX: hiveInterior.x, interiorY: hiveInterior.y, interiorZ: hiveInterior.z,
+			outsideX: hiveOutside.x, outsideY: hiveOutside.y, outsideZ: hiveOutside.z,
+		} );
+
+	}
 
 	function refreshHiveAnchor( force = false ) {
 
@@ -389,9 +451,7 @@ export function createBees( { scene, props, assets } ) {
 		hiveAvailable = true;
 		hivePivot.updateMatrixWorld( true );
 		hiveAsset.flight.getWorldPosition( hiveFlight );
-		context.hive.x = hiveFlight.x;
-		context.hive.y = hiveFlight.y;
-		context.hive.z = hiveFlight.z;
+		updateHiveContext();
 		return true;
 
 	}
@@ -521,7 +581,14 @@ export function createBees( { scene, props, assets } ) {
 
 		for ( let bee = 0; bee < simulation.count; bee ++ ) {
 
-			const clip = views.clip[ bee ];
+			const state = views.state[ bee ];
+			const crossesHiveOpening =
+				state === BEE_STATE.HIVE_EXIT ||
+				state === BEE_STATE.HIVE_APPROACH ||
+				state === BEE_STATE.HIVE_ENTRY;
+			// Keep the representative visible all the way to the interior
+			// socket. Hiding happens only after the kernel enters IN_HIVE.
+			const clip = crossesHiveOpening ? BEE_CLIP.FLIGHT : views.clip[ bee ];
 			if ( clip === BEE_CLIP.HIDDEN ) {
 
 				currentClip[ bee ] = BEE_CLIP.HIDDEN;
@@ -550,7 +617,6 @@ export function createBees( { scene, props, assets } ) {
 			}
 
 			renderPosition.set( views.x[ bee ], views.y[ bee ], views.z[ bee ] );
-			const state = views.state[ bee ];
 			const target = views.targetFlower[ bee ];
 			if (
 				( state === BEE_STATE.TOUCHDOWN || state === BEE_STATE.FORAGE ) &&
@@ -563,10 +629,31 @@ export function createBees( { scene, props, assets } ) {
 
 			} else {
 
-				heading.set( views.headingX[ bee ], views.headingY[ bee ], views.headingZ[ bee ] );
-				if ( heading.lengthSq() < 1e-6 ) heading.copy( modelForward );
-				else heading.normalize();
+				const velocityX = views.velocityX ? views.velocityX[ bee ] : views.headingX[ bee ];
+				const velocityY = views.velocityY ? views.velocityY[ bee ] : views.headingY[ bee ];
+				const velocityZ = views.velocityZ ? views.velocityZ[ bee ] : views.headingZ[ bee ];
+				const horizontal = Math.hypot( velocityX, velocityZ );
+				if ( horizontal < 1e-5 ) {
+
+					heading.set( views.headingX[ bee ], 0, views.headingZ[ bee ] );
+					if ( heading.lengthSq() < 1e-6 ) heading.copy( modelForward );
+					else heading.normalize();
+
+				} else {
+
+					// Honey bees pitch into a climb but do not stand vertically
+					// during translational flight. Limit only the display pitch;
+					// authoritative velocity and position remain untouched.
+					const climb = clamp( velocityY / horizontal, - 0.42, 0.42 );
+					heading.set( velocityX / horizontal, climb, velocityZ / horizontal ).normalize();
+
+				}
 				targetAttitude.setFromUnitVectors( modelForward, heading );
+				const banking = views.banking && Number.isFinite( views.banking[ bee ] )
+					? clamp( views.banking[ bee ], - 1, 1 )
+					: 0;
+				bankAttitude.setFromAxisAngle( modelForward, banking * 0.48 );
+				targetAttitude.multiply( bankAttitude );
 
 			}
 
@@ -637,7 +724,11 @@ export function createBees( { scene, props, assets } ) {
 		context.weather.rain = gfx.beeRain;
 		context.weather.windSpeed = gfx.beeWind;
 		simulation.flightSpeed = gfx.beeSpeed;
+		simulation.flightAcceleration = gfx.beeFlightAcceleration;
+		simulation.wanderStrength = gfx.beeFlightFlutter;
+		simulation.scoutRatio = gfx.beeScoutRatio;
 		simulation.forageDurationSeconds = gfx.beeForageDuration;
+		simulation.honeyMaturationSeconds = gfx.beeHoneyMaturationSeconds;
 
 	}
 
@@ -700,8 +791,15 @@ export function createBees( { scene, props, assets } ) {
 			initialCount: 0,
 			seed: 0xBEE2026,
 			flightSpeed: gfx.beeSpeed,
+			flightAcceleration: gfx.beeFlightAcceleration,
+			wanderStrength: gfx.beeFlightFlutter,
+			scoutRatio: gfx.beeScoutRatio,
 			durationScale: 1,
 			forageDurationSeconds: gfx.beeForageDuration,
+			honeyMaturationSeconds: gfx.beeHoneyMaturationSeconds,
+			initialRawNectar: gfx.beeInitialNectarStore,
+			initialHoney: gfx.beeInitialHoneyStore,
+			initialPollen: gfx.beeInitialPollenStore,
 			initialAdultWorkers: 32000,
 			initialEggs: 3600,
 			initialLarvae: 6500,
@@ -726,7 +824,7 @@ export function createBees( { scene, props, assets } ) {
 		hivePivot.scale.setScalar( scale );
 		hivePivot.updateMatrixWorld( true );
 		hiveAsset.flight.getWorldPosition( hiveFlight );
-		Object.assign( context.hive, { x: hiveFlight.x, y: hiveFlight.y, z: hiveFlight.z } );
+		updateHiveContext();
 
 	}
 

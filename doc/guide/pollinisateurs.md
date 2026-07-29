@@ -1,97 +1,170 @@
 ---
 title: Abeilles et pollinisateurs
 order: 58
-summary: Comprendre la colonie agrégée, les vols, les visites de fleurs, la météo et les limites du modèle d’abeilles.
+summary: Comprendre l’exploration, le recrutement, les vols, la production de miel, la démographie et les réglages de la colonie d’abeilles.
 contracts: BEE-SIM
 ---
 
 # Abeilles et pollinisateurs
 
-## Ce que vous voyez
+## Ce que vous observez
 
-Le système de pollinisateurs vit uniquement à la surface. Une ruche est suspendue à un arbre, les fleurs forment plusieurs parcelles autour de la carte et des ouvrières butineuses font des allers-retours entre les deux. Entrer sous terre masque cet ensemble avec le reste du décor de surface. Les papillons utilisent aussi ces fleurs mais suivent un cycle indépendant, décrit dans le guide [Papillons](./papillons.md).
+À la surface, une ruche est fixée à un arbre et des fleurs sont réparties en parcelles. Les abeilles visibles ne suivent plus un simple aller-retour identique : certaines explorent, d’autres exploitent les zones découvertes, plusieurs fleurs peuvent être visitées pendant un même voyage, puis la charge est réellement rapportée à l’intérieur.
 
-Le nombre **Abeilles visibles** règle des représentantes graphiques, pas la population réelle calculée dans la ruche. Par défaut, 48 slots représentent collectivement 32 000 ouvrières adultes. Une partie de ces représentantes se trouve dans la ruche et n’est volontairement pas dessinée : il est normal de voir moins de 48 abeilles à l’écran.
+Les papillons utilisent le même champ floral mais suivent leur propre cycle, décrit dans [Papillons](./papillons.md).
 
-## Le cycle d’une abeille
+**Abeilles visibles** règle des représentantes graphiques, pas l’effectif réel. Par défaut, 48 slots représentent collectivement environ 32 000 ouvrières. Celles qui déchargent, dansent, se reposent ou attendent dans la ruche sont cachées : voir moins de 48 abeilles n’est pas une disparition anormale.
 
-Une abeille suit ce cycle :
+## Pourquoi une abeille part ici plutôt qu’ailleurs
+
+La colonie combine trois informations :
+
+1. ses besoins en nectar et pollen ;
+2. la préférence individuelle de la butineuse ;
+3. ce que les retours précédents ont appris sur les parcelles.
+
+Une **éclaireuse** prend un trajet indirect, inspecte une zone et peut découvrir une ressource. Une rentrée profitable renforce une petite mémoire collective, représentée par une danse dans la ruche.
+
+Une **recrutée** peut utiliser cette information pour rejoindre une parcelle connue. Les sources peu rentables, épuisées ou anciennes perdent progressivement leur influence. Lorsque la colonie connaît peu de bonnes sources, la proportion effective de voyages exploratoires augmente.
+
+Il est donc normal que deux abeilles quittant la ruche au même moment ne prennent ni la même route ni la même décision.
+
+## Cycle visible d’une butineuse
 
 ```text
-ruche → orientation → fleur → pose → récolte → décollage → retour → déchargement → repos
+attente dans la ruche
+  → sortie par la bouche
+  → orientation, exploration ou vol recruté
+  → inspection de la parcelle
+  → ralentissement et pose sur une fleur
+  → récolte
+  → autre fleur éventuelle
+  → retour et entrée par la bouche
+  → déchargement, danse éventuelle et repos
 ```
 
-- **Dans la ruche**, elle attend des conditions favorables et récupère de l’énergie.
-- **En orientation**, une nouvelle butineuse décrit un court vol autour de l’entrée avant de partir loin.
-- **À l’aller**, elle rejoint une fleur précise.
-- **En approche**, elle ralentit et descend vers un point de contact précis de la fleur.
-- **À la pose**, sa trajectoire et son orientation se raccordent progressivement à la composition de butinage créée dans Blender.
-- **En récolte**, l’animation de butinage reste active pendant environ 10 secondes par défaut. Elle prélève du nectar ou du pollen et peut ensuite visiter une autre fleur.
-- **Au décollage**, elle quitte le contact à vitesse nulle, prend de la hauteur en douceur puis s’aligne sur son prochain trajet.
-- **Au retour**, elle rejoint directement l’entrée sans changement instantané de position.
-- **Au déchargement**, elle livre sa charge.
-- **Au repos**, elle récupère avant un autre trajet.
+### Sortir et rentrer
 
-Les états d’orientation, d’aller, d’approche, de décollage, de départ et de retour utilisent le même cycle de vol : changer d’étape ne redémarre pas brusquement le battement des ailes. La pose lance l’animation de butinage, qui continue sans redémarrage pendant la récolte. En vol, le corps s’aligne progressivement presque à l’horizontale sur la vitesse réelle ; sur la fleur, il retrouve l’orientation et le contact de référence de la scène Blender.
+La ruche possède un point intérieur, sa bouche et un point extérieur. Une abeille traverse ces trois points dans l’ordre, sans saut :
 
-L’attente dans la ruche et le repos sont cachés. Une abeille peut donc disparaître à l’entrée puis ressortir plus tard sans qu’il s’agisse d’un bug. Tous les raccords visibles — pose, décollage, départ et arrivée — sont continus : aucun état ne replace instantanément l’abeille ailleurs.
+- sortie : intérieur → bouche → extérieur ;
+- entrée : extérieur → bouche → intérieur.
+
+Elle reste visible pendant la traversée et n’est cachée qu’une fois arrivée à l’intérieur. Une disparition exactement au fond de la bouche est donc normale ; une disparition devant la ruche ne le serait pas.
+
+### Vol
+
+Le vol combine accélération, freinage, virages lissés, variation de vitesse et flottements rapides et lents. Le corps suit la vitesse réelle : il vole globalement couché, avec une inclinaison lors des montées et un roulis dans les virages.
+
+Ces mouvements expliquent les petits détours autour d’une parcelle. Une abeille ne doit toutefois jamais changer instantanément de position.
+
+### Se poser et butiner
+
+Près d’une fleur, l’abeille ralentit avant de rejoindre le point de contact préparé dans Blender. La pose, l’animation `Forage_Bee` et le décollage s’enchaînent sans téléportation.
+
+Le butinage dure 10 secondes en moyenne par défaut, avec une variation déterministe de 0,7× à 1,5×. Après la récolte, l’abeille peut visiter une autre fleur de la parcelle si sa charge et son énergie le permettent. Sinon elle rentre.
+
+## De la fleur au miel
+
+Une visite retire réellement du nectar ou du pollen du stock de la fleur.
+
+- Le **pollen** rejoint les réserves de la ruche et nourrit le couvain larvaire.
+- Le **nectar brut** contient du sucre et beaucoup d’eau.
+- Dans la ruche, une transformation agrégée transfère progressivement le sucre vers le stock de **miel** et évapore l’excès d’eau.
+- Les adultes consomment d’abord le miel, puis le nectar brut si le miel manque.
+
+La vitesse de cette transformation dépend de **Maturation miel (s)**. Il s’agit d’une abstraction des transferts entre butineuses et receveuses, de la manipulation du nectar et de la ventilation.
+
+Les réserves ne sont pas décoratives. Quand sucre ou pollen manquent, la demande de collecte augmente et la nutrition baisse. Une mauvaise nutrition réduit ensuite la ponte. Sans fleurs, aucune nouvelle ressource ne peut être créée : la colonie vit sur ses stocks puis les épuise.
 
 ## Vie de la colonie
 
-La partie visible repose sur une colonie agrégée. Au lancement, elle contient 32 000 ouvrières adultes, 3 600 œufs, 6 500 larves et 12 500 nymphes. La reine est présente et pond jusqu’à environ 1 200 œufs par jour biologique lorsque la nutrition, la saison et la population ouvrière sont favorables.
+La colonie commence avec environ :
 
-Le développement suit une chaîne simple :
+- 32 000 ouvrières adultes ;
+- 3 600 œufs ;
+- 6 500 larves ;
+- 12 500 nymphes.
+
+La reine peut pondre jusqu’à 1 200 œufs par jour biologique lorsque nutrition, saison et population ouvrière sont favorables.
 
 ```text
 œuf (3 jours) → larve (6 jours) → nymphe (12 jours) → adulte
 ```
 
-Une ponte fraîche atteint donc l’âge adulte après environ 21 jours biologiques. Le couvain déjà présent au lancement contient des âges mélangés : des émergences peuvent se produire plus tôt. Une petite perte est appliquée à chaque stade, puis les adultes subissent une mortalité continue.
+Une ponte fraîche devient donc adulte après environ 21 jours biologiques. Le couvain initial contient déjà plusieurs âges, ce qui permet des émergences plus tôt. Des pertes existent à chaque stade et les adultes vieillissent aussi.
 
-Les milliers d’individus restent des compteurs et des cohortes, sans modèle 3D. Lorsqu’une représentante visible vieillit, son slot est recyclé à la ruche pour représenter une ouvrière d’une génération suivante. Le nombre de modèles affichables reste ainsi fixe et performant, tandis que la population agrégée continue d’évoluer.
+Ces milliers d’individus restent des compteurs. Quand une représentante visible atteint son âge de retrait, son slot est recyclé à l’intérieur de la ruche pour représenter une nouvelle génération, sans créer un nouveau modèle 3D.
 
-## Pourquoi cette fleur ?
+## Pourquoi une abeille attend ou disparaît longtemps
 
-À chaque trajet, l’abeille choisit d’abord du nectar ou du pollen selon deux influences : le besoin global fixé pour la ruche et sa préférence individuelle. Cette préférence augmente une probabilité ; elle ne crée pas deux castes rigides.
+Plusieurs situations sont normales :
 
-Elle compare ensuite un petit nombre de fleurs. Une fleur bien approvisionnée, de bonne qualité, proche et située dans une parcelle déjà connue a davantage de chances d’être retenue. Les fleurs perdent une petite partie de leur stock lors des visites puis se régénèrent progressivement.
+- elle récupère son énergie dans la ruche ;
+- la lumière, la température, la pluie ou le vent interdisent un départ ;
+- aucune fleur n’a assez de la ressource recherchée ;
+- elle décharge sa récolte ;
+- elle met à jour la mémoire collective par une danse ;
+- elle se repose avant un nouveau voyage.
 
-Les parcelles, leurs fleurs et leurs variations sont recréées avec une graine fixe. Après un reset, la même configuration donne donc le même terrain de butinage et les mêmes décisions si les réglages restent identiques.
+À l’extérieur, elle peut ralentir pour inspecter une parcelle, approcher une fleur ou préparer son entrée. Une immobilité prolongée en plein vol ou un saut de position ne fait pas partie du comportement voulu.
 
-## Effet de la météo
+## Météo
 
-La température, la pluie et le vent contrôlent surtout les départs :
+Les départs dépendent d’un score continu :
 
-- sous environ 10 °C, les sorties deviennent très difficiles ;
-- entre 10 et 16 °C, l’activité augmente progressivement ;
-- la pluie réduit directement la condition de vol ;
-- le vent commence à pénaliser les départs vers 3 m/s et devient très contraignant vers 7 m/s.
+- la lumière devient favorable entre environ `0,08` et `0,32` ;
+- l’activité augmente entre 10 et 16 °C ;
+- la pluie réduit directement la condition ;
+- le vent devient pénalisant entre environ 3 et 7 m/s.
 
-Ces facteurs se combinent. Une pluie moyenne avec du vent peut donc garder les abeilles dans la ruche, même si chaque réglage pris séparément semble acceptable. Une abeille déjà dehors poursuit normalement son trajet ; le vent ne la déporte pas physiquement.
+Une abeille déjà dehors n’est pas téléportée si les conditions changent. Elle termine son étape ou rentre. Le vent ne déforme pas encore physiquement sa trajectoire.
 
-**Lumière du jour** règle directement la condition lumineuse : `0` empêche les nouveaux départs et `1` représente le plein jour. Ce curseur reste indépendant de l’heure visuelle du ciel. Température, pluie, vent et lumière changent l’activité extérieure, mais ne suspendent ni la ponte, ni le développement du couvain, ni le vieillissement.
+**Lumière du jour** est un contrôle manuel et ne suit pas automatiquement l’heure visuelle du ciel. La météo modifie les sorties, pas l’écoulement du temps biologique.
 
-## Réglages
+## Réglages utiles
 
-Ouvrez **Graphismes → 🌼 Pollinisateurs** :
+Dans **Graphismes → 🌼 Pollinisateurs** :
 
-- **Activer** affiche et avance le système. S’il est sauvegardé désactivé, les modèles et animations ne sont pas chargés au prochain lancement ; le réactiver déclenche leur chargement en arrière-plan ;
-- **Abeilles visibles** contrôle le nombre de représentantes, sans modifier les 32 000 ouvrières agrégées ; **Taille abeilles** et **Vitesse de vol** règlent leur lecture à l’écran ;
-- **Butinage sur fleur (s)** règle la durée centrale de la récolte de 2 à 40 secondes. La durée réelle d’une visite varie de façon déterministe entre 0,7× et 1,5× cette valeur ;
-- **Lumière du jour**, **Température**, **Pluie** et **Vent** changent la possibilité de partir ;
-- **Fleurs**, **Taille fleurs** et **Variation fleurs** reconstruisent le champ lorsque le curseur est relâché ;
-- **Mouvement fleurs** règle leur balancement sans reconstruire le décor ;
-- les quatre teintes modifient pétales, tiges, abeilles et ailes en direct ;
-- **Ombres abeilles** sépare la projection d’ombre de la réception d’ombre ;
-- **Taille ruche** redimensionne la ruche et recalcule son point de départ ;
-- **Ombres ruche** sépare également projection et réception pour tous les maillages de la ruche.
+- **Abeilles visibles** : nombre de slots, de 0 à 128 ;
+- **Taille abeilles** et **Vitesse de vol** : apparence et vitesse maximale ;
+- **Part d’éclaireuses** : davantage d’exploration, de 0 à 0,6 ;
+- **Accélération** : réactivité du démarrage, du freinage et des changements de vitesse ;
+- **Flottement multi-échelle** : amplitude des mouvements organiques ;
+- **Butinage sur fleur (s)** : durée centrale de chaque visite ;
+- **Maturation miel (s)** : vitesse de conversion du nectar brut en miel ;
+- **Nectar initial**, **Miel initial** et **Pollen initial** : réserves appliquées au prochain reset ;
+- **Lumière du jour**, **Température**, **Pluie** et **Vent** : conditions de départ ;
+- **Fleurs**, **Taille fleurs**, **Variation fleurs** et **Mouvement fleurs** : composition du champ ;
+- les teintes : coloration en direct des fleurs, corps et ailes ;
+- **Ombres abeilles** : projection et réception indépendantes ;
+- **Taille ruche** : recalcule aussi son corridor d’entrée ;
+- **Ombres ruche** : projection et réception indépendantes sur le matériau éclairé de la ruche.
 
-Les limites visibles du panneau sont sûres : au maximum 128 abeilles et 256 fleurs. Les fleurs partagent un seul rendu instancié, comme les abeilles en vol ; augmenter leur nombre n’ajoute pas un draw par objet.
+La ruche n’utilise pas une couleur émissive : elle reçoit l’éclairage et son relief comme les objets de surface. Les ombres nécessitent aussi que le réglage global des ombres soit actif.
 
-## Ce que le système ne simule pas encore
+## Performances
 
-La reine, les œufs, les larves, les nymphes, les émergences et la mortalité adulte sont suivis uniquement comme quantités agrégées. Ils n’ont ni modèle 3D ni comportement individuel. Le système ne simule pas les mâles, les nourrices, les tâches internes, les rayons de cire, l’essaimage, les maladies ou la danse de recrutement. Les abeilles ne nourrissent pas les fourmis et les fourmis n’attaquent pas la ruche.
+La simulation ne compare jamais chaque abeille à chaque fleur.
 
-Une visite florale est une animation de récolte avec un stock nectar/pollen. Elle ne féconde pas encore la plante, ne crée pas de graine et ne modifie pas le paysage. Les abeilles ne s’évitent pas entre elles et ne calculent pas de chemin autour des branches : leur vol reste un trajet vectoriel continu vers la cible, avec des raccords de pose et de décollage lissés.
+- Une décision florale examine quatre candidates.
+- La mémoire collective contient 16 entrées par défaut et reste strictement bornée.
+- Reine, couvain, miel et pollen sont des compteurs agrégés.
+- Les abeilles partagent un draw VAT ; les fleurs partagent un draw instancié ; la ruche utilise une primitive.
+- Les données GPU sont envoyées une seule fois par frame, même si plusieurs pas logiques sont calculés.
 
-Le système vise donc une scène de butinage cohérente, déterministe et performante. Il ne faut pas interpréter ses compteurs, ses âges accélérés ou ses seuils comme une prédiction scientifique d’une ruche réelle.
+Augmenter le nombre de fleurs ou d’ouvrières réelles ne crée donc ni squelette ni objet de rendu par individu.
+
+## Limites actuelles
+
+Le système ne simule pas encore :
+
+- les individus internes de la ruche, les rayons de cire et l’operculation visible ;
+- les mâles, l’essaimage, les maladies ou la génétique ;
+- une danse visible à l’intérieur ;
+- la pollinisation des plantes et la production de graines ;
+- les collisions entre abeilles ou l’évitement géométrique des branches ;
+- une poussée physique du vent ;
+- des échanges de ressources avec les fourmis.
+
+L’exploration, les réserves et les durées sont conçues pour une simulation cohérente et plaisante à observer. Elles ne doivent pas être lues comme des mesures scientifiques exactes d’une ruche réelle.
