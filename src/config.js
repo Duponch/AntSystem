@@ -275,6 +275,17 @@ export const gfx = {
 	chameleonTrackingSpeed: 1.45,
 	chameleonAnimationSpeed: 1,
 	chameleonTurnSpeed: 6,
+	chameleonContactPhysics: true,
+	chameleonFootIK: true,
+	chameleonContactFrequency: 60,
+	chameleonBodyContacts: true,
+	chameleonBodyContactFrequency: 30,
+	chameleonBodyProbeRadius: 0.1,
+	chameleonTailContacts: true,
+	chameleonTailContactFrequency: 30,
+	chameleonTailProbeRadius: 0.075,
+	chameleonStepHeight: 0.16,
+	chameleonGaitStrength: 1,
 	chameleonRoamingEnabled: true,
 	chameleonRoamingRadius: Math.ceil( WORLD * Math.SQRT2 ),
 	chameleonCamouflageEnabled: true,
@@ -527,6 +538,13 @@ gfx.chameleonScale = clampSetting( gfx.chameleonScale, 0.4, 2.5 );
 gfx.chameleonPatrolSpeed = clampSetting( gfx.chameleonPatrolSpeed, 0.05, 4 );
 gfx.chameleonTrackingSpeed = clampSetting( gfx.chameleonTrackingSpeed, 0.05, 5 );
 gfx.chameleonAnimationSpeed = clampSetting( gfx.chameleonAnimationSpeed, 0.1, 4 );
+gfx.chameleonContactFrequency = clampSetting( gfx.chameleonContactFrequency, 15, 120 );
+gfx.chameleonBodyContactFrequency = clampSetting( gfx.chameleonBodyContactFrequency, 15, 60 );
+gfx.chameleonBodyProbeRadius = clampSetting( gfx.chameleonBodyProbeRadius, 0.02, 0.28 );
+gfx.chameleonTailContactFrequency = clampSetting( gfx.chameleonTailContactFrequency, 15, 60 );
+gfx.chameleonTailProbeRadius = clampSetting( gfx.chameleonTailProbeRadius, 0.02, 0.22 );
+gfx.chameleonStepHeight = clampSetting( gfx.chameleonStepHeight, 0, 0.5 );
+gfx.chameleonGaitStrength = clampSetting( gfx.chameleonGaitStrength, 0, 1 );
 gfx.chameleonTurnSpeed = clampSetting( gfx.chameleonTurnSpeed, 1, 15 );
 gfx.chameleonRoamingRadius = clampSetting(
 	gfx.chameleonRoamingRadius, 2, Math.ceil( WORLD * Math.SQRT2 ),

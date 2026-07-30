@@ -136,6 +136,64 @@ export function buildWildlifeHudView( kind, data ) {
 			? `Actif \u00b7 peau adapt\u00e9e au d\u00e9cor \u00b7 relief encore perceptible \u00b7 non d\u00e9tect\u00e9 par les papillons${ data.camouflageRemaining > 0 ? ` \u00b7 ${ fixed( data.camouflageRemaining ) } s` : '' }`
 			: 'Inactif \u00b7 visible des papillons';
 		const navigation = `Locale \u00b7 ${ fixed( data?.routePosition ) }/${ fixed( data?.routeLength ) } u \u00b7 ${ Math.round( data?.explorationDecisions || 0 ) } choix`;
+		const physicalContactDetails = [];
+		if ( typeof data?.physicalContacts === 'boolean' ) {
+
+			physicalContactDetails.push( data.physicalContacts ? 'Actifs' : 'Désactivés' );
+
+		} else if ( Number.isFinite( data?.physicalContacts ) ) {
+
+			physicalContactDetails.push( `${ Math.max( 0, Math.round( data.physicalContacts ) ) } contacts` );
+
+		}
+		if ( Number.isFinite( data?.groundedFeet ) ) {
+
+			physicalContactDetails.push( `${ Math.max( 0, Math.round( data.groundedFeet ) ) }/4 appuis` );
+
+		}
+		if ( Number.isFinite( data?.surfaceTriangleCount ) ) {
+
+			physicalContactDetails.push( `${ Math.max( 0, Math.round( data.surfaceTriangleCount ) ) } triangles` );
+
+		}
+		if ( Number.isFinite( data?.contactFrequency ) ) {
+
+			physicalContactDetails.push( `${ fixed( data.contactFrequency, 0 ) } Hz` );
+
+		}
+		if ( Number.isFinite( data?.gaitSteps ) ) {
+
+			physicalContactDetails.push( `${ Math.max( 0, Math.round( data.gaitSteps ) ) } pas` );
+
+		}
+		if ( Number.isFinite( data?.networkRebuildFailures )
+			&& data.networkRebuildFailures > 0 ) {
+
+			physicalContactDetails.push(
+				`réseau : route précédente conservée après ${ Math.round( data.networkRebuildFailures ) } rejet(s)`,
+			);
+
+		}
+		if ( data?.contactFrozen ) {
+
+			const recovery = data.contactRecovery === 'attack-hold'
+				? 'attaque poursuivie, position verrouillée'
+				: data.contactRecovery === 'visual-pose-restore'
+					? 'dernière pose visuelle sûre conservée'
+					: 'correction locale en cours';
+			physicalContactDetails.push( `sécurité : ${ recovery }` );
+
+		}
+		if ( Number.isFinite( data?.bodyResidual ) || Number.isFinite( data?.tailResidual ) ) {
+
+			physicalContactDetails.push(
+				`marges corps ${ fixed( data?.bodyResidual, 3 ) } / queue ${ fixed( data?.tailResidual, 3 ) }`,
+			);
+
+		}
+		const physicalContacts = physicalContactDetails.length > 0
+			? physicalContactDetails.join( ' \u00b7 ' )
+			: 'T\u00e9l\u00e9m\u00e9trie non disponible';
 		return {
 			tone: data?.camouflaged ? 'camouflage' : targetIndex >= 0 ? 'danger' : 'neutral',
 			html: `<div class="wildlife-head">
@@ -148,6 +206,7 @@ export function buildWildlifeHudView( kind, data ) {
 				<div class="wildlife-label">Menace</div><div>${ escapeHtml( threat ) }</div>
 				<div class="wildlife-label">Support</div><div>${ escapeHtml( support ) }</div>
 				<div class="wildlife-label">Navigation</div><div>${ escapeHtml( navigation ) }</div>
+				<div class="wildlife-label">Contacts physiques</div><div>${ escapeHtml( physicalContacts ) }</div>
 				<div class="wildlife-label">Camouflage</div><div>${ escapeHtml( camouflage ) }</div>
 				<div class="wildlife-label">Attaque</div><div>${ fixed( data?.attackDistance ) } u · détection ${ fixed( data?.detectionDistance ) } u</div>
 			</div>`,

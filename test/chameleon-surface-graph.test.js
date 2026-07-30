@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import * as THREE from 'three/webgpu';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 import {
 	CHAMELEON_CORRIDOR_MAX_SAMPLES,
@@ -12,6 +16,69 @@ import {
 	isChameleonGroundPointClear,
 	planChameleonRoute,
 } from '../src/chameleon-surface-graph.js';
+import { createChameleonSurfaceHit } from '../src/chameleon-surface-collider.js';
+
+async function loadShippedRuntimeGeometry( name, fit ) {
+
+	const assetUrl = new URL( `../public/assets/${ name }.fbx`, import.meta.url );
+	const bytes = await readFile( assetUrl );
+	const arrayBuffer = bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength,
+	);
+	const originalTextureLoad = THREE.TextureLoader.prototype.load;
+	THREE.TextureLoader.prototype.load = function loadTextureStub() {
+
+		return new THREE.Texture();
+
+	};
+	let source;
+	try {
+
+		source = new FBXLoader().parse(
+			arrayBuffer,
+			new URL( '../public/assets/', import.meta.url ).href,
+		);
+
+	} finally {
+
+		THREE.TextureLoader.prototype.load = originalTextureLoad;
+
+	}
+	source.updateMatrixWorld( true );
+	const parts = [];
+	source.traverse( ( object ) => {
+
+		if ( ! object.isMesh ) return;
+		const geometry = object.geometry.clone();
+		geometry.applyMatrix4( object.matrixWorld );
+		geometry.clearGroups();
+		for ( const key of Object.keys( geometry.attributes ) ) {
+
+			if ( key !== 'position' && key !== 'normal' && key !== 'uv' )
+				geometry.deleteAttribute( key );
+
+		}
+		parts.push( geometry );
+
+	} );
+	assert.ok( parts.length > 0, `${ name } has no runtime mesh` );
+	const geometry = parts.length > 1 ? mergeGeometries( parts, false ) : parts[ 0 ];
+	assert.ok( geometry, `${ name } runtime geometry could not be merged` );
+	geometry.computeBoundingBox();
+	const bounds = geometry.boundingBox;
+	const size = new THREE.Vector3();
+	bounds.getSize( size );
+	const normalisation = 1 / ( fit === 'length' ? size.z : size.y );
+	geometry.translate(
+		- ( bounds.min.x + bounds.max.x ) * 0.5,
+		- bounds.min.y,
+		- ( bounds.min.z + bounds.max.z ) * 0.5,
+	);
+	geometry.scale( normalisation, normalisation, normalisation );
+	return geometry;
+
+}
 
 function attribute( vertices ) {
 
@@ -46,6 +113,127 @@ function geometryVertices( halfX, height, halfZ, tree = false ) {
 
 }
 
+function packedAttribute( values, itemSize, Type = Float32Array ) {
+
+	const array = new Type( values );
+	return {
+		array,
+		itemSize,
+		count: array.length / itemSize,
+		getX( index ) { return array[ index * itemSize ]; },
+		getY( index ) { return array[ index * itemSize + 1 ]; },
+		getZ( index ) { return array[ index * itemSize + 2 ]; },
+	};
+
+}
+
+function boxGeometry( halfX, height, halfZ ) {
+
+	const position = packedAttribute( [
+		- halfX, 0, - halfZ, halfX, 0, - halfZ,
+		halfX, height, - halfZ, - halfX, height, - halfZ,
+		- halfX, 0, halfZ, halfX, 0, halfZ,
+		halfX, height, halfZ, - halfX, height, halfZ,
+	], 3 );
+	const index = packedAttribute( [
+		0, 2, 1, 0, 3, 2,
+		4, 5, 6, 4, 6, 7,
+		0, 4, 7, 0, 7, 3,
+		1, 2, 6, 1, 6, 5,
+		0, 1, 5, 0, 5, 4,
+		3, 7, 6, 3, 6, 2,
+	], 1, Uint16Array );
+	return {
+		attributes: { position },
+		index,
+		drawRange: { start: 0, count: Infinity },
+		getAttribute( name ) { return this.attributes[ name ] || null; },
+		getIndex() { return this.index; },
+	};
+
+
+}
+function disconnectedBoxesGeometry() {
+
+	const first = boxGeometry( 0.8, 1, 0.6 );
+	const positions = Array.from( first.attributes.position.array );
+	const indices = Array.from( first.index.array );
+	const vertexCount = first.attributes.position.count;
+	for ( let vertex = 0; vertex < vertexCount; vertex ++ ) {
+
+		positions.push(
+			first.attributes.position.getX( vertex ) + 4,
+			first.attributes.position.getY( vertex ),
+			first.attributes.position.getZ( vertex ),
+		);
+
+	}
+	for ( const index of first.index.array ) indices.push( index + vertexCount );
+	const position = packedAttribute( positions, 3 );
+	const index = packedAttribute( indices, 1, Uint16Array );
+	return {
+		attributes: { position },
+		index,
+		drawRange: { start: 0, count: Infinity },
+		getAttribute( name ) { return this.attributes[ name ] || null; },
+		getIndex() { return this.index; },
+	};
+
+}
+
+function foldedRibbonGeometry( segments = 36 ) {
+
+	const positions = [];
+	const normals = [];
+	const indices = [];
+	for ( let ordinal = 0; ordinal <= segments; ordinal ++ ) {
+
+		const alpha = ordinal / segments;
+		const angle = Math.PI * ( 1 - alpha );
+		const x = Math.cos( angle ) * 3;
+		const y = Math.sin( angle ) * 2.4;
+		let tx = - Math.sin( angle ) * Math.PI;
+		let ty = Math.cos( angle ) * - Math.PI * 0.8;
+		const tangentLength = Math.hypot( tx, ty ) || 1;
+		tx /= tangentLength;
+		ty /= tangentLength;
+		let nx = - ty;
+		let ny = tx;
+		if ( ny < 0 ) { nx = - nx; ny = - ny; }
+		positions.push( x, y, - 0.45, x, y, 0.45 );
+		normals.push( nx, ny, 0, nx, ny, 0 );
+		if ( ordinal >= segments ) continue;
+		const a = ordinal * 2;
+		indices.push( a, a + 3, a + 1, a, a + 2, a + 3 );
+
+	}
+	const position = packedAttribute( positions, 3 );
+	const normal = packedAttribute( normals, 3 );
+	const index = packedAttribute( indices, 1, Uint16Array );
+	return {
+		attributes: { position, normal },
+		index,
+		drawRange: { start: 0, count: Infinity },
+		getAttribute( name ) { return this.attributes[ name ] || null; },
+		getIndex() { return this.index; },
+	};
+
+}
+
+function singleGeometryRegistry( geometry, {
+	model = 'Log_01',
+	placement = { x: 0, y: 0.018, z: 0, scale: 1, tag: 'chameleon-host' },
+} = {} ) {
+
+	return [ {
+		model,
+		category: 'obstacles',
+		placements: [ placement ],
+		mesh: { geometry },
+	} ];
+
+}
+
 function entry( model, category, placements, {
 	halfX = 0.28,
 	height = 0.5,
@@ -53,16 +241,12 @@ function entry( model, category, placements, {
 	tree = false,
 } = {} ) {
 
-	const positions = attribute( geometryVertices( halfX, height, halfZ, tree ) );
+	const geometry = boxGeometry( halfX * ( tree ? 1 : 1 ), height, halfZ * ( tree ? 1 : 1 ) );
 	return {
 		model,
 		category,
 		placements,
-		mesh: {
-			geometry: {
-				getAttribute: ( name ) => name === 'position' ? positions : null,
-			},
-		},
+		mesh: { geometry },
 	};
 
 }
@@ -151,7 +335,9 @@ test( 'CHAMELEON-SURFACE-001 bakes every supported placement without the former 
 		terrainSpacing: 5.5,
 	} );
 	assert.equal( graph.supportCount, 15 );
-	assert.ok( graph.count > 512 );
+	assert.ok( graph.count > graph.terrainNodeCount );
+	assert.ok( graph.surfacePatchNodeCount >= graph.supportCount );
+	assert.equal( graph.reachableSurfaceTriangleCount, graph.collider.triangleCount );
 	assert.ok( graph.count <= 8192 );
 	assert.deepEqual(
 		new Set( graph.supports.map( ( candidate ) => candidate.model ) ),
@@ -300,6 +486,43 @@ test( 'CHAMELEON-SURFACE-004 revision/config cache never rebakes in the frame ho
 
 } );
 
+test( 'CHAMELEON-SURFACE-004B a failed rebake preserves the last published cache', () => {
+
+	const validRegistry = fullRegistryFixture();
+	const baker = new ChameleonSurfaceGraphBaker();
+	const validOptions = {
+		revision: 4,
+		worldSize: 90,
+		scales: { obstacles: 1, trees: 1, rocks: 1 },
+	};
+	const stable = baker.update( validRegistry, validOptions );
+	const stableBakeCount = baker.bakeCount;
+	const placements = Array.from( { length: 300 }, ( _, index ) => ( {
+		x: ( index % 20 ) * 3 - 28.5,
+		y: 0.018,
+		z: Math.floor( index / 20 ) * 3 - 21,
+		yaw: 0,
+		scale: 1,
+	} ) );
+	const invalidRegistry = [ entry( 'Log_01', 'obstacles', placements ) ];
+	assert.throws(
+		() => baker.update( invalidRegistry, {
+			revision: 5,
+			worldSize: 90,
+			maximumNodes: 256,
+			scales: { obstacles: 1, trees: 1, rocks: 1 },
+		} ),
+		/surface-wide patch minimum|global support budget|node budget|leaves .* surface patch nodes/u,
+	);
+	assert.equal( baker.graph, stable.graph );
+	assert.equal( baker.registry, validRegistry );
+	assert.equal( baker.revision, validOptions.revision );
+	assert.equal( baker.bakeCount, stableBakeCount );
+	const cached = baker.update( validRegistry, validOptions );
+	assert.equal( cached.rebuilt, false );
+	assert.equal( cached.graph, stable.graph );
+
+} );
 test( 'CHAMELEON-SURFACE-005 local exploration is deterministic, continuous and biased toward little-visited branches', () => {
 
 	const graph = buildChameleonSurfaceGraph( fullRegistryFixture(), {
@@ -339,5 +562,418 @@ test( 'CHAMELEON-SURFACE-005 local exploration is deterministic, continuous and 
 		support( graph, 'Rock_01' ).destinationNode,
 		support( graph, 'Tree_01' ).destinationNode,
 	)[ 0 ], support( graph, 'Rock_01' ).destinationNode );
+
+} );
+
+test( 'CHAMELEON-SURFACE-005B rejected route proposals restore router history exactly', () => {
+
+	const graph = buildChameleonSurfaceGraph( fullRegistryFixture(), {
+		worldSize: 90,
+		terrainSpacing: 5.5,
+	} );
+	const router = new ChameleonSurfaceRouter( graph, {
+		seed: 0x51f15e,
+		horizonDistance: 9,
+	} );
+	const before = {
+		currentNode: router.currentNode,
+		previousNode: router.previousNode,
+		pendingTargetNode: router.pendingTargetNode,
+		routeCount: router.routeCount,
+		destinationCount: router.destinationCount,
+		explorationCount: router.explorationCount,
+		decisionCount: router.decisionCount,
+		visitCounts: router.visitCounts.slice(),
+	};
+	router.beginProposal();
+	const rejected = router.exploreNext( 90 );
+	assertFrameContract( rejected );
+	assert.equal( router.routeCount, before.routeCount + 1 );
+	assert.equal( router.rejectProposal(), true );
+	for ( const field of [
+		'currentNode', 'previousNode', 'pendingTargetNode', 'routeCount',
+		'destinationCount', 'explorationCount', 'decisionCount',
+	] ) assert.equal( router[ field ], before[ field ], field );
+	assert.deepEqual( router.visitCounts, before.visitCounts );
+	assert.equal( router._proposalActive, false );
+
+	// Explicit destination routes share the same transactional visit history.
+	const explicitTarget = support( graph, 'Tree_01' ).destinationNode;
+	router.beginProposal();
+	const directRejected = router.routeTo( explicitTarget );
+	assertFrameContract( directRejected );
+	assert.equal( router.rejectProposal(), true );
+	for ( const field of [
+		'currentNode', 'previousNode', 'pendingTargetNode', 'routeCount',
+		'destinationCount', 'explorationCount', 'decisionCount',
+	] ) assert.equal( router[ field ], before[ field ], 'direct ' + field );
+	assert.deepEqual( router.visitCounts, before.visitCounts );
+
+	router.beginProposal();
+	const accepted = router.exploreNext( 90 );
+	assertFrameContract( accepted );
+	assert.equal( router.acceptProposal(), true );
+	assert.equal( router.routeCount, before.routeCount + 1 );
+	assert.equal( router.explorationCount, before.explorationCount + 1 );
+	assert.equal( router._proposalActive, false );
+	assert.equal( router.rejectProposal(), false );
+
+} );
+test( 'CHAMELEON-SURFACE-006 convex supports and handoffs retain adaptive clearance within the node budget', () => {
+
+	const segments = 28;
+	const positions = [];
+	const normals = [];
+	for ( let ordinal = 0; ordinal <= segments; ordinal ++ ) {
+
+		const angle = ordinal / segments * Math.PI;
+		const x = Math.cos( angle ) * 3;
+		const y = Math.sin( angle ) * 2;
+		const nx = Math.cos( angle ) / 3;
+		const ny = Math.sin( angle ) / 2;
+		const normalLength = Math.hypot( nx, ny ) || 1;
+		positions.push( x, y, - 0.4, x, y, 0.4 );
+		normals.push(
+			nx / normalLength, ny / normalLength, 0,
+			nx / normalLength, ny / normalLength, 0,
+		);
+
+	}
+	const indices = [];
+	for ( let ordinal = 0; ordinal < segments; ordinal ++ ) {
+
+		const a = ordinal * 2;
+		const b = a + 1;
+		const c = a + 3;
+		const d = a + 2;
+		indices.push( a, c, b, a, d, c );
+
+	}
+	const packed = ( values, itemSize ) => ( {
+		array: itemSize === 1 ? new Uint16Array( values ) : new Float32Array( values ),
+		itemSize,
+		count: values.length / itemSize,
+		getX( index ) { return this.array[ index * itemSize ]; },
+		getY( index ) { return this.array[ index * itemSize + 1 ]; },
+		getZ( index ) { return this.array[ index * itemSize + 2 ]; },
+	} );
+	const position = packed( positions, 3 );
+	const normal = packed( normals, 3 );
+	const index = packed( indices, 1 );
+	const geometry = {
+		attributes: { position, normal },
+		index,
+		drawRange: { start: 0, count: Infinity },
+		getAttribute( name ) { return this.attributes[ name ] || null; },
+		getIndex() { return this.index; },
+	};
+	const registry = [ {
+		model: 'Log_01',
+		category: 'obstacles',
+		placements: [ { x: 0, y: 0.018, z: 0, yaw: 0, scale: 1, tag: 'chameleon-host' } ],
+		mesh: { geometry },
+	} ];
+	const graph = buildChameleonSurfaceGraph( registry, {
+		worldSize: 24,
+		mapMargin: 1.5,
+		terrainSpacing: 3,
+		groundClearance: 0.2,
+		supportClearance: 0.002,
+		objectSamples: 8,
+		transitionSamples: 5,
+		surfaceChordTolerance: 0.006,
+		surfaceMaxSegmentLength: 0.18,
+		surfaceSubdivisionDepth: 8,
+		maximumNodes: 512,
+	} );
+	assert.ok( graph.count <= 512 );
+	assert.ok( graph.surfaceValidation.validatedTransitionSegments > 0 );
+	assert.equal( graph.surfaceComponentCount, 1 );
+	assert.equal( graph.reachableSurfaceTriangleCount, segments * 2 );
+	assert.equal( graph.excludedSurfaceTriangleCount, 0 );
+	assert.ok( graph.surfacePatchNodeCount > 1 );
+	const supportMetadata = graph.supports[ 0 ];
+	assert.equal( supportMetadata.reachableTriangleCount, segments * 2 );
+	assert.equal( supportMetadata.patchCount, graph.surfacePatchNodeCount );
+	const terrainNode = supportMetadata.portalTerrainNodes[ 0 ];
+	const corridor = planChameleonRoute( graph, supportMetadata.destinationNode, terrainNode );
+	assertFrameContract( corridor );
+	for ( let index = 0; index < corridor.count; index ++ ) assert.equal(
+		corridor.surfaceHit[ index ],
+		1,
+	);
+	let previousTriangle = - 1;
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		if ( corridor.kind[ index ] !== CHAMELEON_SURFACE_KIND.SUPPORT ) continue;
+		const triangle = corridor.triangleId[ index ];
+		assert.ok( triangle >= 0 );
+		assert.equal( graph.collider.componentId[ triangle ], corridor.componentId[ index ] );
+		if ( previousTriangle >= 0 && triangle !== previousTriangle ) {
+
+			const begin = graph.collider.adjacencyOffsets[ previousTriangle ];
+			const end = graph.collider.adjacencyOffsets[ previousTriangle + 1 ];
+			assert.ok( graph.collider.adjacencyTriangles.subarray( begin, end ).includes( triangle ) );
+
+		}
+		previousTriangle = triangle;
+
+	}
+
+} );
+
+test( 'CHAMELEON-SURFACE-007 disconnected mesh islands are excluded and global component ids are preserved', () => {
+
+	const graph = buildChameleonSurfaceGraph(
+		singleGeometryRegistry( disconnectedBoxesGeometry() ),
+		{ worldSize: 24, terrainSpacing: 3, maximumNodes: 512 },
+	);
+	const metadata = graph.supports[ 0 ];
+	assert.equal( graph.surfaceComponentCount, 2 );
+	assert.equal( metadata.reachableTriangleCount, 12 );
+	assert.equal( metadata.excludedTriangleCount, 12 );
+	assert.equal( graph.reachableSurfaceTriangleCount, 12 );
+	assert.equal( graph.excludedSurfaceTriangleCount, 12 );
+	for ( let node = 0; node < graph.count; node ++ ) {
+
+		if ( graph.kind[ node ] !== CHAMELEON_SURFACE_KIND.SUPPORT ) continue;
+		const triangle = graph.nodeTriangleId[ node ];
+		assert.ok( triangle >= 0 );
+		assert.equal( graph.componentId[ node ], metadata.componentId );
+		assert.equal( graph.collider.componentId[ triangle ], metadata.componentId );
+
+	}
+
+} );
+
+test( 'CHAMELEON-SURFACE-008 folded U routes expand through exact face-adjacent portals and reach the portal node', () => {
+
+	const graph = buildChameleonSurfaceGraph(
+		singleGeometryRegistry( foldedRibbonGeometry( 48 ) ),
+		{
+			worldSize: 24,
+			terrainSpacing: 3,
+			maximumNodes: 512,
+			surfacePatchRadius: 0.28,
+			surfacePatchMaxTriangles: 4,
+			supportClearance: 0.002,
+		},
+	);
+	const metadata = graph.supports[ 0 ];
+	assert.ok( metadata.patchCount > 8 );
+	assert.equal( metadata.reachableTriangleCount, 96 );
+	const corridor = planChameleonRoute( graph, metadata.destinationNode, metadata.nodeStart );
+	assertFrameContract( corridor );
+	const last = corridor.count - 1;
+	assert.equal( corridor.x[ last ], graph.x[ metadata.nodeStart ] );
+	assert.equal( corridor.y[ last ], graph.y[ metadata.nodeStart ] );
+	assert.equal( corridor.z[ last ], graph.z[ metadata.nodeStart ] );
+	const hit = createChameleonSurfaceHit();
+	let previousTriangle = - 1;
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		assert.equal( corridor.surfaceHit[ index ], 1 );
+		const triangle = corridor.triangleId[ index ];
+		assert.ok( triangle >= 0 );
+		graph.collider.projectPoint(
+			corridor.x[ index ], corridor.y[ index ], corridor.z[ index ],
+			hit,
+			{
+				supportId: graph.colliderSupportIds[ 0 ],
+				componentId: metadata.componentId,
+				includeGround: false,
+				clearance: graph.settings.supportClearance,
+				maxDistance: Infinity,
+				triangleId: triangle,
+			},
+		);
+		assert.equal( hit.hit, true );
+		assert.ok( Math.hypot(
+			hit.x - corridor.x[ index ],
+			hit.y - corridor.y[ index ],
+			hit.z - corridor.z[ index ],
+		) <= graph.settings.surfaceChordTolerance
+			+ graph.settings.supportClearance * 2
+			+ 1e-6 );
+		if ( previousTriangle >= 0 && triangle !== previousTriangle ) {
+
+			const begin = graph.collider.adjacencyOffsets[ previousTriangle ];
+			const end = graph.collider.adjacencyOffsets[ previousTriangle + 1 ];
+			assert.ok( graph.collider.adjacencyTriangles.subarray( begin, end ).includes( triangle ) );
+
+		}
+		previousTriangle = triangle;
+
+	}
+
+} );
+
+test( 'CHAMELEON-SURFACE-009 corridor compilation fails closed on missing support or changed component', () => {
+
+	const graph = buildChameleonSurfaceGraph(
+		singleGeometryRegistry( boxGeometry( 1, 1, 1 ) ),
+		{ worldSize: 24, terrainSpacing: 3, maximumNodes: 512 },
+	);
+	const metadata = graph.supports[ 0 ];
+	const target = metadata.portalTerrainNodes[ 0 ];
+	const exactSupportId = graph.colliderSupportIds[ 0 ];
+	graph.colliderSupportIds[ 0 ] = - 1;
+	assert.throws(
+		() => planChameleonRoute( graph, metadata.nodeStart, target ),
+		/missing support|lost its support\/component/,
+	);
+	graph.colliderSupportIds[ 0 ] = exactSupportId;
+	const componentId = graph.componentId[ metadata.nodeStart ];
+	graph.componentId[ metadata.nodeStart ] = componentId + 1000;
+	assert.throws(
+		() => planChameleonRoute( graph, metadata.nodeStart, target ),
+		/lost its support\/component|changed support\/component/,
+	);
+	graph.componentId[ metadata.nodeStart ] = componentId;
+
+	assert.throws(
+		() => planChameleonRoute( graph, metadata.nodeStart, metadata.nodeStart ),
+		/two distinct graph nodes/,
+	);
+} );
+
+test( 'CHAMELEON-SURFACE-010 a right-angle support-ground junction is explicit, local and fully resolved', () => {
+
+	const graph = buildChameleonSurfaceGraph(
+		singleGeometryRegistry( boxGeometry( 1.2, 1.4, 0.9 ) ),
+		{
+			worldSize: 24,
+			terrainSpacing: 3,
+			maximumNodes: 512,
+			supportClearance: 0.002,
+			surfaceMaxNormalAngle: Math.PI / 12,
+		},
+	);
+	const metadata = graph.supports[ 0 ];
+	const corridor = planChameleonRoute(
+		graph,
+		metadata.nodeStart,
+		metadata.portalTerrainNodes[ 0 ],
+	);
+	assertFrameContract( corridor );
+	let boundary = - 1;
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		assert.equal( corridor.surfaceHit[ index ], 1 );
+		if ( boundary < 0 && corridor.kind[ index ] !== CHAMELEON_SURFACE_KIND.SUPPORT ) boundary = index;
+
+	}
+	assert.ok( boundary > 0 );
+	assert.ok( Math.hypot(
+		corridor.x[ boundary ] - corridor.x[ boundary - 1 ],
+		corridor.y[ boundary ] - corridor.y[ boundary - 1 ],
+		corridor.z[ boundary ] - corridor.z[ boundary - 1 ],
+	) < 0.12 );
+	assert.ok( corridor.kind.includes( CHAMELEON_SURFACE_KIND.TERRAIN ) );
+
+} );
+
+test( 'CHAMELEON-SURFACE-011 mandatory geodesic corners fail closed and the stateful router truncates safely', () => {
+
+	const graph = buildChameleonSurfaceGraph(
+		singleGeometryRegistry( foldedRibbonGeometry( 72 ) ),
+		{
+			worldSize: 24,
+			terrainSpacing: 3,
+			maximumNodes: 512,
+			surfacePatchRadius: 0.2,
+			surfacePatchMaxTriangles: 4,
+			supportClearance: 0.002,
+		},
+	);
+	assert.ok( graph.count <= 512 );
+	assert.equal(
+		graph.surfaceBudget.terrainNodes
+			+ graph.surfaceBudget.actualPatchNodes
+			+ graph.surfaceBudget.actualPortalNodes
+			+ graph.surfaceBudget.actualTransitionNodes,
+		graph.count,
+	);
+	const metadata = graph.supports[ 0 ];
+	const start = metadata.destinationNode;
+	const requestedTarget = metadata.portalTerrainNodes[ 0 ];
+	assert.throws(
+		() => planChameleonRoute( graph, start, requestedTarget, { maxSamples: 32, spacing: 0.2 } ),
+		( error ) => error?.code === 'CHAMELEON_CORRIDOR_BUDGET',
+	);
+	const router = new ChameleonSurfaceRouter( graph, { maxSamples: 32, spacing: 0.2 } );
+	const corridor = router.routeTo( requestedTarget, start );
+	assert.equal( corridor.truncated, true );
+	assert.equal( corridor.requestedTargetNode, requestedTarget );
+	assert.notEqual( corridor.targetNode, requestedTarget );
+	assert.equal( corridor.targetNode, router.currentNode );
+	assert.equal( router.pendingTargetNode, requestedTarget );
+	assert.ok( corridor.count <= 32 );
+	assert.ok( corridor.mandatoryPointCount <= 32 );
+	for ( let index = 0; index < corridor.count; index ++ ) assert.equal( corridor.surfaceHit[ index ], 1 );
+
+} );
+
+test( 'CHAMELEON-SURFACE-012 shipped Tree_07 bakes an exact local portal independently of yaw', async () => {
+
+	const geometry = await loadShippedRuntimeGeometry( 'Tree_07', 'height' );
+	const placement = {
+		x: 70.67453704319684,
+		z: 18.178261201827866,
+		yaw: 0.6751668750446875,
+		scale: 19.377381544793025,
+	};
+	const graph = buildChameleonSurfaceGraph( [ {
+		model: 'Tree_07',
+		category: 'trees',
+		placements: [ placement ],
+		mesh: { geometry },
+	} ], {
+		worldSize: 160,
+		groundClearance: 0.42,
+		supportClearance: 0.006,
+		maximumNodes: 512,
+	} );
+
+	assert.equal( graph.supportCount, 1 );
+	const metadata = graph.supports[ 0 ];
+	const exactSupportId = graph.colliderSupportIds[ 0 ];
+	assert.ok( exactSupportId >= 0 );
+	assert.ok( metadata.componentId >= 0 );
+	assert.equal( metadata.colliderSupportId, exactSupportId );
+	assert.equal(
+		graph.collider.componentId[ graph.nodeTriangleId[ metadata.destinationNode ] ],
+		metadata.componentId,
+	);
+
+	const corridor = planChameleonRoute(
+		graph,
+		metadata.destinationNode,
+		metadata.portalTerrainNodes[ 0 ],
+	);
+	assertFrameContract( corridor );
+	let boundary = - 1;
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		assert.equal( corridor.surfaceHit[ index ], 1 );
+		if ( corridor.kind[ index ] === CHAMELEON_SURFACE_KIND.SUPPORT ) {
+
+			const triangle = corridor.triangleId[ index ];
+			assert.ok( triangle >= 0 );
+			assert.equal( graph.collider.supportId[ triangle ], exactSupportId );
+			assert.equal( graph.collider.componentId[ triangle ], metadata.componentId );
+
+		} else if ( boundary < 0 ) boundary = index;
+
+	}
+	assert.ok( boundary > 0 );
+	assert.equal( corridor.kind[ boundary ], CHAMELEON_SURFACE_KIND.TRANSITION );
+	assert.ok( Math.hypot(
+		corridor.x[ boundary ] - corridor.x[ boundary - 1 ],
+		corridor.y[ boundary ] - corridor.y[ boundary - 1 ],
+		corridor.z[ boundary ] - corridor.z[ boundary - 1 ],
+	) <= 0.121 );
+	assert.ok( corridor.kind.includes( CHAMELEON_SURFACE_KIND.TERRAIN ) );
+	assert.ok( graph.surfaceValidation.validatedTransitionSegments > 0 );
 
 } );

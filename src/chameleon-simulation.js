@@ -459,6 +459,21 @@ export class ChameleonSimulation {
 
 	}
 
+	setTrackPosition( distance, headingSign = this.patrolDirection ) {
+
+		assertFiniteNumber( 'track position', distance );
+		assertFiniteNumber( 'track heading sign', headingSign );
+		this.trackPosition = clamp( distance, 0, this.trackLength );
+		this._sampleTrack( this.trackPosition, headingSign );
+		if ( this.trackPosition > EPSILON
+			&& this.trackPosition < this.trackLength - EPSILON ) this.routeCompleted = 0;
+		this._telemetry.lastStepDistance = 0;
+		if ( ! this.tongueVisible ) this._resetTongueAtMouth();
+		this._syncPublicState();
+		return this._view;
+
+	}
+
 	getView() {
 
 		return this._view;

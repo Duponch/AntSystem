@@ -89,7 +89,7 @@ test( 'CHAMELEON-SIM-032 runtime uses reactive local surface exploration and exp
 	assert.match( source, /from\s*['"]\.\/chameleon-surface-graph\.js['"]/u );
 	assert.doesNotMatch( source, /chameleon-support-network|buildChameleonSupportNetwork/u );
 	assert.match( source, /holdAtTrackEnd:\s*true/u );
-	assert.match( source, /surfaceRouter\.exploreNext\(\s*roamingRadius\s*\)/u );
+	assert.match( source, /(?:nextSurfaceRouter|proposalRouter)\.exploreNext\(\s*roamingRadius\s*\)/u );
 	assert.match( source, /simulation\.routeCompleted/u );
 	assert.match( source, /preserveHeading[\s\S]*?simulation\.setHeading/u );
 	assert.match( source, /bodyRoot\.quaternion\.slerp\(\s*targetBodyQuaternion/u );

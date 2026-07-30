@@ -21,10 +21,17 @@ réactive donne un déplacement varié tout en gardant un coût prévisible.
 Le décor est transformé à l’avance en un graphe global de surfaces :
 
 - le terrain praticable contourne les empreintes des obstacles ;
-- les troncs et branches suivent leur relief supérieur ;
-- les rochers et souches disposent de passages sur leur contour ;
-- les arbres verticaux peuvent être montés ou descendus ;
-- des transitions courbes relient chaque objet à une zone de terrain libre.
+- les triangles réels de toutes les instances appartenant aux 15 classes de
+  modèles marchables servent de support ;
+- seule la partie réellement reliée au point d'accès de chaque support est
+  retenue : un îlot de triangles déconnecté ne devient jamais un raccourci ;
+- chaque surface accessible est découpée en petits patches déterministes, puis
+  reliée uniquement par ses vrais bords partagés ;
+- translation, orientation horizontale et taille scalaire propres à chaque
+  tronc, branche, rocher, souche ou arbre sont conservées ;
+- un portail physique, choisi au contact bas et périphérique du support, relie
+  séparément celui-ci au terrain ;
+- les courts corridors suivent ces triangles et portails avant d’être utilisés.
 
 Le premier tronc hôte détermine seulement le point de départ et le centre du
 **Rayon d’exploration**. La valeur par défaut couvre les coins de la carte. Ce
@@ -42,16 +49,59 @@ machine de chasse et ses autres réglages restent distincts.
 
 ## Comment il épouse le décor
 
-Seul le court corridor en cours est lu pendant le jeu. Sa position, sa tangente
-et sa normale sont interpolées à chaque pas. Sa fin est exactement le début du
-corridor suivant : descendre d’un tronc, traverser le sol, gravir un rocher ou
-monter dans un arbre ne doit donc jamais produire de téléportation.
+Seul le court corridor en cours est lu pendant le jeu. Il a déjà été projeté
+sur les triangles exacts du décor. Sa fin est exactement le début du corridor
+suivant : descendre d’un tronc, traverser le sol, gravir un rocher ou monter
+dans un arbre ne doit donc jamais produire de téléportation. Le trajet longe les
+bords réellement partagés entre triangles ; il ne coupe pas à travers un tronc,
+un rocher ou un pli du maillage.
 
-Le corps combine un point avant et un point arrière pour anticiper une pente ou
-un changement de courbure. Quatre contacts approximatifs, deux à l’avant et
-deux à l’arrière, stabilisent la pose. Il ne s’agit pas d’un IK complet pour
-chaque patte ; ce compromis conserve une adhérence visuelle cohérente sans
-raycast ni solveur coûteux à chaque image.
+Si un trajet développé dépasse la limite de 384 points, aucun angle ou portail
+obligatoire n'est supprimé. Le caméléon s'arrête au dernier nœud de graphe dont
+le corridor complet tient dans le budget, puis poursuit lors de la décision
+suivante. Une géométrie invalide est rejetée au lieu de produire un saut. Si une
+édition du décor rend tout le nouveau graphe invalide, le jeu conserve l’ancien
+graphe et l’ancienne route ; il ne retente le bake qu’après un nouveau changement,
+sans bloquer la simulation entre-temps.
+
+Les quatre pattes possèdent chacune un vrai point d’appui sur la surface,
+recalculé à fréquence fixe — 60 Hz par défaut. Pendant l’appui, le pied reste
+fixé dans le monde au lieu de glisser avec le corps. Le caméléon avance par
+diagonales alternées ; la patte levée suit une courbe douce avant de se reposer
+sur son prochain contact.
+
+Le contact correspond bien à la **semelle visible**, pas au pivot de l’os. Au
+chargement, le jeu mesure une fois l’épaisseur de chaque pied depuis les
+sommets réellement attachés à son os dans le GLB. L’IK place ensuite cette
+semelle sur la surface, même si les quatre pieds du modèle n’ont pas la même
+épaisseur.
+
+Le centre du caméléon reste sur son corridor exact. Son inclinaison vient de
+deux supports pris devant et derrière le corps ; le plan moyen des quatre pieds
+sert uniquement à la marche et n’ajoute pas une seconde hauteur.
+
+Après l’animation de marche, un IK analytique ajuste les deux os de chaque
+patte et oriente le pied selon la normale locale pour la pose affichée. Son
+influence diminue pendant une attaque afin que la pose expressive de la langue
+et du corps reste intacte. Les projections restent cadencées séparément du
+rendu et n’utilisent aucun raycast. Le découpage en patches, la recherche des
+portails et la validation des corridors sont effectués lors du bake : ils
+n'ajoutent pas de parcours de maillage à chaque image.
+
+Le corps et la queue possèdent aussi des points de contrôle qui empêchent leur
+pénétration dans le support. Entre deux lectures de géométrie, les plans déjà en
+cache sont résolus à nouveau contre la pose animée, sans requête supplémentaire.
+Si le corps doit être décalé à ce stade, les quatre pattes sont aussitôt recalées
+sur leurs appuis : leurs semelles ne glissent pas et ne traversent pas le support.
+La queue répartit une correction sur plusieurs articulations sans déplacer ses
+contacts précédents. Si cela ne suffit pas, sa dernière pose locale sûre est
+Si une pose animée dépasse exceptionnellement les contraintes, seule l’image du
+caméléon revient à sa dernière pose visuelle sûre ; sa position logique, son trajet
+et son cycle de vie ne sont jamais rembobinés. Tant qu’aucune pose sûre n’existe
+après un chargement, le modèle est brièvement masqué plutôt que montré dans le sol.
+Le corridor et sa continuité sont validés puis publiés dans le même pas de
+simulation : le rendu ne bloque donc jamais son temps logique, même sous terre ou
+à vitesse élevée, et ne peut pas changer ses décisions écologiques.
 
 ## Ce qu’il fait quand il semble immobile
 
@@ -113,8 +163,9 @@ supprimer le papillon.
 
 Cliquez sur le caméléon ou sur un papillon pour ouvrir sa fiche. La sélection
 du caméléon montre son intention, sa classe de surface, son support, son
-corridor local, sa progression, sa cible et son état de camouflage. La
-sélection d’un papillon montre son activité, la menace perçue et les paramètres
+corridor local, sa progression, sa cible, son camouflage et ses contacts
+physiques. La sélection d’un papillon montre son activité et la menace perçue
+ainsi que les paramètres
 de sa vision.
 
 - **Zone attaque (sélection)** affiche la portée depuis la bouche du seul
@@ -136,6 +187,12 @@ Ouvrez **Graphismes → 🦎 Caméléon** :
 - **Vitesse animation marche** accélère ou ralentit seulement le cycle visuel
   des pas. Elle ne modifie ni la vitesse monde ni le timing de l’attaque ;
 - **Réactivité orientation** règle la vitesse de rotation du corps ;
+- **Collisions exactes** active les contacts issus des triangles réels ;
+- **Pattes procédurales** active l’ajustement des quatre chaînes de pattes ;
+- **Solveur de contact (Hz)** cadence la projection des pieds et le pas fixe de
+  la marche ; l’IK visuel reste appliqué à chaque image ;
+- **Hauteur des pas** règle la levée des pattes pendant leur transfert ;
+- **Influence IK** dose la correction physique appliquée après l’animation ;
 - **Explorer la carte** active ou suspend l’exploration spontanée ;
 - **Rayon d’exploration** borne les choix locaux autour de l’hôte ;
 - **Camouflage automatique** active ou coupe les pauses perceptives ;
@@ -163,11 +220,24 @@ fréquence **Analyse menace (Hz)**.
 
 ## Pourquoi le mouvement reste léger
 
-Le graphe global immuable est plafonné à **8 192 nœuds** et n’est rebâti
-qu’après une révision du décor ou d’un réglage géométrique. Le caméléon ne lit
-qu’un corridor actif d’au plus **384 échantillons** et ne compare que ses
-voisins lorsqu’il doit continuer. Il n’y a ni géométrie, ni raycast, ni A* dans
-la boucle normale de locomotion.
+Les triangles, leurs voisinages et leur BVH sont préparés une seule fois pour
+toutes les instances des 15 classes marchables. Le graphe global immuable est
+plafonné à **8 192 nœuds** et n’est rebâti qu’après une révision du décor ou
+d’un réglage géométrique. Le caméléon ne lit qu’un corridor actif d’au plus
+**384 échantillons** et ne compare que ses voisins lorsqu’il doit continuer.
+
+Chaque projection teste d’abord le triangle précédent et son anneau voisin,
+puis laisse le BVH exact vérifier le meilleur contact global. Ce raccourci
+réduit le parcours sans changer le résultat. Les quatre pieds réutilisent des
+buffers fixes à la cadence configurée. La marche diagonale et l’IK à deux os
+sont analytiques : aucun moteur physique généraliste, aucune allocation chaude
+et aucun raycast par image ne sont ajoutés.
+
+La pose du corps, les corrections de queue et le remplacement d’un corridor
+réutilisent eux aussi des buffers fixes. Le graphe, le collider, le routeur et
+le corridor précédents restent disponibles jusqu’à validation exacte du nouveau
+corridor dans le pas logique. Les corrections du squelette restent purement
+visuelles et ne peuvent ni arrêter ni rembobiner cette progression.
 
 La perception reste bornée à 64 papillons, la langue suit une trajectoire
 analytique et un seul squelette glTF est animé. Le coût ne dépend jamais du

@@ -11,6 +11,14 @@ import {
 	buildChameleonTrack,
 	selectChameleonHost,
 } from './chameleon-track.js';
+import {
+	buildChameleonSurfaceCollider,
+	createChameleonSurfaceHit,
+} from './chameleon-surface-collider.js';
+import {
+	buildChameleonSurfacePatches,
+	floodChameleonSurfaceComponent,
+} from './chameleon-surface-patches.js';
 
 export const CHAMELEON_SURFACE_KIND = Object.freeze( {
 	TERRAIN: 0,
@@ -316,14 +324,29 @@ function makeGraphBuilder( maximumNodes ) {
 		nz: [],
 		kind: [],
 		supportId: [],
+		componentId: [],
+		triangleId: [],
 		edgesA: [],
 		edgesB: [],
-		edgeKeys: new Set(),
+		edgeWeight: [],
+		edgePathAB: [],
+		edgePathBA: [],
+		surfacePathDescriptors: [],
+		surfacePatches: [],
+		edgeKeys: new Map(),
 	};
 
 }
 
-function appendNode( builder, x, y, z, nx, ny, nz, kind, supportId ) {
+function appendNode(
+	builder,
+	x, y, z,
+	nx, ny, nz,
+	kind,
+	supportId,
+	componentId = - 1,
+	triangleId = - 1,
+) {
 
 	if ( builder.x.length >= builder.maximumNodes ) {
 
@@ -340,20 +363,53 @@ function appendNode( builder, x, y, z, nx, ny, nz, kind, supportId ) {
 	builder.nz.push( nz / normalLength );
 	builder.kind.push( kind );
 	builder.supportId.push( supportId );
+	builder.componentId.push( componentId );
+	builder.triangleId.push( triangleId );
 	return index;
 
 }
 
-function addUndirectedEdge( builder, a, b ) {
+function addUndirectedEdge( builder, a, b, {
+	weight = NaN,
+	forwardPath = - 1,
+	reversePath = - 1,
+} = {} ) {
 
 	if ( a === b || a < 0 || b < 0 ) return;
 	const low = Math.min( a, b );
 	const high = Math.max( a, b );
 	const key = `${ low }:${ high }`;
-	if ( builder.edgeKeys.has( key ) ) return;
-	builder.edgeKeys.add( key );
+	const existing = builder.edgeKeys.get( key );
+	if ( existing !== undefined ) {
+
+		if ( forwardPath >= 0 || reversePath >= 0 ) {
+
+			const lowToHigh = a === low ? forwardPath : reversePath;
+			const highToLow = a === low ? reversePath : forwardPath;
+			if ( lowToHigh >= 0 ) builder.edgePathAB[ existing ] = lowToHigh;
+			if ( highToLow >= 0 ) builder.edgePathBA[ existing ] = highToLow;
+
+		}
+		if ( Number.isFinite( weight ) ) builder.edgeWeight[ existing ] = weight;
+		return;
+
+	}
+	const edge = builder.edgesA.length;
+	builder.edgeKeys.set( key, edge );
 	builder.edgesA.push( low );
 	builder.edgesB.push( high );
+	builder.edgeWeight.push( Number.isFinite( weight ) ? weight : NaN );
+	if ( a === low ) {
+
+		builder.edgePathAB.push( forwardPath );
+		builder.edgePathBA.push( reversePath );
+
+	} else {
+
+		builder.edgePathAB.push( reversePath );
+		builder.edgePathBA.push( forwardPath );
+
+	}
 
 }
 
@@ -364,26 +420,6 @@ function nodeDistance( builder, a, b ) {
 		builder.y[ b ] - builder.y[ a ],
 		builder.z[ b ] - builder.z[ a ],
 	);
-
-}
-
-function appendPolyline( builder, points, kind, supportId ) {
-
-	const nodes = new Int32Array( points.length );
-	for ( let index = 0; index < points.length; index ++ ) {
-
-		const point = points[ index ];
-		nodes[ index ] = appendNode(
-			builder,
-			point.x, point.y, point.z,
-			point.nx, point.ny, point.nz,
-			kind,
-			supportId,
-		);
-		if ( index > 0 ) addUndirectedEdge( builder, nodes[ index - 1 ], nodes[ index ] );
-
-	}
-	return nodes;
 
 }
 
@@ -471,16 +507,6 @@ function endpointDirection( points, end ) {
 
 }
 
-function cubic( p0, p1, p2, p3, t ) {
-
-	const u = 1 - t;
-	return u * u * u * p0
-		+ 3 * u * u * t * p1
-		+ 3 * u * t * t * p2
-		+ t * t * t * p3;
-
-}
-
 function makeGroundAnchor(
 	surface,
 	direction,
@@ -507,7 +533,7 @@ function makeGroundAnchor(
 
 }
 
-function appendTransition(
+function appendPhysicalTransition(
 	builder,
 	surfaceNode,
 	surface,
@@ -515,35 +541,58 @@ function appendTransition(
 	anchor,
 	supportId,
 	sampleCount,
+	validation,
+	clearance,
+	groundY,
 ) {
 
+	const epsilon = Math.max( 2e-4, clearance * 2 );
+	const groundX = ( surface.surfaceX ?? surface.x ) + direction.x * epsilon;
+	const groundZ = ( surface.surfaceZ ?? surface.z ) + direction.z * epsilon;
+	const gap = Math.hypot(
+		surface.x - groundX,
+		surface.y - groundY,
+		surface.z - groundZ,
+	);
+	const maximumGap = Math.max( 0.12, clearance * 4 + validation.tolerance * 4 );
+	if ( gap > maximumGap ) throw new RangeError(
+		`physical support-ground portal gap ${ gap.toFixed( 4 ) } exceeds ${ maximumGap.toFixed( 4 ) }`,
+	);
+	const run = Math.hypot( anchor.x - groundX, anchor.z - groundZ );
+	const requested = clamp( Math.round( sampleCount ), 3, 18 );
+	const required = Math.ceil( run / validation.maxSegmentLength ) + 1;
+	const count = clamp( Math.max( requested, required ), 3, 18 );
 	let previous = surfaceNode;
-	const count = clamp( Math.round( sampleCount ), 5, 18 );
-	const handle = Math.max( 0.12, anchor.run * 0.38 );
-	const p1x = surface.x + direction.x * handle;
-	const p1z = surface.z + direction.z * handle;
-	const p2x = anchor.x - direction.x * handle;
-	const p2z = anchor.z - direction.z * handle;
-	for ( let ordinal = 1; ordinal < count; ordinal ++ ) {
+	let previousX = surface.x;
+	let previousY = surface.y;
+	let previousZ = surface.z;
+	for ( let ordinal = 0; ordinal < count; ordinal ++ ) {
 
 		const alpha = ordinal / ( count - 1 );
-		const x = cubic( surface.x, p1x, p2x, anchor.x, alpha );
-		const y = cubic( surface.y, surface.y, anchor.y, anchor.y, alpha );
-		const z = cubic( surface.z, p1z, p2z, anchor.z, alpha );
-		let nx = surface.nx * ( 1 - alpha );
-		let ny = surface.ny * ( 1 - alpha ) + alpha;
-		let nz = surface.nz * ( 1 - alpha );
-		const length = Math.hypot( nx, ny, nz ) || 1;
-		nx /= length;
-		ny /= length;
-		nz /= length;
+		const x = groundX + ( anchor.x - groundX ) * alpha;
+		const z = groundZ + ( anchor.z - groundZ ) * alpha;
 		const node = appendNode(
-			builder, x, y, z, nx, ny, nz,
+			builder,
+			x, groundY, z,
+			0, 1, 0,
 			CHAMELEON_SURFACE_KIND.TRANSITION,
 			supportId,
+			- 1,
+			- 1,
 		);
 		addUndirectedEdge( builder, previous, node );
+		const segmentLength = Math.hypot(
+			x - previousX,
+			groundY - previousY,
+			z - previousZ,
+		);
+		validation.validatedSegmentCount ++;
+		validation.validatedTransitionSegments ++;
+		validation.maxLeafLength = Math.max( validation.maxLeafLength, segmentLength );
 		previous = node;
+		previousX = x;
+		previousY = groundY;
+		previousZ = z;
 
 	}
 	return previous;
@@ -673,26 +722,472 @@ function compileCsr( builder ) {
 	const cursor = offsets.slice( 0, count );
 	const edgeTo = new Uint32Array( offsets[ count ] );
 	const edgeWeight = new Float32Array( offsets[ count ] );
+	const edgeSurfacePath = new Int32Array( offsets[ count ] );
+	edgeSurfacePath.fill( - 1 );
 	for ( let edge = 0; edge < builder.edgesA.length; edge ++ ) {
 
 		const a = builder.edgesA[ edge ];
 		const b = builder.edgesB[ edge ];
-		const weight = nodeDistance( builder, a, b );
+		const weight = Number.isFinite( builder.edgeWeight[ edge ] )
+			? builder.edgeWeight[ edge ] : nodeDistance( builder, a, b );
 		let index = cursor[ a ] ++;
 		edgeTo[ index ] = b;
 		edgeWeight[ index ] = weight;
+		edgeSurfacePath[ index ] = builder.edgePathAB[ edge ];
 		index = cursor[ b ] ++;
 		edgeTo[ index ] = a;
 		edgeWeight[ index ] = weight;
+		edgeSurfacePath[ index ] = builder.edgePathBA[ edge ];
 
 	}
-	return { offsets, edgeTo, edgeWeight };
+	return { offsets, edgeTo, edgeWeight, edgeSurfacePath };
 
 }
 
 function hostMatchesSupport( host, support ) {
 
 	return host?.entry === support.entry && host?.index === support.placementIndex;
+
+}
+
+function supportGuidePoints( support, {
+	objectSamples,
+	scales,
+	supportClearance,
+	treeClimbFraction,
+	treeTurns,
+} ) {
+
+	if ( support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE ) return buildTreeHelix(
+		support,
+		{ objectSamples, supportClearance, treeClimbFraction, treeTurns },
+	);
+	const track = buildChameleonTrack( {
+		entry: support.entry,
+		index: support.placementIndex,
+		placement: support.placement,
+	}, {
+		sampleCount: objectSamples,
+		scales,
+		clearance: supportClearance,
+		endMargin: support.surfaceClass === CHAMELEON_SURFACE_CLASS.ROCK ? 0.035 : 0.07,
+	} );
+	return trackPoints( track );
+
+}
+
+function projectSupportSeed(
+	collider,
+	support,
+	colliderSupportId,
+	guidePoints,
+	clearance,
+) {
+
+	if ( colliderSupportId < 0 || guidePoints.length < 1 ) {
+
+		throw new Error( `walkable support ${ support.model } has no exact collider` );
+
+	}
+	const guess = guidePoints[ 0 ];
+	const hit = createChameleonSurfaceHit();
+	collider.projectPoint( guess.x, guess.y, guess.z, hit, {
+		supportId: colliderSupportId,
+		includeGround: false,
+		groundOnly: false,
+		clearance,
+		maxDistance: Infinity,
+	} );
+	if ( ! hit.hit || hit.triangleId < 0 ) {
+
+		throw new Error( `walkable support ${ support.model } has no physical ground portal` );
+
+	}
+	let direction;
+	if ( support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE ) {
+
+		let x = hit.nx;
+		let z = hit.nz;
+		const length = Math.hypot( x, z ) || 1;
+		x /= length;
+		z /= length;
+		direction = { x, z };
+
+	} else {
+
+		direction = endpointDirection( guidePoints, 0 );
+
+	}
+	return Object.freeze( {
+		x: hit.x,
+		y: hit.y,
+		z: hit.z,
+		nx: hit.nx,
+		ny: hit.ny,
+		nz: hit.nz,
+		triangleId: hit.triangleId,
+		componentId: hit.componentId,
+		direction,
+	} );
+
+}
+
+function portalPeripheralRatio( support, x, z ) {
+
+	if ( support.footprint.type === 'circle' ) return Math.hypot(
+		x - support.footprint.x,
+		z - support.footprint.z,
+	) / Math.max( EPSILON, support.footprint.radius );
+	const local = rotateWorldToLocal(
+		x - support.footprint.x,
+		z - support.footprint.z,
+		support.footprint.yaw,
+	);
+	return Math.max(
+		Math.abs( local.x ) / Math.max( EPSILON, support.footprint.halfX ),
+		Math.abs( local.z ) / Math.max( EPSILON, support.footprint.halfZ ),
+	);
+
+}
+
+function portalVertexNormal( collider, triangle, vertex ) {
+
+	let nx = vertex === 0 ? collider.normalAX[ triangle ]
+		: vertex === 1 ? collider.normalBX[ triangle ] : collider.normalCX[ triangle ];
+	let ny = vertex === 0 ? collider.normalAY[ triangle ]
+		: vertex === 1 ? collider.normalBY[ triangle ] : collider.normalCY[ triangle ];
+	let nz = vertex === 0 ? collider.normalAZ[ triangle ]
+		: vertex === 1 ? collider.normalBZ[ triangle ] : collider.normalCZ[ triangle ];
+	const length = Math.hypot( nx, ny, nz ) || 1;
+	nx /= length;
+	ny /= length;
+	nz /= length;
+	return { nx, ny, nz };
+
+}
+
+/**
+ * Finds an actual mesh/ground contact on the portal component. The initial
+ * guide seed can be on the back or canopy; it is deliberately not reused as a
+ * ground handoff. Edge/ground intersections win, then the lowest peripheral
+ * vertex whose normal does not point through the underside.
+ */
+function projectSupportPortal(
+	collider,
+	support,
+	colliderSupportId,
+	component,
+	guidePoints,
+	clearance,
+	groundY,
+) {
+
+	let best = null;
+	let bestScore = Infinity;
+
+	function consider( triangle, x, y, z, normal, exactGroundIntersection ) {
+
+		let { nx, ny, nz } = normal;
+		const radialX = x - support.x;
+		const radialZ = z - support.z;
+		const radialLength = Math.hypot( radialX, radialZ );
+		const outwardAlignment = radialLength > EPSILON
+			? ( nx * radialX + nz * radialZ ) / radialLength
+			: 0;
+		const peripheral = portalPeripheralRatio( support, x, z );
+		const verticalError = Math.abs( y - groundY );
+		const undersidePenalty = Math.max( 0, - ny - 0.15 );
+		const intersectionBonus = exactGroundIntersection ? - 0.5 : 0;
+		const score = verticalError * 1000
+			+ undersidePenalty * 80
+			+ Math.max( 0, 1 - peripheral ) * 3
+			- outwardAlignment * 0.35
+			+ intersectionBonus
+			+ triangle * 1e-10;
+		if ( score >= bestScore ) return;
+		bestScore = score;
+		best = { x, y, z, nx, ny, nz, triangleId: triangle };
+
+	}
+
+	for ( const triangle of component.reachableTriangles ) {
+
+		const vertices = [
+			colliderVertex( collider, triangle, 0 ),
+			colliderVertex( collider, triangle, 1 ),
+			colliderVertex( collider, triangle, 2 ),
+		];
+		const normals = [
+			portalVertexNormal( collider, triangle, 0 ),
+			portalVertexNormal( collider, triangle, 1 ),
+			portalVertexNormal( collider, triangle, 2 ),
+		];
+		for ( let vertex = 0; vertex < 3; vertex ++ ) consider(
+			triangle,
+			vertices[ vertex ].x,
+			vertices[ vertex ].y,
+			vertices[ vertex ].z,
+			normals[ vertex ],
+			Math.abs( vertices[ vertex ].y - groundY ) <= EPSILON,
+		);
+		for ( let edge = 0; edge < 3; edge ++ ) {
+
+			const a = vertices[ edge ];
+			const b = vertices[ ( edge + 1 ) % 3 ];
+			const ay = a.y - groundY;
+			const by = b.y - groundY;
+			if ( ay * by > 0 || Math.abs( b.y - a.y ) <= EPSILON ) continue;
+			const alpha = clamp( ( groundY - a.y ) / ( b.y - a.y ), 0, 1 );
+			const na = normals[ edge ];
+			const nb = normals[ ( edge + 1 ) % 3 ];
+			let nx = na.nx + ( nb.nx - na.nx ) * alpha;
+			let ny = na.ny + ( nb.ny - na.ny ) * alpha;
+			let nz = na.nz + ( nb.nz - na.nz ) * alpha;
+			const normalLength = Math.hypot( nx, ny, nz ) || 1;
+			nx /= normalLength; ny /= normalLength; nz /= normalLength;
+			consider(
+				triangle,
+				a.x + ( b.x - a.x ) * alpha,
+				groundY,
+				a.z + ( b.z - a.z ) * alpha,
+				{ nx, ny, nz },
+				true,
+			);
+
+		}
+
+	}
+	if ( ! best ) throw new Error( `walkable support ${ support.model } has no reachable physical portal` );
+	let directionX = best.x - support.x;
+	let directionZ = best.z - support.z;
+	let directionLength = Math.hypot( directionX, directionZ );
+	if ( directionLength <= EPSILON ) {
+
+		directionX = best.nx;
+		directionZ = best.nz;
+		directionLength = Math.hypot( directionX, directionZ );
+
+	}
+	if ( directionLength <= EPSILON ) {
+
+		const fallback = endpointDirection( guidePoints, 0 );
+		directionX = fallback.x;
+		directionZ = fallback.z;
+		directionLength = 1;
+
+	}
+	return Object.freeze( {
+		x: best.x + best.nx * clearance,
+		y: best.y + best.ny * clearance,
+		z: best.z + best.nz * clearance,
+		surfaceX: best.x,
+		surfaceY: best.y,
+		surfaceZ: best.z,
+		nx: best.nx,
+		ny: best.ny,
+		nz: best.nz,
+		triangleId: best.triangleId,
+		componentId: collider.componentId[ best.triangleId ],
+		direction: { x: directionX / directionLength, z: directionZ / directionLength },
+		groundGap: Math.abs( best.y - groundY ),
+	} );
+
+}
+
+function allocatePatchBudgets( components, capacity, maxTrianglesPerPatch ) {
+
+	const budgets = new Uint32Array( components.length );
+	const maximums = new Uint32Array( components.length );
+	const fractions = new Float64Array( components.length );
+	let minimumTotal = 0;
+	let weightTotal = 0;
+	for ( let index = 0; index < components.length; index ++ ) {
+
+		const count = components[ index ].reachableTriangleCount;
+		const minimum = Math.ceil( count / maxTrianglesPerPatch );
+		const maximum = count > 1 ? Math.ceil( count / 2 ) : 1;
+		budgets[ index ] = minimum;
+		maximums[ index ] = Math.max( minimum, maximum );
+		minimumTotal += minimum;
+		weightTotal += count;
+
+	}
+	if ( minimumTotal > capacity ) throw new RangeError(
+		`surface-wide patch minimum ${ minimumTotal } exceeds the global support budget ${ capacity }; `
+		+ 'increase maximumNodes or maxTrianglesPerPatch',
+	);
+	let remaining = capacity - minimumTotal;
+	for ( let index = 0; index < components.length; index ++ ) {
+
+		const room = maximums[ index ] - budgets[ index ];
+		const ideal = weightTotal > 0
+			? remaining * components[ index ].reachableTriangleCount / weightTotal
+			: 0;
+		const extra = Math.min( room, Math.floor( ideal ) );
+		budgets[ index ] += extra;
+		fractions[ index ] = ideal - Math.floor( ideal );
+
+	}
+	let assigned = 0;
+	for ( let index = 0; index < components.length; index ++ ) {
+
+		assigned += budgets[ index ] - Math.ceil(
+			components[ index ].reachableTriangleCount / maxTrianglesPerPatch,
+		);
+
+	}
+	remaining -= assigned;
+	const order = Array.from( { length: components.length }, ( _, index ) => index );
+	order.sort( ( a, b ) => fractions[ b ] - fractions[ a ] || a - b );
+	while ( remaining > 0 ) {
+
+		let progressed = false;
+		for ( const index of order ) {
+
+			if ( remaining <= 0 ) break;
+			if ( budgets[ index ] >= maximums[ index ] ) continue;
+			budgets[ index ] ++;
+			remaining --;
+			progressed = true;
+
+		}
+		if ( ! progressed ) break;
+
+	}
+	return Object.freeze( { budgets, minimumTotal, capacity } );
+
+}
+
+function reversePatchEdge( patches, fromPatch, toPatch ) {
+
+	for ( let edge = patches.offsets[ fromPatch ]; edge < patches.offsets[ fromPatch + 1 ]; edge ++ ) {
+
+		if ( patches.edgeTo[ edge ] === toPatch ) return edge;
+
+	}
+	return - 1;
+
+}
+
+function appendSurfacePatchSet(
+	builder,
+	patches,
+	supportId,
+	colliderSupportId,
+	componentId,
+	clearance,
+) {
+
+	const patchSetIndex = builder.surfacePatches.length;
+	const graphNodes = new Uint32Array( patches.patchCount );
+	for ( let patch = 0; patch < patches.patchCount; patch ++ ) {
+
+		graphNodes[ patch ] = appendNode(
+			builder,
+			patches.x[ patch ] + patches.normalX[ patch ] * clearance,
+			patches.y[ patch ] + patches.normalY[ patch ] * clearance,
+			patches.z[ patch ] + patches.normalZ[ patch ] * clearance,
+			patches.normalX[ patch ],
+			patches.normalY[ patch ],
+			patches.normalZ[ patch ],
+			CHAMELEON_SURFACE_KIND.SUPPORT,
+			supportId,
+			componentId,
+			patches.patchSeedTriangles[ patch ],
+		);
+
+	}
+	const patchSet = Object.freeze( {
+		index: patchSetIndex,
+		supportId,
+		colliderSupportId,
+		componentId,
+		graphNodes,
+		patches,
+	} );
+	builder.surfacePatches.push( patchSet );
+
+	for ( let patch = 0; patch < patches.patchCount; patch ++ ) {
+
+		for ( let edge = patches.offsets[ patch ]; edge < patches.offsets[ patch + 1 ]; edge ++ ) {
+
+			const next = patches.edgeTo[ edge ];
+			if ( next <= patch ) continue;
+			const reverse = reversePatchEdge( patches, next, patch );
+			if ( reverse < 0 ) throw new Error( `surface patch edge ${ patch }-${ next } is not symmetric` );
+			const forwardPath = builder.surfacePathDescriptors.length;
+			builder.surfacePathDescriptors.push( Object.freeze( {
+				patchSet: patchSetIndex,
+				edge,
+			} ) );
+			const reversePath = builder.surfacePathDescriptors.length;
+			builder.surfacePathDescriptors.push( Object.freeze( {
+				patchSet: patchSetIndex,
+				edge: reverse,
+			} ) );
+			addUndirectedEdge( builder, graphNodes[ patch ], graphNodes[ next ], {
+				weight: Math.max( patches.edgeWeight[ edge ], patches.edgeWeight[ reverse ] ),
+				forwardPath,
+				reversePath,
+			} );
+
+		}
+
+	}
+	return patchSet;
+
+}
+
+
+function appendSurfacePortalNode(
+	builder,
+	patchSet,
+	portal,
+	supportId,
+	componentId,
+) {
+
+	const node = appendNode(
+		builder,
+		portal.x, portal.y, portal.z,
+		portal.nx, portal.ny, portal.nz,
+		CHAMELEON_SURFACE_KIND.SUPPORT,
+		supportId,
+		componentId,
+		portal.triangleId,
+	);
+	const descriptor = builder.surfacePathDescriptors.length;
+	builder.surfacePathDescriptors.push( Object.freeze( {
+		type: 'triangle-local',
+		patchSet: patchSet.index,
+		triangleId: portal.triangleId,
+	} ) );
+	const patchNode = patchSet.graphNodes[ 0 ];
+	addUndirectedEdge( builder, patchNode, node, {
+		weight: nodeDistance( builder, patchNode, node ),
+		forwardPath: descriptor,
+		reversePath: descriptor,
+	} );
+	return node;
+
+}
+
+function nearestPatchNode( builder, patchSet, point ) {
+
+	let best = patchSet.graphNodes[ 0 ];
+	let bestDistanceSq = Infinity;
+	for ( const node of patchSet.graphNodes ) {
+
+		const dx = builder.x[ node ] - point.x;
+		const dy = builder.y[ node ] - point.y;
+		const dz = builder.z[ node ] - point.z;
+		const distanceSq = dx * dx + dy * dy + dz * dz;
+		if ( distanceSq >= bestDistanceSq ) continue;
+		bestDistanceSq = distanceSq;
+		best = node;
+
+	}
+	return best;
 
 }
 
@@ -717,19 +1212,60 @@ export function buildChameleonSurfaceGraph( registry, {
 	treeClimbFraction = 0.58,
 	treeTurns = 1.65,
 	collisionProbeSpacing = 0.3,
+	surfaceChordTolerance = 0.018,
+	surfaceMaxSegmentLength = 0.5,
+	surfaceMaxNormalAngle = Math.PI / 5,
+	surfaceSubdivisionDepth = 8,
+	surfacePatchRadius = 1.25,
+	surfacePatchMaxTriangles = 64,
+	surfaceTransitionNodeReserve = 24,
 	maximumNodes = CHAMELEON_SURFACE_MAX_NODES,
 } = {} ) {
 
+	const groundLevel = finiteOr( groundY, 0.018 );
 	const safeWorldSize = Math.max( 20, finiteOr( worldSize, 160 ) );
 	const safeSpacing = clamp( finiteOr( terrainSpacing, 7.5 ), 2.5, 20 );
 	const safeGroundClearance = Math.max( 0.02, finiteOr( groundClearance, 0.42 ) );
 	const safeSupportClearance = Math.max( 0, finiteOr( supportClearance, 0.006 ) );
 	const safeProbeSpacing = clamp( finiteOr( collisionProbeSpacing, 0.3 ), 0.08, 1 );
+	const safeSubdivisionDepth = clamp( Math.round( finiteOr( surfaceSubdivisionDepth, 8 ) ), 2, 10 );
+	const safePatchRadius = clamp( finiteOr( surfacePatchRadius, 1.25 ), 0.05, 20 );
+	const safePatchTriangleLimit = clamp(
+		Math.round( finiteOr( surfacePatchMaxTriangles, 64 ) ),
+		2, 96,
+	);
+	const safeTransitionNodeReserve = clamp( Math.round( finiteOr( surfaceTransitionNodeReserve, 24 ) ), 4, 128 );
+	const validation = {
+		tolerance: clamp( finiteOr( surfaceChordTolerance, 0.018 ), 0.002, 0.1 ),
+		maxSegmentLength: clamp( finiteOr( surfaceMaxSegmentLength, 0.5 ), 0.08, 2 ),
+		maxNormalAngle: clamp( finiteOr( surfaceMaxNormalAngle, Math.PI / 5 ), 0.05, Math.PI ),
+		maxDepth: safeSubdivisionDepth,
+		validatedSegmentCount: 0,
+		validatedSupportSegments: 0,
+		validatedTransitionSegments: 0,
+		maxChordError: 0,
+		maxLeafLength: 0,
+	};
+	const collider = buildChameleonSurfaceCollider( registry, {
+		scales,
+		groundY: groundLevel,
+		defaultMaxDistance: 3,
+		maxTriangles: 200000,
+	} );
 	const supports = collectWalkablePlacements(
 		registry,
 		scales,
 		safeGroundClearance,
 	);
+	const colliderSupportIds = new Int32Array( supports.length );
+	colliderSupportIds.fill( - 1 );
+	for ( const support of supports ) {
+
+		const exact = collider.supports.find( ( candidate ) =>
+			candidate.entry === support.entry && candidate.placementIndex === support.placementIndex );
+		if ( exact ) colliderSupportIds[ support.id ] = exact.id;
+
+	}
 	const footprints = supports.map( ( support ) => support.footprint );
 	const builder = makeGraphBuilder( clamp(
 		Math.round( finiteOr( maximumNodes, CHAMELEON_SURFACE_MAX_NODES ) ),
@@ -740,115 +1276,175 @@ export function buildChameleonSurfaceGraph( registry, {
 		worldSize: safeWorldSize,
 		mapMargin: Math.max( 0.5, finiteOr( mapMargin, 1.5 ) ),
 		terrainSpacing: safeSpacing,
-		groundY: finiteOr( groundY, 0.018 ),
+		groundY: groundLevel,
 		collisionProbeSpacing: safeProbeSpacing,
 	} );
 	if ( terrain.nodes.length === 0 ) throw new Error( 'surface graph has no terrain nodes' );
 
 	const supportMetadata = [];
 	const destinationNodes = [];
+	const supportPlans = [];
 	let hostNode = terrain.nodes[ Math.floor( terrain.nodes.length * 0.5 ) ];
 
 	for ( const support of supports ) {
 
-		let points;
-		if ( support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE ) {
-
-			points = buildTreeHelix( support, {
-				objectSamples,
-				supportClearance: safeSupportClearance,
-				treeClimbFraction,
-				treeTurns,
-			} );
-
-		} else {
-
-			const track = buildChameleonTrack( {
-				entry: support.entry,
-				index: support.placementIndex,
-				placement: support.placement,
-			}, {
-				sampleCount: objectSamples,
-				scales,
-				clearance: safeSupportClearance,
-				endMargin: support.surfaceClass === CHAMELEON_SURFACE_CLASS.ROCK ? 0.035 : 0.07,
-			} );
-			points = trackPoints( track );
-
-		}
-		const surfaceNodes = appendPolyline(
-			builder,
-			points,
-			CHAMELEON_SURFACE_KIND.SUPPORT,
-			support.id,
+		const exactSupportId = colliderSupportIds[ support.id ];
+		const guidePoints = supportGuidePoints( support, {
+			objectSamples,
+			scales,
+			supportClearance: safeSupportClearance,
+			treeClimbFraction,
+			treeTurns,
+		} );
+		const seed = projectSupportSeed(
+			collider,
+			support,
+			exactSupportId,
+			guidePoints,
+			safeSupportClearance,
 		);
-		const portals = [];
-		const portalTerrainNodes = [];
-		const endpointOrdinals = support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE
-			? [ 0 ]
-			: [ 0, points.length - 1 ];
-		for ( const ordinal of endpointOrdinals ) {
+		const seededComponent = floodChameleonSurfaceComponent( collider, {
+			supportId: exactSupportId,
+			seedTriangle: seed.triangleId,
+		} );
+		const portal = projectSupportPortal(
+			collider,
+			support,
+			exactSupportId,
+			seededComponent,
+			guidePoints,
+			safeSupportClearance,
+			groundLevel,
+		);
+		const component = floodChameleonSurfaceComponent( collider, {
+			supportId: exactSupportId,
+			seedTriangle: portal.triangleId,
+		} );
+		const destinationGuide = support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE
+			? guidePoints[ guidePoints.length - 1 ]
+			: guidePoints[ Math.floor( guidePoints.length * 0.5 ) ];
+		supportPlans.push( {
+			support,
+			exactSupportId,
+			guidePoints,
+			portal,
+			component,
+			destinationGuide,
+		} );
 
-			const end = ordinal === 0 ? 0 : 1;
-			const surface = points[ ordinal ];
-			const direction = support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE
-				? ( () => {
+	}
 
-					let x = surface.nx;
-					let z = surface.nz;
-					const length = Math.hypot( x, z ) || 1;
-					x /= length;
-					z /= length;
-					return { x, z };
+	const reservedTransitionNodes = supportPlans.length * safeTransitionNodeReserve;
+	const reservedPortalNodes = supportPlans.length;
+	const patchNodeCapacity = builder.maximumNodes
+		- builder.x.length
+		- reservedTransitionNodes
+		- reservedPortalNodes;
+	if ( patchNodeCapacity < 1 && supportPlans.length > 0 ) throw new RangeError(
+		`terrain plus portal/transition reserve leaves ${ patchNodeCapacity } surface patch nodes`,
+	);
+	const patchAllocation = allocatePatchBudgets(
+		supportPlans.map( ( plan ) => plan.component ),
+		Math.max( 0, patchNodeCapacity ),
+		safePatchTriangleLimit,
+	);
+	let reachableSurfaceTriangleCount = 0;
+	let excludedSurfaceTriangleCount = 0;
 
-				} )()
-				: endpointDirection( points, end );
-			const anchor = makeGroundAnchor(
-				surface,
-				direction,
-				support,
-				footprints,
-				finiteOr( groundY, 0.018 ),
-				safeGroundClearance,
-			);
-			const portal = appendTransition(
-				builder,
-				surfaceNodes[ ordinal ],
-				surface,
-				direction,
-				anchor,
-				support.id,
-				transitionSamples,
-			);
-			const terrainNode = connectPortalToTerrain(
-				builder,
-				portal,
-				terrain.nodes,
-				footprints,
-				support.id,
-				safeProbeSpacing,
-			);
-			portals.push( portal );
-			portalTerrainNodes.push( terrainNode );
+	for ( let planIndex = 0; planIndex < supportPlans.length; planIndex ++ ) {
+
+		const plan = supportPlans[ planIndex ];
+		const { support, exactSupportId, portal, component } = plan;
+		const patches = buildChameleonSurfacePatches( collider, {
+			supportId: exactSupportId,
+			seedTriangle: portal.triangleId,
+			targetPatchRadius: safePatchRadius,
+			maxPatches: patchAllocation.budgets[ planIndex ],
+			maxTrianglesPerPatch: safePatchTriangleLimit,
+		} );
+		if ( patches.patchSeedTriangles[ 0 ] !== portal.triangleId ) {
+
+			throw new Error( `surface patch portal seed drifted on ${ support.model }` );
 
 		}
+		const componentId = collider.componentId[ portal.triangleId ];
+		const patchSet = appendSurfacePatchSet(
+			builder,
+			patches,
+			support.id,
+			exactSupportId,
+			componentId,
+			safeSupportClearance,
+		);
+		const patchNodeStart = patchSet.graphNodes[ 0 ];
+		const surfaceNode = appendSurfacePortalNode(
+			builder,
+			patchSet,
+			portal,
+			support.id,
+			componentId,
+		);
+		const surface = portal;
+		const anchor = makeGroundAnchor(
+			surface,
+			portal.direction,
+			support,
+			footprints,
+			groundLevel,
+			safeGroundClearance,
+		);
+		const transitionPortal = appendPhysicalTransition(
+			builder,
+			surfaceNode,
+			surface,
+			portal.direction,
+			anchor,
+			support.id,
+			transitionSamples,
+			validation,
+			safeSupportClearance,
+			groundLevel,
+		);
+		const terrainNode = connectPortalToTerrain(
+			builder,
+			transitionPortal,
+			terrain.nodes,
+			footprints,
+			support.id,
+			safeProbeSpacing,
+		);
+		if ( terrainNode < 0 ) throw new Error(
+			`physical portal for ${ support.model } cannot reach the terrain graph`,
+		);
 
-		const destination = support.surfaceClass === CHAMELEON_SURFACE_CLASS.TREE
-			? surfaceNodes[ surfaceNodes.length - 1 ]
-			: surfaceNodes[ Math.floor( surfaceNodes.length * 0.5 ) ];
+		const destination = nearestPatchNode( builder, patchSet, plan.destinationGuide );
 		destinationNodes.push( destination );
 		if ( hostMatchesSupport( host, support ) ) hostNode = destination;
+		const exactSupport = collider.supports[ exactSupportId ];
+		reachableSurfaceTriangleCount += patches.reachableTriangleCount;
+		excludedSurfaceTriangleCount += patches.excludedTriangleCount;
 		supportMetadata.push( Object.freeze( {
 			id: support.id,
 			model: support.model,
 			placementIndex: support.placementIndex,
 			surfaceClass: support.surfaceClass,
-			nodeStart: surfaceNodes[ 0 ],
-			nodeEnd: surfaceNodes[ surfaceNodes.length - 1 ],
+			nodeStart: surfaceNode,
+			patchNodeStart,
+			surfacePortalNode: surfaceNode,
+			nodeEnd: destination,
 			destinationNode: destination,
-			portals: Int32Array.from( portals ),
-			portalTerrainNodes: Int32Array.from( portalTerrainNodes ),
+			portals: Int32Array.of( transitionPortal ),
+			portalTerrainNodes: Int32Array.of( terrainNode ),
 			categoryScale: support.categoryScale,
+			colliderSupportId: exactSupportId,
+			componentId,
+			triangleStart: exactSupport?.triangleStart ?? - 1,
+			triangleCount: exactSupport?.triangleCount ?? 0,
+			reachableTriangleCount: patches.reachableTriangleCount,
+			excludedTriangleCount: patches.excludedTriangleCount,
+			patchSet: patchSet.index,
+			patchCount: patches.patchCount,
+			patchTelemetry: patches.telemetry,
 		} ) );
 
 	}
@@ -863,6 +1459,10 @@ export function buildChameleonSurfaceGraph( registry, {
 	}
 	const csr = compileCsr( builder );
 	const count = builder.x.length;
+	const surfacePatchNodeCount = builder.surfacePatches.reduce(
+		( total, patchSet ) => total + patchSet.graphNodes.length, 0,
+	);
+	const surfacePortalNodeCount = supportPlans.length;
 	const graph = {
 		revision,
 		count,
@@ -874,15 +1474,49 @@ export function buildChameleonSurfaceGraph( registry, {
 		normalZ: Float32Array.from( builder.nz ),
 		kind: Uint8Array.from( builder.kind ),
 		supportId: Int16Array.from( builder.supportId ),
+		componentId: Int32Array.from( builder.componentId ),
+		nodeTriangleId: Int32Array.from( builder.triangleId ),
 		offsets: csr.offsets,
 		edgeTo: csr.edgeTo,
 		edgeWeight: csr.edgeWeight,
+		edgeSurfacePath: csr.edgeSurfacePath,
 		edgeCount: builder.edgesA.length,
 		terrainNodeCount: terrain.nodes.length,
 		terrainWidth: terrain.width,
 		terrainStep: terrain.step,
 		supportCount: supportMetadata.length,
 		supports: Object.freeze( supportMetadata ),
+		surfacePatches: Object.freeze( builder.surfacePatches ),
+		surfacePathDescriptors: Object.freeze( builder.surfacePathDescriptors ),
+		collider,
+		colliderSupportIds,
+		surfaceTriangleCount: collider.triangleCount,
+		surfaceComponentCount: collider.componentCount,
+		reachableSurfaceTriangleCount,
+		excludedSurfaceTriangleCount,
+		surfacePatchNodeCount,
+		surfacePortalNodeCount,
+		surfaceBudget: Object.freeze( {
+			maximumNodes: builder.maximumNodes,
+			terrainNodes: terrain.nodes.length,
+			reservedTransitionNodes,
+			reservedPortalNodes,
+			patchCapacity: patchAllocation.capacity,
+			minimumPatchNodes: patchAllocation.minimumTotal,
+			actualPatchNodes: surfacePatchNodeCount,
+			actualPortalNodes: surfacePortalNodeCount,
+			actualTransitionNodes: count - terrain.nodes.length
+				- surfacePatchNodeCount - surfacePortalNodeCount,
+			unusedNodes: builder.maximumNodes - count,
+		} ),
+		surfaceValidation: Object.freeze( {
+			validatedSegmentCount: validation.validatedSegmentCount,
+			validatedSupportSegments: validation.validatedSupportSegments,
+			validatedTransitionSegments: validation.validatedTransitionSegments,
+			maxChordError: validation.maxChordError,
+			maxLeafLength: validation.maxLeafLength,
+			coverageMode: 'reachable-component-topology-patches',
+		} ),
 		hostNode,
 		destinationNodes: Uint32Array.from( destinationNodes ),
 		footprints: Object.freeze( footprints.map( ( footprint ) => Object.freeze( { ...footprint } ) ) ),
@@ -890,7 +1524,7 @@ export function buildChameleonSurfaceGraph( registry, {
 			worldSize: safeWorldSize,
 			mapMargin: Math.max( 0.5, finiteOr( mapMargin, 1.5 ) ),
 			terrainSpacing: safeSpacing,
-			groundY: finiteOr( groundY, 0.018 ),
+			groundY: groundLevel,
 			groundClearance: safeGroundClearance,
 			supportClearance: safeSupportClearance,
 			objectSamples: clamp( Math.round( objectSamples ), 8, 128 ),
@@ -898,6 +1532,13 @@ export function buildChameleonSurfaceGraph( registry, {
 			treeClimbFraction: clamp( treeClimbFraction, 0.12, 0.82 ),
 			treeTurns: clamp( treeTurns, 0.25, 4 ),
 			collisionProbeSpacing: safeProbeSpacing,
+			surfaceChordTolerance: validation.tolerance,
+			surfaceMaxSegmentLength: validation.maxSegmentLength,
+			surfaceMaxNormalAngle: validation.maxNormalAngle,
+			surfaceSubdivisionDepth: validation.maxDepth,
+			surfacePatchRadius: safePatchRadius,
+			surfacePatchMaxTriangles: safePatchTriangleLimit,
+			surfaceTransitionNodeReserve: safeTransitionNodeReserve,
 		} ),
 	};
 	return Object.freeze( graph );
@@ -920,8 +1561,16 @@ function graphSignature( options ) {
 		options.treeTurns ?? 1.65,
 		options.collisionProbeSpacing ?? 0.3,
 		scales.obstacles ?? 1,
+		options.surfaceChordTolerance ?? 0.018,
+		options.surfaceMaxSegmentLength ?? 0.5,
+		options.surfaceMaxNormalAngle ?? Math.PI / 5,
+		options.surfaceSubdivisionDepth ?? 8,
+		options.maximumNodes ?? CHAMELEON_SURFACE_MAX_NODES,
 		scales.trees ?? 1,
 		scales.rocks ?? 1,
+		options.surfacePatchRadius ?? 1.25,
+		options.surfacePatchMaxTriangles ?? 64,
+		options.surfaceTransitionNodeReserve ?? 24,
 	].join( '|' );
 
 }
@@ -1104,19 +1753,558 @@ export function findChameleonSurfacePath( graph, startNode, targetNode ) {
 
 }
 
-function corridorSampleCount( graph, path, spacing ) {
+function graphNodePoint( graph, node ) {
 
-	let count = 1;
+	const triangleId = graph.nodeTriangleId?.[ node ] ?? - 1;
+	return {
+		x: graph.x[ node ],
+		y: graph.y[ node ],
+		z: graph.z[ node ],
+		nx: graph.normalX[ node ],
+		ny: graph.normalY[ node ],
+		nz: graph.normalZ[ node ],
+		kind: graph.kind[ node ],
+		supportId: graph.supportId[ node ],
+		componentId: graph.componentId[ node ],
+		triangleId,
+		incomingTriangleId: - 1,
+		exactSurface: graph.kind[ node ] === CHAMELEON_SURFACE_KIND.SUPPORT
+			&& triangleId >= 0,
+		graphNode: node,
+	};
+
+}
+
+function triangleContactNormal( collider, triangle ) {
+
+	let nx = collider.normalAX[ triangle ]
+		+ collider.normalBX[ triangle ]
+		+ collider.normalCX[ triangle ];
+	let ny = collider.normalAY[ triangle ]
+		+ collider.normalBY[ triangle ]
+		+ collider.normalCY[ triangle ];
+	let nz = collider.normalAZ[ triangle ]
+		+ collider.normalBZ[ triangle ]
+		+ collider.normalCZ[ triangle ];
+	let length = Math.hypot( nx, ny, nz );
+	if ( length <= EPSILON ) {
+
+		nx = collider.faceNormalX[ triangle ];
+		ny = collider.faceNormalY[ triangle ];
+		nz = collider.faceNormalZ[ triangle ];
+		length = Math.hypot( nx, ny, nz ) || 1;
+
+	}
+	nx /= length;
+	ny /= length;
+	nz /= length;
+	if ( nx * collider.faceNormalX[ triangle ]
+		+ ny * collider.faceNormalY[ triangle ]
+		+ nz * collider.faceNormalZ[ triangle ] < 0 ) {
+
+		nx = - nx;
+		ny = - ny;
+		nz = - nz;
+
+	}
+	return { nx, ny, nz };
+
+}
+
+function colliderVertex( collider, triangle, vertex ) {
+
+	return {
+		x: vertex === 0 ? collider.ax[ triangle ]
+			: vertex === 1 ? collider.bx[ triangle ] : collider.cx[ triangle ],
+		y: vertex === 0 ? collider.ay[ triangle ]
+			: vertex === 1 ? collider.by[ triangle ] : collider.cy[ triangle ],
+		z: vertex === 0 ? collider.az[ triangle ]
+			: vertex === 1 ? collider.bz[ triangle ] : collider.cz[ triangle ],
+	};
+
+}
+
+function sharedEdgePoint( graph, patchSet, fromTriangle, toTriangle, graphNode ) {
+
+	const collider = graph.collider;
+	let first = null;
+	let second = null;
+	for ( let edge = 0; edge < 3; edge ++ ) {
+
+		if ( collider.edgeNeighbours[ fromTriangle * 3 + edge ] !== toTriangle ) continue;
+		first = colliderVertex( collider, fromTriangle, edge );
+		second = colliderVertex( collider, fromTriangle, ( edge + 1 ) % 3 );
+		break;
+
+	}
+	if ( ! first ) {
+
+		const epsilonSq = 1e-10;
+		for ( let fromVertex = 0; fromVertex < 3; fromVertex ++ ) {
+
+			const candidate = colliderVertex( collider, fromTriangle, fromVertex );
+			for ( let toVertex = 0; toVertex < 3; toVertex ++ ) {
+
+				const other = colliderVertex( collider, toTriangle, toVertex );
+				const dx = candidate.x - other.x;
+				const dy = candidate.y - other.y;
+				const dz = candidate.z - other.z;
+				if ( dx * dx + dy * dy + dz * dz > epsilonSq ) continue;
+				if ( ! first ) first = candidate;
+				else if ( Math.hypot(
+					candidate.x - first.x,
+					candidate.y - first.y,
+					candidate.z - first.z,
+				) > EPSILON ) second = candidate;
+				break;
+
+			}
+
+		}
+
+	}
+	if ( ! first || ! second ) throw new Error(
+		`geodesic triangles ${ fromTriangle } and ${ toTriangle } do not share an edge`,
+	);
+	const normalA = triangleContactNormal( collider, fromTriangle );
+	const normalB = triangleContactNormal( collider, toTriangle );
+	let nx = normalA.nx + normalB.nx;
+	let ny = normalA.ny + normalB.ny;
+	let nz = normalA.nz + normalB.nz;
+	const normalLength = Math.hypot( nx, ny, nz ) || 1;
+	nx /= normalLength;
+	ny /= normalLength;
+	nz /= normalLength;
+	const x = ( first.x + second.x ) * 0.5;
+	const y = ( first.y + second.y ) * 0.5;
+	const z = ( first.z + second.z ) * 0.5;
+	const clearance = graph.settings.supportClearance;
+	return {
+		x: x + nx * clearance,
+		y: y + ny * clearance,
+		z: z + nz * clearance,
+		nx, ny, nz,
+		kind: CHAMELEON_SURFACE_KIND.SUPPORT,
+		supportId: patchSet.supportId,
+		componentId: patchSet.componentId,
+		triangleId: fromTriangle,
+		incomingTriangleId: fromTriangle,
+		exactSurface: true,
+		graphNode,
+	};
+
+}
+
+function triangleCentrePoint( graph, patchSet, triangle, graphNode ) {
+
+	const collider = graph.collider;
+	const normal = triangleContactNormal( collider, triangle );
+	const clearance = graph.settings.supportClearance;
+	const x = ( collider.ax[ triangle ] + collider.bx[ triangle ] + collider.cx[ triangle ] ) / 3;
+	const y = ( collider.ay[ triangle ] + collider.by[ triangle ] + collider.cy[ triangle ] ) / 3;
+	const z = ( collider.az[ triangle ] + collider.bz[ triangle ] + collider.cz[ triangle ] ) / 3;
+	return {
+		x: x + normal.nx * clearance,
+		y: y + normal.ny * clearance,
+		z: z + normal.nz * clearance,
+		nx: normal.nx,
+		ny: normal.ny,
+		nz: normal.nz,
+		kind: CHAMELEON_SURFACE_KIND.SUPPORT,
+		supportId: patchSet.supportId,
+		componentId: patchSet.componentId,
+		triangleId: triangle,
+		incomingTriangleId: triangle,
+		exactSurface: true,
+		graphNode,
+	};
+
+}
+
+function appendDistinctPoint( points, point ) {
+
+	const previous = points[ points.length - 1 ];
+	if ( previous && Math.hypot(
+		previous.x - point.x,
+		previous.y - point.y,
+		previous.z - point.z,
+	) <= EPSILON ) return;
+	points.push( point );
+
+}
+
+function parentChainToSeed( patches, triangle, expectedSeed ) {
+
+	const chain = [ triangle ];
+	let current = triangle;
+	for ( let guard = 0; guard <= patches.reachableTriangleCount; guard ++ ) {
+
+		const parent = patches.triangleParent[ current - patches.supportTriangleStart ];
+		if ( parent < 0 ) break;
+		chain.push( parent );
+		current = parent;
+
+	}
+	if ( current !== expectedSeed ) throw new Error(
+		`triangle ${ triangle } has no in-patch path to seed ${ expectedSeed }`,
+	);
+	return chain;
+
+}
+
+function appendPatchEdgePath( graph, descriptor, targetNode, points ) {
+
+	const patchSet = graph.surfacePatches[ descriptor.patchSet ];
+	const patches = patchSet?.patches;
+	if ( ! patches ) throw new Error( `surface path references missing patch set ${ descriptor.patchSet }` );
+	const edge = descriptor.edge;
+	const fromTriangle = patches.edgeFromTriangle[ edge ];
+	const toTriangle = patches.edgeToTriangle[ edge ];
+	const fromPatch = patches.trianglePatch[ fromTriangle - patches.supportTriangleStart ];
+	const toPatch = patches.edgeTo[ edge ];
+	const sourceChain = parentChainToSeed(
+		patches,
+		fromTriangle,
+		patches.patchSeedTriangles[ fromPatch ],
+	);
+	for ( let index = sourceChain.length - 2; index >= 0; index -- ) {
+
+		const previousTriangle = sourceChain[ index + 1 ];
+		const triangle = sourceChain[ index ];
+		appendDistinctPoint( points, sharedEdgePoint(
+			graph, patchSet, previousTriangle, triangle, targetNode,
+		) );
+		appendDistinctPoint( points, triangleCentrePoint(
+			graph, patchSet, triangle, targetNode,
+		) );
+
+	}
+	let nx = patches.portalNormalX[ edge ];
+	let ny = patches.portalNormalY[ edge ];
+	let nz = patches.portalNormalZ[ edge ];
+	const normalLength = Math.hypot( nx, ny, nz ) || 1;
+	nx /= normalLength;
+	ny /= normalLength;
+	nz /= normalLength;
+	const clearance = graph.settings.supportClearance;
+	appendDistinctPoint( points, {
+		x: patches.portalX[ edge ] + nx * clearance,
+		y: patches.portalY[ edge ] + ny * clearance,
+		z: patches.portalZ[ edge ] + nz * clearance,
+		nx, ny, nz,
+		kind: CHAMELEON_SURFACE_KIND.SUPPORT,
+		supportId: patchSet.supportId,
+		componentId: patchSet.componentId,
+		triangleId: fromTriangle,
+		incomingTriangleId: fromTriangle,
+		exactSurface: true,
+		graphNode: targetNode,
+	} );
+	appendDistinctPoint( points, triangleCentrePoint(
+		graph, patchSet, toTriangle, targetNode,
+	) );
+	const destinationChain = parentChainToSeed(
+		patches,
+		toTriangle,
+		patches.patchSeedTriangles[ toPatch ],
+	);
+	for ( let index = 1; index < destinationChain.length; index ++ ) {
+
+		const previousTriangle = destinationChain[ index - 1 ];
+		const triangle = destinationChain[ index ];
+		appendDistinctPoint( points, sharedEdgePoint(
+			graph, patchSet, previousTriangle, triangle, targetNode,
+		) );
+		appendDistinctPoint( points, triangleCentrePoint(
+			graph, patchSet, triangle, targetNode,
+		) );
+
+	}
+
+}
+
+function directedGraphEdge( graph, from, to ) {
+
+	for ( let edge = graph.offsets[ from ]; edge < graph.offsets[ from + 1 ]; edge ++ ) {
+
+		if ( graph.edgeTo[ edge ] === to ) return edge;
+
+	}
+	throw new Error( `surface path contains non-adjacent nodes ${ from }-${ to }` );
+
+}
+
+function expandSurfacePath( graph, path ) {
+
+	const points = [ graphNodePoint( graph, path[ 0 ] ) ];
 	for ( let index = 1; index < path.length; index ++ ) {
 
+		const from = path[ index - 1 ];
+		const to = path[ index ];
+		const edge = directedGraphEdge( graph, from, to );
+		const descriptorIndex = graph.edgeSurfacePath?.[ edge ] ?? - 1;
+		if ( descriptorIndex >= 0 ) {
+
+			const descriptor = graph.surfacePathDescriptors[ descriptorIndex ];
+			if ( descriptor.type === 'triangle-local' ) {
+
+				const target = graphNodePoint( graph, to );
+				if ( target.triangleId !== descriptor.triangleId ) throw new Error(
+					`local portal edge left triangle ${ descriptor.triangleId }`,
+				);
+				target.incomingTriangleId = descriptor.triangleId;
+				target.exactSurface = true;
+				appendDistinctPoint( points, target );
+
+			} else {
+
+				appendPatchEdgePath( graph, descriptor, to, points );
+				appendDistinctPoint( points, graphNodePoint( graph, to ) );
+
+			}
+
+		} else appendDistinctPoint( points, graphNodePoint( graph, to ) );
+
+	}
+	return points;
+
+}
+
+
+function corridorSampleCount( points, spacing ) {
+	let count = 1;
+	for ( let index = 1; index < points.length; index ++ ) {
+
 		count += Math.max( 1, Math.ceil( Math.hypot(
-			graph.x[ path[ index ] ] - graph.x[ path[ index - 1 ] ],
-			graph.y[ path[ index ] ] - graph.y[ path[ index - 1 ] ],
-			graph.z[ path[ index ] ] - graph.z[ path[ index - 1 ] ],
+			points[ index ].x - points[ index - 1 ].x,
+			points[ index ].y - points[ index - 1 ].y,
+			points[ index ].z - points[ index - 1 ].z,
 		) / spacing ) );
 
 	}
 	return count;
+
+}
+
+function colliderTrianglesAdjacent( collider, triangle, candidate ) {
+
+	if ( triangle === candidate ) return true;
+	if ( triangle < 0 || candidate < 0 ) return false;
+	for (
+		let ordinal = collider.adjacencyOffsets[ triangle ];
+		ordinal < collider.adjacencyOffsets[ triangle + 1 ];
+		ordinal ++
+	) {
+
+		if ( collider.adjacencyTriangles[ ordinal ] === candidate ) return true;
+
+	}
+	return false;
+
+}
+function colliderTrianglesTouch( collider, triangle, candidate ) {
+
+	if ( colliderTrianglesAdjacent( collider, triangle, candidate ) ) return true;
+	for ( let a = 0; a < 3; a ++ ) {
+
+		const point = colliderVertex( collider, triangle, a );
+		for ( let b = 0; b < 3; b ++ ) {
+
+			const other = colliderVertex( collider, candidate, b );
+			const dx = point.x - other.x;
+			const dy = point.y - other.y;
+			const dz = point.z - other.z;
+			if ( dx * dx + dy * dy + dz * dz <= 1e-10 ) return true;
+
+		}
+
+	}
+	return false;
+
+}
+
+
+function projectCorridorToExactSurface( graph, corridor ) {
+
+	const collider = graph.collider;
+	if ( ! collider ) throw new TypeError( 'surface corridor requires its baked collider' );
+	const hit = createChameleonSurfaceHit();
+	const query = {
+		supportId: - 1,
+		componentId: - 1,
+		includeGround: false,
+		groundOnly: false,
+		clearance: graph.settings.supportClearance,
+		maxDistance: Infinity,
+	};
+	const groundQuery = {
+		supportId: - 1,
+		includeGround: true,
+		groundOnly: true,
+		clearance: graph.settings.supportClearance,
+		maxDistance: Infinity,
+	};
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		if ( corridor.surfaceHit[ index ] ) {
+
+			const supportId = corridor.supportId[ index ];
+			const exactSupportId = supportId >= 0
+				? graph.colliderSupportIds[ supportId ] : - 1;
+			const triangle = corridor.triangleId[ index ];
+			if ( corridor.kind[ index ] === CHAMELEON_SURFACE_KIND.SUPPORT
+				&& ( exactSupportId < 0
+					|| triangle < 0
+					|| collider.supportId[ triangle ] !== exactSupportId
+					|| collider.componentId[ triangle ] !== corridor.componentId[ index ] ) ) {
+
+				throw new Error( `exact surface corridor sample ${ index } lost its support/component` );
+
+			}
+			if ( corridor.kind[ index ] === CHAMELEON_SURFACE_KIND.SUPPORT ) {
+
+				query.supportId = exactSupportId;
+				query.componentId = corridor.componentId[ index ];
+				query.triangleId = triangle;
+				collider.projectPoint(
+					corridor.x[ index ], corridor.y[ index ], corridor.z[ index ],
+					hit, query,
+				);
+				const geometryError = hit.hit ? Math.hypot(
+					hit.x - corridor.x[ index ],
+					hit.y - corridor.y[ index ],
+					hit.z - corridor.z[ index ],
+				) : Infinity;
+				const tolerance = Math.max(
+					2e-4,
+					graph.settings.surfaceChordTolerance + graph.settings.supportClearance * 2,
+				);
+				if ( ! hit.hit || hit.supportId !== exactSupportId
+					|| hit.componentId !== corridor.componentId[ index ]
+					|| ! colliderTrianglesTouch( collider, triangle, hit.triangleId )
+					|| geometryError > tolerance ) throw new Error(
+					`exact surface corridor sample ${ index } failed geometric revalidation`,
+				);
+
+			}
+			continue;
+
+		}
+		const supportId = corridor.supportId[ index ];
+		if ( supportId < 0 || corridor.kind[ index ] === CHAMELEON_SURFACE_KIND.TERRAIN ) {
+
+			collider.projectPoint(
+				corridor.x[ index ], corridor.y[ index ], corridor.z[ index ],
+				hit, groundQuery,
+			);
+
+		} else {
+
+			const exactSupportId = graph.colliderSupportIds[ supportId ];
+			if ( exactSupportId < 0 ) throw new Error(
+				`surface corridor sample ${ index } references missing support ${ supportId }`,
+			);
+			query.triangleId = corridor.triangleId[ index ];
+			query.supportId = exactSupportId;
+			query.componentId = corridor.componentId[ index ];
+			collider.projectPoint(
+				corridor.x[ index ], corridor.y[ index ], corridor.z[ index ],
+				hit, query,
+			);
+			if ( corridor.kind[ index ] === CHAMELEON_SURFACE_KIND.TRANSITION ) {
+
+				const groundDistance = Math.abs(
+					corridor.y[ index ] - graph.settings.groundY,
+				);
+				if ( groundDistance < hit.distance ) collider.projectPoint(
+					corridor.x[ index ], corridor.y[ index ], corridor.z[ index ],
+					hit, groundQuery,
+				);
+
+			}
+
+		}
+		if ( ! hit.hit ) throw new Error( `surface corridor sample ${ index } did not project` );
+		const kind = corridor.kind[ index ];
+		if ( kind === CHAMELEON_SURFACE_KIND.TERRAIN && ! hit.isGround ) throw new Error(
+			`terrain corridor sample ${ index } did not resolve to ground`,
+		);
+		if ( kind === CHAMELEON_SURFACE_KIND.SUPPORT && ( hit.isGround
+			|| hit.supportId !== graph.colliderSupportIds[ supportId ]
+			|| ( corridor.componentId[ index ] >= 0
+				&& hit.componentId !== corridor.componentId[ index ] ) ) ) throw new Error(
+			`support corridor sample ${ index } changed support/component`,
+		);
+		if ( kind === CHAMELEON_SURFACE_KIND.TRANSITION && ! hit.isGround
+			&& ( hit.supportId !== graph.colliderSupportIds[ supportId ]
+				|| ( corridor.componentId[ index ] >= 0
+					&& hit.componentId !== corridor.componentId[ index ] ) ) ) throw new Error(
+			`transition corridor sample ${ index } changed support/component`,
+		);
+		corridor.x[ index ] = hit.x;
+		corridor.y[ index ] = hit.y;
+		corridor.z[ index ] = hit.z;
+		corridor.normalX[ index ] = hit.nx;
+		corridor.normalY[ index ] = hit.ny;
+		corridor.normalZ[ index ] = hit.nz;
+		corridor.triangleId[ index ] = hit.triangleId;
+		corridor.componentId[ index ] = hit.componentId;
+		corridor.surfaceHit[ index ] = 1;
+
+	}
+
+	for ( let index = 0; index < corridor.count; index ++ ) {
+
+		if ( ! corridor.surfaceHit[ index ] ) throw new Error(
+			`surface corridor sample ${ index } remained unresolved`,
+		);
+
+	}
+}
+
+function compactCorridorSamples( corridor ) {
+
+	const scalarFields = [
+		'x', 'y', 'z',
+		'normalX', 'normalY', 'normalZ',
+		'kind', 'supportId', 'componentId',
+		'graphNode', 'triangleId', 'surfaceHit',
+	];
+	let write = 1;
+	for ( let read = 1; read < corridor.count; read ++ ) {
+
+		const previous = write - 1;
+		const distance = Math.hypot(
+			corridor.x[ read ] - corridor.x[ previous ],
+			corridor.y[ read ] - corridor.y[ previous ],
+			corridor.z[ read ] - corridor.z[ previous ],
+		);
+		const sameTopology = corridor.kind[ read ] === corridor.kind[ previous ]
+			&& corridor.supportId[ read ] === corridor.supportId[ previous ]
+			&& corridor.componentId[ read ] === corridor.componentId[ previous ]
+			&& corridor.triangleId[ read ] === corridor.triangleId[ previous ];
+		if ( distance <= EPSILON && ! sameTopology ) throw new Error(
+			'surface corridor contains a zero-length topological handoff',
+		);
+		if ( distance <= 1e-4 && sameTopology ) {
+
+			for ( const field of scalarFields ) corridor[ field ][ previous ] = corridor[ field ][ read ];
+			continue;
+
+		}
+		if ( write !== read ) {
+
+			for ( const field of scalarFields ) corridor[ field ][ write ] = corridor[ field ][ read ];
+
+		}
+		write ++;
+
+	}
+	if ( write < 2 && corridor.count > 1 ) throw new Error(
+		'surface corridor collapsed to a zero-length route',
+	);
+	corridor.count = write;
+	return corridor;
 
 }
 
@@ -1140,7 +2328,18 @@ function normalizeCorridorFrames( corridor ) {
 		nx -= tx * projection;
 		ny -= ty * projection;
 		nz -= tz * projection;
-		const normalLength = Math.hypot( nx, ny, nz ) || 1;
+		let normalLength = Math.hypot( nx, ny, nz );
+		if ( normalLength <= EPSILON ) {
+
+			// A vertical handoff can momentarily align its contact normal and
+			// tangent. Choose the least-parallel reference axis so the frame
+			// remains finite, orthonormal and deterministic.
+			nx = Math.abs( ty ) < 0.9 ? - tx * ty : 1 - tx * tx;
+			ny = Math.abs( ty ) < 0.9 ? 1 - ty * ty : - tx * ty;
+			nz = Math.abs( ty ) < 0.9 ? - tz * ty : - tx * tz;
+			normalLength = Math.hypot( nx, ny, nz ) || 1;
+
+		}
 		corridor.tangentX[ index ] = tx;
 		corridor.tangentY[ index ] = ty;
 		corridor.tangentZ[ index ] = tz;
@@ -1161,6 +2360,14 @@ function normalizeCorridorFrames( corridor ) {
 
 }
 
+function corridorBudgetError( message ) {
+
+	const error = new RangeError( message );
+	error.code = 'CHAMELEON_CORRIDOR_BUDGET';
+	return error;
+
+}
+
 /**
  * Compile a path into the only data consumed by ChameleonSimulation.
  * Every graph corner is retained; the budget only changes subdivision density,
@@ -1169,29 +2376,34 @@ function normalizeCorridorFrames( corridor ) {
 export function buildChameleonSurfaceCorridor( graph, path, {
 	spacing = 1.15,
 	maxSamples = CHAMELEON_CORRIDOR_MAX_SAMPLES,
+	requestedTargetNode = path?.[ path.length - 1 ],
 } = {} ) {
 
-	if ( ! path || path.length < 1 ) throw new TypeError( 'a non-empty surface path is required' );
+	if ( ! path || path.length < 2 ) throw new TypeError(
+		'a surface corridor requires two distinct graph nodes',
+	);
 	for ( const node of path ) assertNode( graph, node, 'path node' );
 	const capacity = clamp(
 		Math.round( finiteOr( maxSamples, CHAMELEON_CORRIDOR_MAX_SAMPLES ) ),
 		32,
 		CHAMELEON_CORRIDOR_MAX_SAMPLES,
 	);
-	if ( path.length > capacity ) {
-
-		throw new RangeError( `surface path has ${ path.length } mandatory corners for a ${ capacity } sample corridor` );
-
-	}
+	const expandedPoints = expandSurfacePath( graph, path );
+	if ( expandedPoints.length > capacity ) throw corridorBudgetError(
+		`geodesic surface corridor needs ${ expandedPoints.length } mandatory points `
+		+ `for a ${ capacity } sample budget; refusing an unsafe chord fallback`,
+	);
 	let effectiveSpacing = clamp( finiteOr( spacing, 1.15 ), 0.2, 12 );
 	for ( let guard = 0; guard < 24
-		&& corridorSampleCount( graph, path, effectiveSpacing ) > capacity; guard ++ ) {
+		&& corridorSampleCount( expandedPoints, effectiveSpacing ) > capacity; guard ++ ) {
 
 		effectiveSpacing *= 1.18;
 
 	}
-	const count = corridorSampleCount( graph, path, effectiveSpacing );
-	if ( count > capacity ) throw new RangeError( 'surface corridor budget could not retain all corners' );
+	const count = corridorSampleCount( expandedPoints, effectiveSpacing );
+	if ( count > capacity ) throw corridorBudgetError(
+		'surface corridor budget cannot retain every topological corner',
+	);
 	const corridor = {
 		count,
 		x: new Float32Array( count ),
@@ -1206,59 +2418,108 @@ export function buildChameleonSurfaceCorridor( graph, path, {
 		distance: new Float32Array( count ),
 		kind: new Uint8Array( count ),
 		supportId: new Int16Array( count ),
+		componentId: new Int32Array( count ).fill( - 1 ),
 		graphNode: new Uint32Array( count ),
+		triangleId: new Int32Array( count ).fill( - 1 ),
+		surfaceHit: new Uint8Array( count ),
 		startNode: path[ 0 ],
 		targetNode: path[ path.length - 1 ],
 		pathNodeCount: path.length,
+		requestedTargetNode,
+		truncated: requestedTargetNode !== path[ path.length - 1 ],
+		mandatoryPointCount: expandedPoints.length,
 		effectiveSpacing,
 		supportCount: graph.supportCount,
 		supports: graph.supports,
 	};
 	let cursor = 0;
 
-	function write( fromNode, toNode, alpha, graphNode ) {
+	function write( from, to, alpha, graphNode, incomingTriangleId = - 1, exactSurface = false ) {
 
-		corridor.x[ cursor ] = graph.x[ fromNode ]
-			+ ( graph.x[ toNode ] - graph.x[ fromNode ] ) * alpha;
-		corridor.y[ cursor ] = graph.y[ fromNode ]
-			+ ( graph.y[ toNode ] - graph.y[ fromNode ] ) * alpha;
-		corridor.z[ cursor ] = graph.z[ fromNode ]
-			+ ( graph.z[ toNode ] - graph.z[ fromNode ] ) * alpha;
-		corridor.normalX[ cursor ] = graph.normalX[ fromNode ]
-			+ ( graph.normalX[ toNode ] - graph.normalX[ fromNode ] ) * alpha;
-		corridor.normalY[ cursor ] = graph.normalY[ fromNode ]
-			+ ( graph.normalY[ toNode ] - graph.normalY[ fromNode ] ) * alpha;
-		corridor.normalZ[ cursor ] = graph.normalZ[ fromNode ]
-			+ ( graph.normalZ[ toNode ] - graph.normalZ[ fromNode ] ) * alpha;
-		const nearest = alpha < 0.5 ? fromNode : toNode;
-		corridor.kind[ cursor ] = graph.kind[ nearest ];
-		corridor.supportId[ cursor ] = graph.supportId[ nearest ];
+		corridor.x[ cursor ] = from.x + ( to.x - from.x ) * alpha;
+		corridor.y[ cursor ] = from.y + ( to.y - from.y ) * alpha;
+		corridor.z[ cursor ] = from.z + ( to.z - from.z ) * alpha;
+		corridor.normalX[ cursor ] = from.nx + ( to.nx - from.nx ) * alpha;
+		corridor.normalY[ cursor ] = from.ny + ( to.ny - from.ny ) * alpha;
+		corridor.normalZ[ cursor ] = from.nz + ( to.nz - from.nz ) * alpha;
+		const nearest = alpha < 0.5 ? from : to;
+		corridor.kind[ cursor ] = nearest.kind;
+		corridor.supportId[ cursor ] = nearest.supportId;
+		corridor.componentId[ cursor ] = nearest.componentId;
 		corridor.graphNode[ cursor ] = graphNode;
+		corridor.triangleId[ cursor ] = incomingTriangleId >= 0
+			? incomingTriangleId : nearest.triangleId;
+		corridor.surfaceHit[ cursor ] = exactSurface ? 1 : 0;
 		cursor ++;
 
 	}
 
-	write( path[ 0 ], path[ 0 ], 0, path[ 0 ] );
-	for ( let edge = 1; edge < path.length; edge ++ ) {
+	const first = expandedPoints[ 0 ];
+	write(
+		first,
+		first,
+		0,
+		first.graphNode,
+		first.triangleId,
+		first.exactSurface,
+	);
+	for ( let segment = 1; segment < expandedPoints.length; segment ++ ) {
 
-		const from = path[ edge - 1 ];
-		const to = path[ edge ];
-		const length = Math.hypot(
-			graph.x[ to ] - graph.x[ from ],
-			graph.y[ to ] - graph.y[ from ],
-			graph.z[ to ] - graph.z[ from ],
-		);
+		const from = expandedPoints[ segment - 1 ];
+		const to = expandedPoints[ segment ];
+		const length = Math.hypot( to.x - from.x, to.y - from.y, to.z - from.z );
 		const subdivisions = Math.max( 1, Math.ceil( length / effectiveSpacing ) );
-		for ( let ordinal = 1; ordinal <= subdivisions; ordinal ++ ) {
+		const exactSurface = to.incomingTriangleId >= 0;
+		for ( let ordinal = 1; ordinal <= subdivisions; ordinal ++ ) write(
+			from,
+			to,
+			ordinal / subdivisions,
+			to.graphNode,
+			to.incomingTriangleId,
+			exactSurface,
+		);
 
-			write( from, to, ordinal / subdivisions, to );
+	}
+	if ( cursor !== count ) throw new Error( `surface corridor wrote ${ cursor }/${ count } samples` );
+	projectCorridorToExactSurface( graph, corridor );
+	compactCorridorSamples( corridor );
+	normalizeCorridorFrames( corridor );
+	corridor.length = corridor.distance[ corridor.count - 1 ];
+	return Object.freeze( corridor );
+
+}
+
+function buildBudgetedRouterCorridor( graph, path, options ) {
+
+	const requestedTargetNode = path[ path.length - 1 ];
+	if ( path.length <= 1 ) return {
+		path,
+		corridor: buildChameleonSurfaceCorridor( graph, path, {
+			...options,
+			requestedTargetNode,
+		} ),
+	};
+	for ( let length = path.length; length >= 2; length -- ) {
+
+		const candidate = length === path.length ? path : path.slice( 0, length );
+		try {
+
+			return {
+				path: candidate,
+				corridor: buildChameleonSurfaceCorridor( graph, candidate, {
+					...options,
+					requestedTargetNode,
+				} ),
+			};
+
+		} catch ( error ) {
+
+			if ( error?.code !== 'CHAMELEON_CORRIDOR_BUDGET' || length === 2 ) throw error;
 
 		}
 
 	}
-	normalizeCorridorFrames( corridor );
-	corridor.length = corridor.distance[ count - 1 ];
-	return Object.freeze( corridor );
+	throw corridorBudgetError( 'no adjacent graph edge fits the surface corridor budget' );
 
 }
 
@@ -1299,17 +2560,6 @@ export function nearestChameleonSurfaceNode( graph, x, y, z ) {
 
 }
 
-function nextRandom( state ) {
-
-	let value = state.value | 0;
-	value = ( value + 0x6D2B79F5 ) | 0;
-	state.value = value;
-	let mixed = Math.imul( value ^ ( value >>> 15 ), 1 | value );
-	mixed = ( mixed + Math.imul( mixed ^ ( mixed >>> 7 ), 61 | mixed ) ) ^ mixed;
-	return ( ( mixed ^ ( mixed >>> 14 ) ) >>> 0 ) / 4294967296;
-
-}
-
 /**
  * Destination-time router. It has intentionally no frame `update` method:
  * route planning is explicit and therefore cannot accidentally enter the hot
@@ -1340,19 +2590,109 @@ export class ChameleonSurfaceRouter {
 		this.explorationCount = 0;
 		this.decisionCount = 0;
 
+		this.pendingTargetNode = - 1;
+		this._proposalActive = false;
+		this._proposalNodeCount = 0;
+		this._proposalNodes = new Int32Array( 128 );
+		this._proposalVisitCounts = new Uint16Array( 128 );
+		this._proposalCurrentNode = this.currentNode;
+		this._proposalPreviousNode = this.previousNode;
+		this._proposalPendingTargetNode = this.pendingTargetNode;
+		this._proposalRouteCount = 0;
+		this._proposalDestinationCount = 0;
+		this._proposalExplorationCount = 0;
+		this._proposalDecisionCount = 0;
+		this._rejectedFromNode = - 1;
+		this._rejectedNextNode = - 1;
+	}
+
+	beginProposal() {
+
+		if ( this._proposalActive ) throw new Error( 'chameleon router proposal already active' );
+		this._proposalActive = true;
+		this._proposalNodeCount = 0;
+		this._proposalCurrentNode = this.currentNode;
+		this._proposalPreviousNode = this.previousNode;
+		this._proposalPendingTargetNode = this.pendingTargetNode;
+		this._proposalRouteCount = this.routeCount;
+		this._proposalDestinationCount = this.destinationCount;
+		this._proposalExplorationCount = this.explorationCount;
+		this._proposalDecisionCount = this.decisionCount;
+		return this;
+
+	}
+
+	_recordProposalNode( node ) {
+
+		if ( ! this._proposalActive ) return;
+		for ( let index = 0; index < this._proposalNodeCount; index ++ ) {
+
+			if ( this._proposalNodes[ index ] === node ) return;
+
+		}
+		if ( this._proposalNodeCount >= this._proposalNodes.length ) {
+
+			throw new Error( 'chameleon router proposal exceeds its fixed node budget' );
+
+		}
+		const index = this._proposalNodeCount ++;
+		this._proposalNodes[ index ] = node;
+		this._proposalVisitCounts[ index ] = this.visitCounts[ node ];
+
+	}
+
+	acceptProposal() {
+
+		if ( ! this._proposalActive ) return false;
+		this._proposalActive = false;
+		this._proposalNodeCount = 0;
+		this._rejectedFromNode = - 1;
+		this._rejectedNextNode = - 1;
+		return true;
+
+	}
+
+	rejectProposal() {
+
+		if ( ! this._proposalActive ) return false;
+		const rejectedFrom = this._proposalNodeCount > 0
+			? this._proposalNodes[ 0 ] : this._proposalCurrentNode;
+		const rejectedNext = this._proposalNodeCount > 1
+			? this._proposalNodes[ 1 ] : - 1;
+		for ( let index = 0; index < this._proposalNodeCount; index ++ ) {
+
+			this.visitCounts[ this._proposalNodes[ index ] ] = this._proposalVisitCounts[ index ];
+
+		}
+		this.currentNode = this._proposalCurrentNode;
+		this.previousNode = this._proposalPreviousNode;
+		this.pendingTargetNode = this._proposalPendingTargetNode;
+		this.routeCount = this._proposalRouteCount;
+		this.destinationCount = this._proposalDestinationCount;
+		this.explorationCount = this._proposalExplorationCount;
+		this.decisionCount = this._proposalDecisionCount;
+		this._proposalActive = false;
+		this._proposalNodeCount = 0;
+		this._rejectedFromNode = rejectedFrom;
+		this._rejectedNextNode = rejectedNext;
+		return true;
+
 	}
 
 	routeTo( targetNode, startNode = this.currentNode ) {
 
-		const path = findChameleonSurfacePath( this.graph, startNode, targetNode );
-		const corridor = buildChameleonSurfaceCorridor( this.graph, path, {
+		const requestedPath = findChameleonSurfacePath( this.graph, startNode, targetNode );
+		const planned = buildBudgetedRouterCorridor( this.graph, requestedPath, {
 			spacing: this.spacing,
 			maxSamples: this.maxSamples,
 		} );
+		const { path, corridor } = planned;
 		if ( path.length > 1 ) this.previousNode = path[ path.length - 2 ];
-		this.currentNode = targetNode;
+		this.currentNode = path[ path.length - 1 ];
+		this.pendingTargetNode = corridor.truncated ? targetNode : - 1;
 		for ( const node of path ) {
 
+			this._recordProposalNode( node );
 			if ( this.visitCounts[ node ] < 65535 ) this.visitCounts[ node ] ++;
 
 		}
@@ -1390,6 +2730,7 @@ export class ChameleonSurfaceRouter {
 			let score = this.visitCounts[ next ] * 16;
 			if ( next === previous ) score += 10;
 			if ( pathNodes.has( next ) ) score += 24;
+			if ( current === this._rejectedFromNode && next === this._rejectedNextNode ) score += 64;
 			if ( previous >= 0 ) {
 
 				let dx = graph.x[ next ] - graph.x[ current ];
@@ -1468,7 +2809,6 @@ export class ChameleonSurfaceRouter {
 			);
 			path.push( next );
 			pathNodes.add( next );
-			if ( this.visitCounts[ next ] < 65535 ) this.visitCounts[ next ] ++;
 			previous = current;
 			current = next;
 			this.decisionCount ++;
@@ -1480,13 +2820,22 @@ export class ChameleonSurfaceRouter {
 			throw new Error( 'current chameleon surface node has no exploration edge' );
 
 		}
-		const corridor = buildChameleonSurfaceCorridor(
+		const planned = buildBudgetedRouterCorridor(
 			this.graph,
 			Uint32Array.from( path ),
 			{ spacing: this.spacing, maxSamples: this.maxSamples },
 		);
-		this.previousNode = path[ path.length - 2 ];
-		this.currentNode = current;
+		const effectivePath = planned.path;
+		const corridor = planned.corridor;
+		this.previousNode = effectivePath[ effectivePath.length - 2 ];
+		this.currentNode = effectivePath[ effectivePath.length - 1 ];
+		this.pendingTargetNode = corridor.truncated ? corridor.requestedTargetNode : - 1;
+		for ( const node of effectivePath ) {
+
+			this._recordProposalNode( node );
+			if ( this.visitCounts[ node ] < 65535 ) this.visitCounts[ node ] ++;
+
+		}
 		this.routeCount ++;
 		this.destinationCount ++;
 		this.explorationCount ++;
@@ -1504,6 +2853,7 @@ export class ChameleonSurfaceRouter {
 
 		this.currentNode = nearestChameleonSurfaceNode( this.graph, x, y, z );
 		this.previousNode = - 1;
+		this._recordProposalNode( this.currentNode );
 		if ( this.visitCounts[ this.currentNode ] < 65535 ) this.visitCounts[ this.currentNode ] ++;
 		return this.currentNode;
 

@@ -767,6 +767,24 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	fChameleon.add( gfx, 'chameleonTrackingSpeed', 0.05, 5, 0.05 ).name( 'Vitesse de poursuite' );
 	fChameleon.add( gfx, 'chameleonAnimationSpeed', 0.1, 4, 0.05 ).name( 'Vitesse animation marche' );
 	fChameleon.add( gfx, 'chameleonTurnSpeed', 1, 15, 0.25 ).name( 'Réactivité orientation' );
+	const fChameleonContacts = fChameleon.addFolder( 'Contacts physiques' );
+	fChameleonContacts.add( gfx, 'chameleonContactPhysics' ).name( 'Collisions exactes' );
+	fChameleonContacts.add( gfx, 'chameleonFootIK' ).name( 'Pattes procédurales' );
+	fChameleonContacts.add( gfx, 'chameleonBodyContacts' ).name( 'Contacts du corps' );
+	fChameleonContacts.add( gfx, 'chameleonBodyContactFrequency', 15, 60, 1 )
+		.name( 'Corps (Hz)' );
+	fChameleonContacts.add( gfx, 'chameleonBodyProbeRadius', 0.02, 0.28, 0.005 )
+		.name( 'Rayon sondes corps' );
+	fChameleonContacts.add( gfx, 'chameleonTailContacts' ).name( 'Contacts de queue' );
+	fChameleonContacts.add( gfx, 'chameleonTailContactFrequency', 15, 60, 1 )
+		.name( 'Queue (Hz)' );
+	fChameleonContacts.add( gfx, 'chameleonTailProbeRadius', 0.02, 0.22, 0.005 )
+		.name( 'Rayon sondes queue' );
+	fChameleonContacts.add( gfx, 'chameleonContactFrequency', 15, 120, 1 )
+		.name( 'Solveur de contact (Hz)' );
+	fChameleonContacts.add( gfx, 'chameleonStepHeight', 0, 0.5, 0.01 ).name( 'Hauteur des pas' );
+	fChameleonContacts.add( gfx, 'chameleonGaitStrength', 0, 1, 0.01 ).name( 'Influence IK' );
+	fChameleonContacts.close();
 	const fChameleonRoaming = fChameleon.addFolder( 'Exploration et camouflage' );
 	fChameleonRoaming.add( gfx, 'chameleonRoamingEnabled' ).name( 'Explorer la carte' );
 	fChameleonRoaming.add(
