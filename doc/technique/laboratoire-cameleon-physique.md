@@ -3,14 +3,36 @@
 ## Portée
 
 Le laboratoire accessible avec `?test` ou `?test=chameleon` est un banc d’essai
-isolé pour la locomotion physique du caméléon. Il sert à éprouver le rig, le
-corps articulé, les prises sur plusieurs surfaces, le pilotage à la troisième
-personne et la manipulation à la souris.
+isolé pour une locomotion physique hybride. Il sert à éprouver les collisions
+du corps, quatre appuis de surface, l’IK bornée des membres, le pilotage à la
+troisième personne et la manipulation à la souris.
 
 Il ne remplace pas encore le caméléon de la simulation principale décrit dans
 [CHAMELEON-SIM](./cameleons.md). Il n’exécute ni la colonie, ni les abeilles, ni
 les papillons, ni la prédation. Ses paramètres et son horloge ne modifient donc
 jamais une partie normale.
+
+## Décision d’architecture
+
+Le prototype n’est plus un active ragdoll permanent. Une chaîne de nombreux
+corps, articulations sphériques et moteurs concurrents créait trop de degrés de
+liberté : les erreurs de contact se propageaient et le caméléon pouvait se
+replier ou s’entortiller sur lui-même.
+
+Le runtime utilise désormais :
+
+- **un seul corps dynamique Rapier** pour la masse, la gravité, les collisions,
+  les forces, la saisie et le lancer ;
+- un collider composé d’une capsule de torse et d’un volume de tête ;
+- **quatre appuis analytiques bornés**, un par pied ;
+- une démarche procédurale et une IK visuelle limitée autour de la pose de
+  repos ;
+- un contrôleur de racine amorti de manière critique et borné en force et en
+  couple.
+
+Il n’existe donc pas de chaîne physique à 33 corps, pas d’auto-collisions entre
+des dizaines de capsules et pas de rotules libres à stabiliser. Cette réduction
+est le mécanisme principal de stabilité et de performance.
 
 ## Chargement et isolation
 
@@ -27,125 +49,117 @@ CPU, la mémoire et le temps de démarrage de la colonie.
 
 ## Chaîne d’exécution
 
-Le laboratoire associe quatre couches indépendantes :
+Le laboratoire associe cinq couches :
 
 1. `environment.js` crée les meshes WebGPU et leurs colliders Rapier fixes ;
-2. `active-ragdoll.js` charge le rig, crée les corps dynamiques, les
-   articulations, les muscles et les prises ;
-3. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
+2. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis
+   et le rig visuel ;
+3. `hybrid-controller-model.js` fournit les calculs purs de cadre de support,
+   gains amortis, limites articulaires et forces bornées ;
+4. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
    l’interpolation visuelle ;
-4. `third-person-controller.js` et `grab-controller.js` transforment les
-   commandes du joueur en directions, forces et impulsions physiques.
+5. `third-person-controller.js` et `grab-controller.js` transforment les
+   commandes du joueur en directions, forces et impulsions.
 
-Le rendu ne réécrit jamais directement la position du squelette. Après chaque
-pas, les transformations interpolées des proxies physiques pilotent les os du
-GLB. Le déplacement, la chute, la traction à la souris et le lancer passent
-donc tous par Rapier.
+Le mouvement global ne réécrit jamais directement la position du modèle : la
+pose interpolée du corps Rapier pilote la racine visuelle. L’IK n’agit que sur
+les os des pattes et ne crée aucune énergie dans le solveur physique.
 
-## Rig et corps articulé
+## Contrat de l’asset et queue originale
 
-L’asset `public/assets/ChameleonPhysical.glb` contient un corps et une queue
-neutre séparés, un skin commun et une hiérarchie anatomique couvrant colonne,
-tête, mâchoire, quatre membres avec doigts et douze sections de queue. Chaque
-sommet possède au plus quatre influences normalisées.
+`public/assets/ChameleonPhysical.glb` exporte un unique mesh skinné à partir de
+la géométrie source préservée. Son contrat `mesh_contract_version = 3.0.0`
+verrouille notamment :
 
-Le solveur instancie 33 proxies dynamiques :
+- `exact_source_geometry = true` ;
+- `source_vertex_count = 25002` ;
+- `source_polygon_count = 50000` ;
+- `original_tail_vertices = 7206` ;
+- `tail_deformation_mode = "rigid_pelvis"` ;
+- `tail_physics_dofs = 0`.
 
-- 5 capsules pour le bassin, les deux segments de colonne, le cou et la tête ;
-- 16 capsules pour les quatre chaînes de membres ;
-- 12 capsules pour la queue.
+Les 7 206 sommets de la queue sont ceux de la queue originale enroulée. Ils ne
+sont ni supprimés, ni remplacés par une queue tubulaire. Ils reçoivent un poids
+rigide de `1.0` vers le bassin : la silhouette reste exacte, mais la queue
+n’ajoute aucun degré de liberté physique instable. Les 43 os d’authoring restent
+dans le skin ; ils ne correspondent pas à 43 corps Rapier.
 
-Les proxies non adjacents d’un même animal se collisionnent entre eux afin que
-les pattes, la tête et la queue ne traversent pas le torse. Rapier désactive en
-revanche les contacts entre chaque paire directement reliée par une
-articulation, ce qui évite les conflits au niveau des pivots. Hors queue,
-Rapier les relie par des rotules sphériques libres ; des couples PD souples les
-ramènent vers une limite anatomique sans transformer cette limite en butée
-Rapier dure. La queue suit une politique différente et explicite : les sections
-3, 5, 7, 9 et 11 sont des charnières Rapier limitées à ±0,38 radian, tandis que
-les sept autres liaisons sont fixes. Elle conserve ainsi sa longueur tout en
-laissant cinq degrés de flexion physiques. Cette représentation évite un
-collider par triangle et maintient un coût borné.
+La reconstruction est déterministe et s’exécute sans interface Blender :
 
-Les muscles du corps utilisent un contrôle PD quaternion amorti, borné et
-mis à l’échelle par l’inertie. Ceux de la queue pilotent ses charnières. Ils
-cherchent la pose de repos et ajoutent un cycle diagonal aux membres pendant la marche. Ils restent des forces : un choc, une chute ou une
-traction peut les écarter de la pose cible. Le mode **Ragdoll passif** désactive
-ces moteurs de pose et les prises sans remplacer les corps. Les couples de
-butée anatomique souple restent actifs : ils jouent le rôle d’une contrainte
-articulaire et non celui d’un muscle cherchant la pose de repos.
+```powershell
+blender --background blender/chameleon_physics_rig.blend --python scripts/rebuild-chameleon-hybrid-asset.py
+```
 
-## Contacts et surfaces
+Blender et son MCP n’ont donc pas besoin d’être ouverts pour lancer, tester ou
+reconstruire l’asset. L’interface Blender reste utile uniquement pour une
+modification artistique ou anatomique volontaire de la scène source.
 
-Chaque collider fixe publie des métadonnées :
+## Corps physique unique
 
-- `kind` décrit la classe de surface ;
-- `friction` règle le contact Rapier ;
-- `clawEligible` autorise ou interdit une prise ;
-- `gripStrengthScale` module sa résistance ;
-- une branche peut aussi exposer son axe et son rayon.
+Le corps dynamique utilise CCD, peut dormir et reçoit quelques itérations de
+solveur supplémentaires. Une capsule représente le tronc et une sphère la tête
+dans un collider composé. Tous les contacts du décor, les impulsions de saut et
+les forces de saisie s’appliquent à ce même corps.
 
-Quatre pieds et l’extrémité de la queue sondent un petit ensemble borné de
-directions. Lorsqu’un support rugueux est atteint, le contact mémorise une
-ancre en coordonnées monde. Tant que cette ancre reste valide, aucune nouvelle
-sonde n’est lancée pour ce membre ; la recherche reprend après sa libération.
-Un ressort amorti maintient le bout du membre autour de l’ancre jusqu’au pas de
-transfert suivant, à une surcharge, à une perte de portée ou à une libération
-volontaire. La queue ne prend actuellement que les surfaces déclarées comme
-branches.
+Le contrôleur n’écrit pas sa pose. À partir d’au moins deux appuis valides, il
+calcule un centroïde et une normale moyenne, puis applique :
 
-Le plan de support moyen oriente la commande et permet de marcher sur un sol,
-un plan incliné, un mur rugueux ou un tronc. La direction clavier, d’abord
-calculée par rapport à la caméra, est projetée sur ce plan.
+- une force PD amortie de façon critique vers une racine suggérée par les
+  appuis ;
+- la compensation bornée de la gravité le long de la normale ;
+- une force tangentielle bornée vers la vitesse commandée ;
+- un couple borné alignant progressivement le corps avec le support.
 
-À l’arrêt, un contrôleur PD tangent au support maintient le bassin autour de
-son dernier point stable. Il compense la dérive produite par les muscles et les
-prises sans verrouiller la hauteur, sans écrire la pose et sans empêcher les
-contacts Rapier de continuer à résoudre le poids. Ce maintien est suspendu
-pendant un saut, une saisie ou un lancer, puis revient après un court délai.
+Une prise, un saut, un manque d’appuis ou le mode **Physique libre** désactive
+ce rappel. Rapier reste alors l’unique autorité du mouvement global.
 
-Le mur de verre bleu est intentionnellement peu frictionnel et
-`clawEligible: false`. Le caméléon doit y glisser. Les caméléons ne possèdent
-pas les lamelles adhésives d’un gecko : la préhension réelle repose surtout sur
-leurs pieds zygodactyles, leurs griffes, le serrage et la friction. Le ressort
-d’ancrage est donc une abstraction de cette prise sur les matériaux rugueux,
-pas une adhésion universelle.
+## Quatre appuis et IK bornée
 
-## Pas fixe et interpolation
+Chaque pied possède une cible et une normale dans des tableaux de taille fixe.
+La recherche teste un ensemble borné de directions et n’accepte que les
+colliders marqués `clawEligible`. Un mur de verre non éligible reste donc un
+support de collision, mais jamais une prise.
+
+La démarche procédurale alterne appui et transfert. À chaque rendu interpolé, le
+rig visuel résout chaque patte avec quatre itérations CCD. Toutes les rotations
+sont ramenées autour de la pose de repos et bornées par rôle : ceinture,
+segment supérieur, segment inférieur et paume. Une cible inaccessible ne peut
+donc pas provoquer une rotation sans limite ni accumuler une torsion d’une
+image à l’autre, car la pose de repos est restaurée avant chaque résolution.
+
+Les normales propres à chaque pied orientent les paumes. Le corps utilise leur
+cadre agrégé, ce qui permet de tester un angle sol/mur ou un tronc sans imposer
+que les quatre pieds soient coplanaires.
+
+## Physique libre, saisie et lancer
+
+Le mode **Physique libre** suspend les nouveaux appuis et le contrôleur de
+racine. Le corps unique reste soumis à la gravité, aux collisions et aux forces
+de la souris. Le squelette visible conserve ses limites procédurales : ce mode
+n’est pas un ragdoll articulé complet et ne prétend pas simuler indépendamment
+chaque membre.
+
+Le clic gauche lance un rayon uniquement au début de la saisie. Le point touché
+est ensuite relié au pointeur par un ressort amorti appliqué au corps unique. La
+vitesse du pointeur est convertie en impulsion bornée au relâchement. Tout le
+modèle suit ainsi une autorité physique cohérente, sans rupture entre segments.
+
+## Pas fixe, interpolation et budget
 
 Rapier avance à `120 Hz`, soit `1/120 s`, avec au plus quatre sous-pas par image.
-À durée acceptée identique, le résultat physique ne dépend pas d’un rendu à
-60 ou 240 Hz. Le rendu interpole la pose précédente et la pose courante afin de
-ne pas afficher les marches discrètes du solveur.
+À durée acceptée identique, le résultat physique ne dépend pas d’un rendu à 60
+ou 240 Hz. Le rendu interpole la pose précédente et la pose courante.
 
 Une image exceptionnellement longue ne crée pas une dette sans limite : le
 temps qui dépasse quatre sous-pas est compté dans `droppedSeconds`, puis
 abandonné. Ce choix protège la fluidité du prototype et interdit une spirale de
-rattrapage. Il ne faut donc pas utiliser ce laboratoire comme oracle de
-l’horloge stricte de la simulation principale.
+rattrapage.
 
-Les buffers de poses, les corps, les articulations, les proxies de debug et les
-contacts sont créés au chargement puis réutilisés pendant la simulation. Une
-réinitialisation recrée volontairement les articulations. Les sondes sont
-suspendues pour les prises déjà ancrées. Le panneau affiche le p95 du coût
-complet d’un sous-pas, sondes, muscles, validation et résolution Rapier inclus,
-afin de détecter une dérive de performance.
-
-## Caméra, pilotage et manipulation
-
-La caméra suit le bassin avec amortissement et résout un rayon contre le décor
-pour ne pas traverser un obstacle. Le clic droit change son lacet et son
-inclinaison ; la molette règle sa distance.
-
-Les touches AZERTY, QWERTY et les flèches produisent une commande tangentielle
-au support. `Shift` demande le sprint. `Espace` libère brièvement les prises et
-applique une impulsion suivant la normale de support.
-
-Le clic gauche lance un rayon uniquement au début de la saisie. Le point
-touché est ensuite relié au pointeur par un ressort amorti, appliqué au vrai
-proxy. La vitesse du pointeur est conservée et convertie en impulsion bornée au
-relâchement : secouer et lancer le caméléon teste donc bien sa gravité, ses
-articulations et la récupération de ses muscles.
+Le coût physique est constant : un corps, deux formes de collision et quatre
+appuis. Les tableaux de contacts et de poses sont alloués au chargement puis
+réutilisés. L’IK emploie quatre chaînes et un nombre fixe d’itérations ; son coût
+ne croît ni avec le décor visible, ni avec la population de la colonie. Le
+panneau expose le p95 du sous-pas complet.
 
 ## Décor de validation
 
@@ -163,25 +177,23 @@ prétendent pas reproduire tous les maillages de la carte principale.
 
 ## Limites connues
 
-Le laboratoire est un active ragdoll avancé, mais pas un modèle biomécanique
-exhaustif :
+Le laboratoire vise une locomotion stable et des contacts lisibles, pas un
+modèle biomécanique exhaustif :
 
-- les doigts visibles suivent le skin ; ils ne possèdent pas chacun un corps
-  rigide et une contrainte de serrage ;
-- les capsules approchent le volume de l’animal au lieu de reprendre chaque
-  triangle du mesh ;
-- les muscles sont des ressorts de pose et non une simulation de fibres ;
+- les doigts suivent le skin et ne possèdent pas chacun un collider ;
+- les quatre pieds sont des appuis analytiques, pas quatre corps dynamiques ;
+- l’IK est visuelle et bornée, sans simulation de fibres musculaires ;
+- la queue originale est rigide avec le bassin et n’est pas encore préhensile ;
 - les surfaces du banc sont fixes et analytiques ;
 - aucune décision écologique, chasse ou animation de langue n’est exécutée.
 
-Une chute sur le verre, un pied qui lâche pendant son cycle ou une posture
-déformée après un lancer sont des conséquences physiques attendues. Une
-téléportation hors réinitialisation, un proxy non fini, une prise sur le verre
-ou une traversée durable d’un collider sont des régressions.
+Une chute sur le verre, la perte temporaire d’un appui ou la rotation du corps
+après un lancer sont attendues. Une téléportation hors réinitialisation, une
+patte qui s’entortille, une valeur non finie, une prise sur le verre, une queue
+tubulaire ou une traversée durable d’un collider sont des régressions.
 
 ## Sources de conception
 
-- [Rapier — articulations](https://rapier.rs/docs/user_guides/javascript/joints/) ;
 - [Rapier — forces et impulsions](https://rapier.rs/docs/user_guides/javascript/rigid_body_forces_and_impulses/) ;
 - [Rapier — paramètres d’intégration](https://rapier.rs/docs/user_guides/javascript/integration_parameters/) ;
 - [Three.js — WebGPURenderer](https://threejs.org/manual/en/webgpurenderer) ;
@@ -192,34 +204,28 @@ ou une traversée durable d’un collider sont des régressions.
 
 Les preuves automatiques actuelles sont :
 
-- `test/chameleon-lab-route.test.js` : sélection de route et imports
-  dynamiques exclusifs ;
+- `test/chameleon-lab-route.test.js` : sélection de route et imports dynamiques
+  exclusifs ;
 - `test/chameleon-lab-physics-world.test.js` : initialisation, pas fixe,
   invariance 60/240 Hz, plafond de rattrapage, interpolation, reset et rejet des
   valeurs non finies ;
-- `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY,
-  projection caméra-support, exploration autonome bornée, détection
-  d’immobilité et libération fiable de la rotation caméra ;
-- `test/chameleon-lab-active-ragdoll.test.js` : `CHAMELEON-LAB-RAGDOLL-001` vérifie la
-  politique fixe/charnière de la queue ; `CHAMELEON-LAB-RAGDOLL-002` les limites anatomiques
-  et les gains inertiels ; `CHAMELEON-LAB-RAGDOLL-003` le maintien au repos proportionnel à
-  la masse ; `CHAMELEON-LAB-RAGDOLL-004` la non-rétraction de la chaîne de queue et la
-  coïncidence de ses ancres ; `CHAMELEON-LAB-RAGDOLL-005` son invariance entre rendus à 60 et
-  240 Hz ; `CHAMELEON-LAB-RAGDOLL-006` charge le GLB et simule le corps complet
-  de 33 proxies avec ses auto-collisions ; `CHAMELEON-LAB-RAGDOLL-007` rejette
-  les sorties de rayon provenant de l’intérieur d’un collider ;
-- `test/chameleon-physical-asset.test.js` : structure GLB, budget, skin,
-  influences et hiérarchie anatomique.
+- `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY, projection
+  caméra-support, exploration autonome bornée et détection d’immobilité ;
+- `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
+  `CHAMELEON-LAB-RAGDOLL-001` à `007` sont désormais l’autorité de
+  non-régression de l’architecture hybride : corps Rapier unique, quatre
+  appuis, forces et angles bornés, mode libre et valeurs finies ;
+- `test/chameleon-physical-asset.test.js` : `CHAMELEON-PHYSICAL-ASSET-001` et
+  `002` protègent le mesh source exact, le skin et les 7 206 sommets de la queue
+  originale rigidement liés au bassin.
 
-Le build WebGPU protège l’assemblage des modules. Le test d’intégration Node
-instancie désormais le GLB et les 33 proxies, vérifie les groupes
-d’auto-collision, les ancres, les prises au sol et l’absence de valeurs non
-finies pendant quatre secondes. Une inspection dans un navigateur WebGPU reste
-indispensable pour les transitions multi-surfaces, la caméra, la saisie, le
-lancer, les ombres, la qualité visuelle et le coût p95 réel.
+Le build WebGPU protège l’assemblage des modules. Une inspection dans un
+navigateur WebGPU reste indispensable pour les transitions multi-surfaces, la
+caméra, la saisie, le lancer, les ombres, la silhouette de la queue et le coût
+p95 réel.
 
-Toute modification du laboratoire qui touche une commande, une articulation,
-un contact, une borne temporelle, une ressource ou un budget doit mettre à jour
+Toute modification du laboratoire qui touche une commande, un appui, une
+limite IK, une borne temporelle, une ressource ou un budget doit mettre à jour
 dans la même livraison :
 
 1. le test automatisé correspondant ;

@@ -60,3 +60,21 @@ test( 'CHAMELEON-LAB-ROUTE-003 bootstrap dynamically imports exactly one applica
 	);
 
 } );
+test( 'CHAMELEON-LAB-ROUTE-004 isolated lab boots the hybrid root-plus-IK controller', async () => {
+
+	const [ labMain, hybrid ] = await Promise.all( [
+		readSource( '../src/chameleon-lab/main.js' ),
+		readSource( '../src/chameleon-lab/hybrid-chameleon.js' ),
+	] );
+
+	assert.ok(
+		labMain.includes( "import { createHybridChameleon } from './hybrid-chameleon.js';" ),
+	);
+	assert.ok(
+		labMain.includes( 'const ragdoll = await createHybridChameleon( { scene, physics } );' ),
+	);
+	assert.equal( labMain.includes( 'createActiveRagdoll' ), false );
+	assert.equal( labMain.includes( "'./active-ragdoll.js'" ), false );
+	assert.ok( hybrid.includes( "architecture: 'hybrid-root-ik'" ) );
+
+} );

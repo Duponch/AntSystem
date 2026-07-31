@@ -19,7 +19,7 @@ La suite couvre notamment :
 - `BEE-SIM` : cycle de butinage complet, déterminisme, météo, démographie agrégée, cohortes et recyclage stables, continuité de phase par clip, ciblage borné, vues SoA, layout/GLB/VAT bornés, draws fixes et boucle chaude sans allocation ;
 - `BUTTERFLY-SIM` : cycle œuf→larve→chrysalide→adulte→œuf, immatures invisibles, activité adulte, météo indépendante du vieillissement, ciblage de quatre fleurs, SoA fixe, asset/clip/VAT, draw unique, chargement paresseux, perception bornée du caméléon et fuite continue ;
 - `CHAMELEON-SIM` : prédation complète, rig et langue, graphe global borné de terrain/rochers/souches/troncs/branches/arbres, transitions, clearance, corridors locaux continus, exploration déterministe sans A* de routine, repères de support et réglages UI ;
-- laboratoire physique du caméléon : route isolée, GLB riggé borné, monde Rapier à pas fixe, interpolation, reset, plafond de rattrapage, rejet des valeurs non finies, politique fixe/charnière de la queue, gains PD, chaîne de queue isolée, corps complet de 33 proxies, auto-collisions, rayons externes, watchdog autonome et annulation caméra ;
+- laboratoire physique du caméléon : route isolée, géométrie source exacte, `original_tail_vertices = 7206`, corps dynamique Rapier unique, collider composé, quatre appuis bornés, cadre de support et gains amortis, IK restaurée et limitée autour de la pose de repos, mode **Physique libre**, monde à pas fixe, interpolation, reset, plafond de rattrapage, rejet des valeurs non finies, rayons externes, watchdog autonome et annulation caméra ;
 - `UNDERGROUND-VISUAL` : palette volumique configurable, plongée bornée au bloc, excavation visuelle indépendante, pools périodiques déterministes, suppression de la poussière, chargement unique des GLB, masque SDF propre et budgets fixes ;
 - `OBS` : intentions, arrêts attendus, détection d’immobilité, pause à vitesse nulle, distances monde, reset temporel, sélection faune bornée, menace, support, camouflage et volumes du seul individu suivi ;
 - réseau de corridors : déterminisme, routage, budget résiduel multi-arêtes, invariance au découpage temporel, continuité, profondeur, limites, croissance append-only et complexité structurelle ;
@@ -106,16 +106,16 @@ La validation WebGPU ciblée doit encore confirmer visuellement la pose et l’a
 Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manuelle minimale vérifie :
 
 - pilotage AZERTY/QWERTY relatif à la caméra sur sol et plan incliné ;
-- adaptation simultanée à deux normales dans un angle sol/mur ;
-- prise et marche sur les troncs rugueux, puis glissement attendu sur le verre ;
-- passage active ragdoll ↔ ragdoll passif sans téléportation ;
-- saisie, secousse, lancer et récupération du corps complet ;
+- adaptation progressive des quatre appuis à deux normales dans un angle sol/mur ;
+- marche sur les troncs rugueux, puis glissement attendu sur le verre ;
+- passage locomotion stabilisée ↔ **Physique libre** sans téléportation, vrille ni articulation qui s’entortille ;
+- saisie, secousse, lancer du corps unique et récupération progressive ;
+- conservation exacte de la queue originale enroulée, sans tube de remplacement ;
 - caméra sans traversée persistante du décor ;
-- proxies et contacts cohérents en debug ;
+- debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
-Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`, `chameleon-lab-controller`, `chameleon-lab-active-ragdoll` et `chameleon-physical-asset` protègent la structure, les commandes et les bornes. Le test active-ragdoll charge le GLB, instancie les 33 proxies et vérifie quatre secondes de simulation, les auto-collisions, les ancres et les valeurs finies. Les transitions multi-surfaces complexes, la saisie visuelle, le basculement actif/passif et la sensation du pilotage exigent encore l’inspection runtime.
-
+Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`, `chameleon-lab-controller`, `chameleon-lab-active-ragdoll` et `chameleon-physical-asset` protègent la structure, les commandes et les bornes. Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `007` sont maintenant l’autorité de non-régression de l’architecture hybride : un corps Rapier, quatre appuis, IK et efforts bornés, mode libre et valeurs finies. `CHAMELEON-PHYSICAL-ASSET-001/002` verrouillent le mesh source exact et `original_tail_vertices = 7206`. Les transitions multi-surfaces complexes, la saisie visuelle, le retour du mode libre et la sensation du pilotage exigent encore l’inspection runtime.
 ## Garde documentaire
 
 ```powershell

@@ -113,10 +113,10 @@ export function createLabUI( {
 	const panel = document.createElement( 'aside' );
 	panel.className = 'chameleon-lab-panel';
 	const title = document.createElement( 'h1' );
-	title.textContent = 'Laboratoire physique · Caméléon';
+	title.textContent = 'Laboratoire physique · Caméléon hybride';
 	const subtitle = document.createElement( 'p' );
 	subtitle.className = 'subtitle';
-	subtitle.textContent = 'Active ragdoll articulé, contacts multi-surfaces et prises zygodactyles simulées sans téléportation.';
+	subtitle.textContent = 'Corps physique stable, appuis IK bornés et géométrie originale — queue comprise — sans téléportation.';
 	panel.append( title, subtitle );
 
 	const behavior = fieldset( panel, 'Pilotage' );
@@ -128,7 +128,7 @@ export function createLabUI( {
 	} );
 	const ragdollToggle = makeToggle( {
 		parent: behavior,
-		label: 'Ragdoll passif (F)',
+		label: 'Physique libre (F)',
 		object: state,
 		property: 'fullRagdoll',
 	} );
@@ -163,10 +163,10 @@ export function createLabUI( {
 		format: ( value ) => value.toFixed( 1 ),
 	} );
 
-	const muscles = fieldset( panel, 'Corps actif' );
+	const muscles = fieldset( panel, 'Stabilisation' );
 	makeRange( {
 		parent: muscles,
-		label: 'Tonus musculaire',
+		label: 'Stabilité du corps',
 		object: ragdoll.settings,
 		property: 'motorStrength',
 		min: 0,
@@ -195,22 +195,17 @@ export function createLabUI( {
 		format: ( value ) => `${ value.toFixed( 2 ) } Hz`,
 	} );
 
-	const grip = fieldset( panel, 'Préhension' );
+	const grip = fieldset( panel, 'Appuis' );
 	makeToggle( {
 		parent: grip,
-		label: 'Prises pieds / griffes',
+		label: 'Appuis pieds / griffes',
 		object: ragdoll.settings,
 		property: 'gripEnabled',
 	} );
-	makeToggle( {
-		parent: grip,
-		label: 'Queue préhensile',
-		object: ragdoll.settings,
-		property: 'tailGrip',
-	} );
+
 	makeRange( {
 		parent: grip,
-		label: 'Force de prise',
+		label: 'Force de maintien',
 		object: ragdoll.settings,
 		property: 'gripStrength',
 		min: 3,
@@ -220,7 +215,7 @@ export function createLabUI( {
 	} );
 	makeRange( {
 		parent: grip,
-		label: 'Rigidité prise',
+		label: 'Rigidité d’appui',
 		object: ragdoll.settings,
 		property: 'gripStiffness',
 		min: 30,
@@ -291,7 +286,7 @@ export function createLabUI( {
 
 	const help = document.createElement( 'div' );
 	help.className = 'chameleon-lab-help';
-	help.innerHTML = '<kbd>Z</kbd><kbd>Q</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> déplacer · <kbd>Shift</kbd> accélérer · <kbd>Espace</kbd> lâcher/sauter · clic gauche saisir, secouer et lancer · clic droit caméra · molette zoom · <kbd>C</kbd> autonome · <kbd>F</kbd> ragdoll passif · <kbd>H</kbd> debug · <kbd>R</kbd> reset';
+	help.innerHTML = '<kbd>Z</kbd><kbd>Q</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> déplacer · <kbd>Shift</kbd> accélérer · <kbd>Espace</kbd> lâcher/sauter · clic gauche saisir, secouer et lancer · clic droit caméra · molette zoom · <kbd>C</kbd> autonome · <kbd>F</kbd> physique libre · <kbd>H</kbd> debug · <kbd>R</kbd> reset';
 	shell.append( panel, status, help );
 	document.body.append( shell );
 
@@ -318,16 +313,16 @@ export function createLabUI( {
 		debugToggle.checked = state.debug;
 		fpsValue.textContent = `${ lastFps } fps`;
 		stepValue.textContent = `${ physics.stats.p95StepMs.toFixed( 2 ) } ms`;
-		contactsValue.textContent = `${ ragdoll.contactCount } / 5`;
+		contactsValue.textContent = `${ ragdoll.contactCount } / ${ ragdoll.maxContactCount ?? 4 }`;
 		stateValue.textContent = state.fullRagdoll
-			? 'passif'
+			? 'libre'
 			: state.autonomous ? 'autonome' : 'joueur';
 		const position = ragdoll.pelvis.body.translation();
 		heightValue.textContent = `${ position.y.toFixed( 2 ) } m`;
 		validityValue.textContent = physics.stats.invalidBodies === 0 ? 'OK' : `${ physics.stats.invalidBodies } NaN`;
 		shell.dataset.pelvis = `${ position.x },${ position.y },${ position.z }`;
 		shell.dataset.physicsSteps = String( physics.stats.totalSteps );
-		shell.dataset.contacts = [ ...ragdoll.feet, ragdoll.tailGrip ]
+		shell.dataset.contacts = ragdoll.feet
 			.map( ( contact ) => `${ contact.part.name }:${ contact.state }:${ contact.load.toFixed( 2 ) }:${ contact.anchor ? 1 : 0 }` )
 			.join( '|' );
 		const bounds = {

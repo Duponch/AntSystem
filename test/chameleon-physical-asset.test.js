@@ -27,6 +27,11 @@ const TYPE_COMPONENTS = Object.freeze( {
 
 const assetUrl = new URL( '../public/assets/ChameleonPhysical.glb', import.meta.url );
 const assetBytes = readFileSync( assetUrl );
+const EXPECTED_SOURCE_VERTICES = 25_002;
+const EXPECTED_SOURCE_TRIANGLES = 50_000;
+const EXPECTED_ORIGINAL_TAIL_VERTICES = 7_206;
+const EXPECTED_SOURCE_MIN = Object.freeze( [ -0.5564488172531128, -0.5407788157463074, -0.39481300115585327 ] );
+const EXPECTED_SOURCE_MAX = Object.freeze( [ 0.4548959732055664, 0.39516758918762207, 0.39570799469947815 ] );
 
 function parseGlb( bytes ) {
 
@@ -144,26 +149,30 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.ok( assetBytes.length <= 12 * 1024 * 1024, 'rig asset exceeds its performance budget' );
 
 	const { gltf, binary } = parseGlb( assetBytes );
-	assert.equal( gltf.meshes?.length, 2, 'body and neutral tail must remain separate meshes' );
-	assert.equal( gltf.skins?.length, 1, 'both meshes must share exactly one skin' );
+	assert.equal( gltf.meshes?.length, 1, 'the exact original geometry must remain one closed render mesh' );
+	assert.equal( gltf.skins?.length, 1, 'the exact original mesh must use one shared skin' );
 
 	const skinnedMeshNodes = gltf.nodes
 		.map( ( node, index ) => ( { ...node, index } ) )
 		.filter( ( node ) => node.mesh !== undefined );
-	assert.equal( skinnedMeshNodes.length, 2 );
-	assert.deepEqual(
-		new Set( skinnedMeshNodes.map( ( node ) => node.name ) ),
-		new Set( [ 'Chameleon_Physics_Body', 'Chameleon_Physics_Tail' ] ),
-	);
-	for ( const node of skinnedMeshNodes ) {
-
-		assert.equal( node.skin, 0, `${ node.name } must reference the shared rig skin` );
-		assert.equal( node.extras?.physics_ready, true );
-
-	}
+	assert.equal( skinnedMeshNodes.length, 1 );
+	const meshNode = skinnedMeshNodes[ 0 ];
+	assert.equal( meshNode.name, 'Chameleon_Physics_Body' );
+	assert.equal( meshNode.skin, 0, 'the original mesh must reference the rig skin' );
+	assert.equal( meshNode.extras?.physics_ready, true );
+	assert.equal( meshNode.extras?.mesh_contract_version, '3.0.0' );
+	assert.equal( meshNode.extras?.source_object, 'Chameleon_Imported_Source' );
+	assert.equal( meshNode.extras?.exact_source_geometry, true );
+	assert.equal( meshNode.extras?.source_vertex_count, EXPECTED_SOURCE_VERTICES );
+	assert.equal( meshNode.extras?.source_polygon_count, EXPECTED_SOURCE_TRIANGLES );
+	assert.equal( meshNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
+	assert.equal( meshNode.extras?.tail_deformation_mode, 'rigid_pelvis' );
+	assert.equal( meshNode.extras?.tail_physics_dofs, 0 );
+	assert.equal( meshNode.extras?.origin_normalized, true );
+	assert.deepEqual( meshNode.extras?.origin_shift, [ 0, 0, 6.119999885559082 ] );
 
 	const primitives = gltf.meshes.flatMap( ( mesh ) => mesh.primitives ?? [] );
-	assert.equal( primitives.length, 2, 'asset must contain exactly two skinned primitives' );
+	assert.equal( primitives.length, 1, 'asset must contain exactly one skinned primitive' );
 
 	const globalMin = [ Infinity, Infinity, Infinity ];
 	const globalMax = [ - Infinity, - Infinity, - Infinity ];
@@ -185,6 +194,10 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 		const indices = createAccessorReader( gltf, binary, primitive.indices );
 		assert.equal( positions.accessor.type, 'VEC3' );
 		assert.equal( positions.accessor.componentType, 5126 );
+		assert.ok( positions.accessor.count >= EXPECTED_SOURCE_VERTICES,
+			'hard-normal splits may duplicate source vertices but may not discard them' );
+		assert.ok( positions.accessor.count <= EXPECTED_SOURCE_TRIANGLES * 3,
+			'the exported primitive exceeds one vertex per triangle corner' );
 		assert.equal( normals.accessor.type, 'VEC3' );
 		assert.equal( normals.accessor.componentType, 5126 );
 		assert.equal( normals.accessor.count, positions.accessor.count );
@@ -225,24 +238,27 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 
 	}
 
-	assert.ok( triangleCount >= 20_000 && triangleCount <= 80_000,
-		'mesh detail falls outside the intended visual/performance envelope' );
+	assert.equal( triangleCount, EXPECTED_SOURCE_TRIANGLES,
+		'the preserved source must retain its exact 50k-triangle topology' );
+	for ( let lane = 0; lane < 3; lane ++ ) {
+
+		assert.ok( Math.abs( globalMin[ lane ] - EXPECTED_SOURCE_MIN[ lane ] ) < 1e-5,
+			`original source minimum changed on axis ${ lane }` );
+		assert.ok( Math.abs( globalMax[ lane ] - EXPECTED_SOURCE_MAX[ lane ] ) < 1e-5,
+			`original source maximum changed on axis ${ lane }` );
+
+	}
 	const span = globalMax.map( ( maximum, lane ) => maximum - globalMin[ lane ] );
-	assert.ok( globalMin[ 0 ] < - 0.4 && globalMax[ 0 ] > 1,
-		'head-to-neutral-tail extent is missing or incorrectly oriented' );
-	assert.ok( span[ 0 ] >= 1.5 && span[ 0 ] <= 3 );
-	assert.ok( span[ 1 ] >= 0.5 && span[ 1 ] <= 2 );
-	assert.ok( span[ 2 ] >= 0.5 && span[ 2 ] <= 2 );
-	assert.ok( globalMin.every( ( value ) => value > - 5 ) );
-	assert.ok( globalMax.every( ( value ) => value < 5 ) );
+	assert.ok( span.every( ( value ) => value >= 0.75 && value <= 1.1 ),
+		'the compact original silhouette, including its curled tail, must remain intact' );
 
 } );
 
-test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisfy the active-ragdoll contract', () => {
+test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisfy the hybrid-controller contract', () => {
 
 	const { gltf, binary } = parseGlb( assetBytes );
 	const skin = gltf.skins[ 0 ];
-	assert.ok( skin.joints.length >= 40, 'the physics rig needs at least 40 visual/deform joints' );
+	assert.equal( skin.joints.length, 43, 'the visual rig must retain its complete 43-joint hierarchy' );
 	assert.equal( new Set( skin.joints ).size, skin.joints.length, 'skin joints must be unique' );
 	assert.ok( skin.joints.every( ( index ) => Number.isInteger( index ) && gltf.nodes[ index ] ) );
 
@@ -301,8 +317,10 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		Array.from( { length: 12 }, ( _, index ) => `tail_${ String( index + 1 ).padStart( 2, '0' ) }` ),
 	);
 
-	const usedWithPositiveWeight = new Set();
+	const skinJointNames = skin.joints.map( ( nodeIndex ) => gltf.nodes[ nodeIndex ].name );
+	const usedBoneNames = new Set();
 	let multiInfluenceVertices = 0;
+	let rigidPelvisVertices = 0;
 	for ( const primitive of gltf.meshes.flatMap( ( mesh ) => mesh.primitives ) ) {
 
 		const joints = createAccessorReader( gltf, binary, primitive.attributes.JOINTS_0 );
@@ -317,6 +335,8 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 
 			let sum = 0;
 			let positiveInfluences = 0;
+			let soleBoneName = null;
+			let soleWeight = 0;
 			for ( let lane = 0; lane < 4; lane ++ ) {
 
 				const joint = joints.read( vertex, lane );
@@ -327,7 +347,9 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 				if ( weight > 1e-6 ) {
 
 					positiveInfluences ++;
-					usedWithPositiveWeight.add( joint );
+					soleBoneName = skinJointNames[ joint ];
+					soleWeight = weight;
+					usedBoneNames.add( soleBoneName );
 
 				}
 
@@ -335,29 +357,48 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 			assert.ok( positiveInfluences >= 1 && positiveInfluences <= 4 );
 			assert.ok( Math.abs( sum - 1 ) < 2e-4, `vertex ${ vertex } weights sum to ${ sum }` );
 			if ( positiveInfluences > 1 ) multiInfluenceVertices ++;
+			if ( positiveInfluences === 1 && soleBoneName === 'pelvis' && Math.abs( soleWeight - 1 ) < 1e-6 ) {
+
+				rigidPelvisVertices ++;
+
+			}
 
 		}
 
 	}
-	assert.ok( multiInfluenceVertices > 100, 'rig must contain smoothly blended vertices' );
-	const rootSkinIndex = skin.joints.indexOf( nodeByName.get( 'root' ) );
-	const expectedWeightedJoints = new Set( skin.joints.map( ( _, index ) => index ) );
-	expectedWeightedJoints.delete( rootSkinIndex );
+	assert.ok( multiInfluenceVertices > 100, 'the body rig must retain smoothly blended vertices' );
+	assert.ok( rigidPelvisVertices >= EXPECTED_ORIGINAL_TAIL_VERTICES,
+		'the rigid original tail must contribute a substantial pelvis-only vertex set' );
+
+	const intentionallyUnweighted = new Set( [
+		'root',
+		...Array.from( { length: 9 }, ( _, index ) => `tail_${ String( index + 4 ).padStart( 2, '0' ) }` ),
+	] );
+	const expectedWeightedBoneNames = new Set(
+		skinJointNames.filter( ( name ) => ! intentionallyUnweighted.has( name ) ),
+	);
 	assert.deepEqual(
-		usedWithPositiveWeight,
-		expectedWeightedJoints,
-		'every deform joint, and only deform joints, must carry positive skin weight',
+		usedBoneNames,
+		expectedWeightedBoneNames,
+		'the rigid tail may not reintroduce weights on its distal visual-only bones',
 	);
 
 	const rigNodeIndex = nodeByName.get( 'Chameleon_Physics_Armature' );
 	assert.notEqual( rigNodeIndex, undefined, 'rig root node is missing' );
 	const rigNode = gltf.nodes[ rigNodeIndex ];
-	assert.match( rigNode.extras?.rig_version ?? '', /^\d+\.\d+\.\d+$/u );
+	assert.equal( rigNode.extras?.rig_version, '3.0.0' );
 	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail=\+X.*glTF Y-up/u );
-	assert.equal( rigNode.extras?.visual_bones, skin.joints.length );
-	assert.ok( rigNode.extras?.physics_proxy_bodies >= 20 );
+	assert.equal( rigNode.extras?.visual_bones, 43 );
+	assert.equal( rigNode.extras?.physics_proxy_bodies, 1 );
+	assert.equal( rigNode.extras?.runtime_controller, 'hybrid-root-ik' );
+	assert.equal( rigNode.extras?.render_mesh_count, 1 );
+	assert.equal( rigNode.extras?.exact_source_geometry, true );
+	assert.equal( rigNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
+	assert.equal( rigNode.extras?.tail_deformation_mode, 'rigid_pelvis' );
+	assert.equal( rigNode.extras?.tail_physics_dofs, 0 );
 	assert.ok( rigNode.children.includes( nodeByName.get( 'root' ) ) );
 	assert.ok( rigNode.children.includes( nodeByName.get( 'Chameleon_Physics_Body' ) ) );
-	assert.ok( rigNode.children.includes( nodeByName.get( 'Chameleon_Physics_Tail' ) ) );
+	assert.equal( nodeByName.has( 'Chameleon_Physics_Tail' ), false,
+		'the procedural straight tail must not leak into the hybrid export' );
 
 } );

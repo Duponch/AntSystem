@@ -3,7 +3,7 @@ import * as THREE from 'three/webgpu';
 import './lab.css';
 import { createPhysicsWorld } from './physics-world.js';
 import { createLabEnvironment } from './environment.js';
-import { createActiveRagdoll } from './active-ragdoll.js';
+import { createHybridChameleon } from './hybrid-chameleon.js';
 import {
 	AutonomousExplorer,
 	cameraRelativeMovement,
@@ -108,7 +108,7 @@ async function main() {
 	} );
 	physics.surfaceByCollider = new Map();
 	const environment = createLabEnvironment( { scene, physics } );
-	const ragdoll = await createActiveRagdoll( { scene, physics } );
+	const ragdoll = await createHybridChameleon( { scene, physics } );
 	const input = new LabInputController( window );
 	const explorer = new AutonomousExplorer();
 	const cameraRig = new ThirdPersonCamera( {

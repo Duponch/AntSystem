@@ -5,173 +5,35 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { createActiveRagdoll, CHAMELEON_GROUP } from '../src/chameleon-lab/active-ragdoll.js';
+import { createHybridChameleon } from '../src/chameleon-lab/hybrid-chameleon.js';
 import {
-	anatomicalSwingLimit,
-	chameleonCollisionGroups,
-	idleHoldControllerGains,
-	isExternalGripRayHit,
-	muscleControllerGains,
-	TAIL_HINGE_LIMIT,
-	tailJointPolicy,
-} from '../src/chameleon-lab/active-ragdoll-model.js';
+	clampJointAngle,
+	criticalDampingGains,
+	HYBRID_FOOT_COUNT,
+	HYBRID_JOINT_LIMITS,
+	HYBRID_PHYSICS_BODY_COUNT,
+	stableRootForce,
+	supportFrameFromContacts,
+} from '../src/chameleon-lab/hybrid-controller-model.js';
 import { createPhysicsWorld } from '../src/chameleon-lab/physics-world.js';
+
+const ASSET_PATH = fileURLToPath(
+	new URL( '../public/assets/ChameleonPhysical.glb', import.meta.url ),
+);
+let physicalAssetBytes = null;
 
 async function loadPhysicalScene() {
 
-	const path = fileURLToPath( new URL( '../public/assets/ChameleonPhysical.glb', import.meta.url ) );
-	const bytes = await readFile( path );
-	const data = bytes.buffer.slice( bytes.byteOffset, bytes.byteOffset + bytes.byteLength );
-	return ( await new GLTFLoader().parseAsync( data, '' ) ).scene;
-
-}
-
-function worldAnchor( body, local ) {
-
-	const rotation = body.rotation();
-	const translation = body.translation();
-	return new THREE.Vector3( local.x, local.y, local.z )
-		.applyQuaternion( new THREE.Quaternion( rotation.x, rotation.y, rotation.z, rotation.w ) )
-		.add( new THREE.Vector3( translation.x, translation.y, translation.z ) );
-
-}
-
-async function simulateTail( renderHz, seconds = 6 ) {
-
-	const physics = await createPhysicsWorld( {
-		gravity: { x: 0, y: -9.81, z: 0 },
-		fixedDt: 1 / 120,
-		maxSubsteps: 4,
-	} );
-	const { RAPIER, world } = physics;
-	const segmentLength = 0.12;
-	const half = segmentLength * 0.5;
-	const root = world.createRigidBody(
-		RAPIER.RigidBodyDesc.fixed().setTranslation( 0, 2, 0 ),
+	physicalAssetBytes ??= await readFile( ASSET_PATH );
+	const data = physicalAssetBytes.buffer.slice(
+		physicalAssetBytes.byteOffset,
+		physicalAssetBytes.byteOffset + physicalAssetBytes.byteLength,
 	);
-	const bodies = [];
-	const joints = [];
-	let parent = root;
-	for ( let index = 1; index <= 12; index ++ ) {
-
-		const body = world.createRigidBody(
-			RAPIER.RigidBodyDesc.dynamic()
-				.setTranslation( 0, 2 - segmentLength * index, 0 )
-				.setLinearDamping( 0.18 )
-				.setAngularDamping( 0.55 )
-				.setCanSleep( false ),
-		);
-		world.createCollider(
-			RAPIER.ColliderDesc.capsule( half - 0.012, 0.012 )
-				.setMass( 0.02 )
-				.setCollisionGroups( ( 0x0002 << 16 ) | 0x0001 ),
-			body,
-		);
-		const policy = tailJointPolicy( index );
-		const data = policy.kind === 'fixed'
-			? RAPIER.JointData.fixed(
-				{ x: 0, y: -half, z: 0 },
-				{ x: 0, y: 0, z: 0, w: 1 },
-				{ x: 0, y: half, z: 0 },
-				{ x: 0, y: 0, z: 0, w: 1 },
-			)
-			: RAPIER.JointData.revolute(
-				{ x: 0, y: -half, z: 0 },
-				{ x: 0, y: half, z: 0 },
-				policy.axis,
-			);
-		const joint = world.createImpulseJoint( data, parent, body, true );
-		joint.setContactsEnabled( false );
-		if ( policy.kind === 'hinge' ) joint.setLimits( -policy.limit, policy.limit );
-		bodies.push( body );
-		joints.push( { joint, parent, child: body, policy } );
-		parent = body;
-
-	}
-	bodies.at( -1 ).applyImpulse( { x: 0.08, y: 0, z: 0.045 }, true );
-	const frames = Math.round( renderHz * seconds );
-	for ( let frame = 0; frame < frames; frame ++ ) physics.step( 1 / renderHz );
-	const rootPosition = root.translation();
-	const tipPosition = bodies.at( -1 ).translation();
-	let maximumAnchorGap = 0;
-	for ( const item of joints ) {
-
-		const parentPoint = worldAnchor( item.parent, { x: 0, y: -half, z: 0 } );
-		const childPoint = worldAnchor( item.child, { x: 0, y: half, z: 0 } );
-		maximumAnchorGap = Math.max( maximumAnchorGap, parentPoint.distanceTo( childPoint ) );
-
-	}
-	const result = {
-		tip: new THREE.Vector3( tipPosition.x, tipPosition.y, tipPosition.z ),
-		root: new THREE.Vector3( rootPosition.x, rootPosition.y, rootPosition.z ),
-		maximumAnchorGap,
-		steps: physics.stats.totalSteps,
-		invalidBodies: physics.stats.invalidBodies,
-	};
-	physics.dispose();
-	return result;
+	return ( await new GLTFLoader().parseAsync( data.slice( 0 ), '' ) ).scene;
 
 }
 
-test( 'CHAMELEON-LAB-RAGDOLL-001 tail policy alternates bounded hinges and rigid pairs', () => {
-
-	const policies = Array.from( { length: 12 }, ( _, index ) => tailJointPolicy( index + 1 ) );
-	assert.deepEqual(
-		policies.filter( ( policy ) => policy.kind === 'hinge' ).map( ( policy ) => policy.index ),
-		[ 3, 5, 7, 9, 11 ],
-	);
-	assert.ok( policies.every( ( policy ) => policy.limit === 0 || policy.limit === TAIL_HINGE_LIMIT ) );
-	assert.ok( policies.every( ( policy ) => Math.hypot( policy.axis.x, policy.axis.y, policy.axis.z ) === 1 ) );
-
-} );
-
-test( 'CHAMELEON-LAB-RAGDOLL-002 anatomical limits and inertial gains stay finite and scale predictably', () => {
-
-	assert.ok( anatomicalSwingLimit( 'spine_01' ) < anatomicalSwingLimit( 'front_upperL' ) );
-	assert.ok( anatomicalSwingLimit( 'front_upperL' ) < anatomicalSwingLimit( 'front_lowerL' ) );
-	const base = muscleControllerGains( { inertia: 0.002, frequency: 24 } );
-	const doubled = muscleControllerGains( { inertia: 0.004, frequency: 24 } );
-	const dragged = muscleControllerGains( { inertia: 0.002, frequency: 24, dragScale: 0.28 } );
-	assert.equal( doubled.stiffness, base.stiffness * 2 );
-	assert.equal( doubled.maximum, base.maximum * 2 );
-	assert.equal( dragged.stiffness, base.stiffness * 0.28 );
-	assert.ok( Object.values( base ).every( Number.isFinite ) );
-
-} );
-
-test( 'CHAMELEON-LAB-RAGDOLL-003 idle hold gains scale with total body mass and stay bounded', () => {
-
-	const light = idleHoldControllerGains( { mass: 0.8 } );
-	const heavy = idleHoldControllerGains( { mass: 1.6 } );
-	assert.equal( heavy.stiffness, light.stiffness * 2 );
-	assert.equal( heavy.damping, light.damping * 2 );
-	assert.equal( heavy.maximum, light.maximum * 2 );
-	assert.throws( () => idleHoldControllerGains( { mass: 0 } ), /mass/ );
-
-} );
-
-test( 'CHAMELEON-LAB-RAGDOLL-004 physical tail cannot collapse and keeps joint anchors coincident', async () => {
-
-	const result = await simulateTail( 60 );
-	assert.equal( result.invalidBodies, 0 );
-	assert.equal( result.steps, 720 );
-	assert.ok( result.tip.distanceTo( result.root ) > 1.05 );
-	assert.ok( result.maximumAnchorGap < 0.003, `anchor gap ${ result.maximumAnchorGap }` );
-
-} );
-
-test( 'CHAMELEON-LAB-RAGDOLL-005 fixed simulation is render-rate invariant at 60 and 240 Hz', async () => {
-
-	const at60 = await simulateTail( 60, 4 );
-	const at240 = await simulateTail( 240, 4 );
-	assert.equal( at60.steps, 480 );
-	assert.equal( at240.steps, 480 );
-	assert.ok( at60.tip.distanceTo( at240.tip ) < 1e-6 );
-	assert.ok( Math.abs( at60.maximumAnchorGap - at240.maximumAnchorGap ) < 1e-7 );
-
-} );
-
-test( 'CHAMELEON-LAB-RAGDOLL-006 complete 33-body rig remains finite, joined and self-collision ready', async () => {
+async function createGroundedHybrid() {
 
 	const physics = await createPhysicsWorld( {
 		gravity: { x: 0, y: -9.81, z: 0 },
@@ -184,7 +46,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-006 complete 33-body rig remains finite, joined and
 		RAPIER.RigidBodyDesc.fixed().setTranslation( 0, -0.2, 0 ),
 	);
 	const groundCollider = world.createCollider(
-		RAPIER.ColliderDesc.cuboid( 4, 0.2, 4 )
+		RAPIER.ColliderDesc.cuboid( 6, 0.2, 6 )
 			.setFriction( 0.92 )
 			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
 		groundBody,
@@ -194,55 +56,344 @@ test( 'CHAMELEON-LAB-RAGDOLL-006 complete 33-body rig remains finite, joined and
 		clawEligible: true,
 		gripStrengthScale: 1,
 	} ) );
-
-	const ragdoll = await createActiveRagdoll( {
+	const chameleon = await createHybridChameleon( {
 		scene: new THREE.Scene(),
 		physics,
 		assetScene: await loadPhysicalScene(),
 	} );
-	assert.equal( ragdoll.parts.length, 33 );
-	assert.equal( CHAMELEON_GROUP, chameleonCollisionGroups() );
-	assert.ok( ragdoll.parts.every( ( part ) => part.collider.collisionGroups() === CHAMELEON_GROUP ) );
-	assert.ok( ragdoll.parts.filter( ( part ) => part.parent ).every( ( part ) => part.joint.contactsEnabled() === false ) );
+	return {
+		physics,
+		chameleon,
+		dispose() {
 
-	ragdoll.setCommand( { move: new THREE.Vector3( 0.35, 0, 0 ) } );
-	let peakContacts = 0;
-	let maximumAnchorGap = 0;
-	for ( let step = 0; step < 480; step ++ ) {
+			chameleon.dispose();
+			physics.dispose();
 
-		physics.step(
-			1 / 120,
-			( dt ) => ragdoll.beforeStep( dt ),
-			() => ragdoll.afterStep(),
+		},
+	};
+
+}
+
+function runFrames( fixture, renderHz, seconds, afterFixedStep = null ) {
+
+	const frames = Math.round( renderHz * seconds );
+	let fixedSteps = 0;
+	for ( let frame = 0; frame < frames; frame ++ ) {
+
+		const result = fixture.physics.step(
+			1 / renderHz,
+			( dt ) => fixture.chameleon.beforeStep( dt ),
+			( dt ) => {
+
+				fixture.chameleon.afterStep();
+				fixedSteps ++;
+				afterFixedStep?.( dt, fixedSteps );
+
+			},
 		);
-		peakContacts = Math.max( peakContacts, ragdoll.contactCount );
-		for ( const part of ragdoll.parts ) {
+		fixture.chameleon.syncVisual( result.alpha );
 
-			const translation = part.body.translation();
-			const rotation = part.body.rotation();
-			assert.ok( [ translation.x, translation.y, translation.z, rotation.x, rotation.y, rotation.z, rotation.w ].every( Number.isFinite ) );
-			if ( ! part.parent ) continue;
-			const parentAnchor = worldAnchor( part.parent.body, part.parentAnchor );
-			const childAnchor = worldAnchor( part.body, part.childAnchor );
-			maximumAnchorGap = Math.max( maximumAnchorGap, parentAnchor.distanceTo( childAnchor ) );
+	}
+	return fixedSteps;
+
+}
+
+function bodyState( body ) {
+
+	const position = body.translation();
+	const rotation = body.rotation();
+	const linear = body.linvel();
+	const angular = body.angvel();
+	return [
+		position.x, position.y, position.z,
+		rotation.x, rotation.y, rotation.z, rotation.w,
+		linear.x, linear.y, linear.z,
+		angular.x, angular.y, angular.z,
+	];
+
+}
+
+function assertFiniteHybrid( fixture ) {
+
+	const { chameleon, physics } = fixture;
+	assert.ok( bodyState( chameleon.pelvis.body ).every( Number.isFinite ) );
+	assert.ok( [
+		chameleon.supportNormal.x,
+		chameleon.supportNormal.y,
+		chameleon.supportNormal.z,
+	].every( Number.isFinite ) );
+	assert.ok( chameleon.contactCount >= 0 && chameleon.contactCount <= HYBRID_FOOT_COUNT );
+	for ( const foot of chameleon.feet ) {
+
+		assert.ok( [ foot.normal.x, foot.normal.y, foot.normal.z ].every( Number.isFinite ) );
+		if ( foot.anchor )
+			assert.ok( [ foot.anchor.x, foot.anchor.y, foot.anchor.z ].every( Number.isFinite ) );
+
+	}
+	chameleon.model.traverse( ( object ) => {
+
+		if ( ! object.isBone ) return;
+		assert.ok( [
+			object.position.x, object.position.y, object.position.z,
+			object.quaternion.x, object.quaternion.y,
+			object.quaternion.z, object.quaternion.w,
+			object.scale.x, object.scale.y, object.scale.z,
+		].every( Number.isFinite ), `non-finite bone transform: ${ object.name }` );
+
+	} );
+	assert.equal( physics.stats.invalidBodies, 0 );
+
+}
+
+function jointRole( leg, joint ) {
+
+	if ( joint === leg.girdle ) return 'girdle';
+	if ( joint === leg.upper ) return 'upper';
+	if ( joint === leg.lower ) return 'lower';
+	return 'palm';
+
+}
+
+function assertAnatomicalPose( chameleon, tolerance = 1e-5 ) {
+
+	for ( const leg of chameleon.rig.legs ) {
+
+		for ( const [ joint, rest ] of leg.restQuaternions ) {
+
+			const role = jointRole( leg, joint );
+			const deviation = rest.angleTo( joint.quaternion );
+			assert.ok(
+				deviation <= HYBRID_JOINT_LIMITS[ role ] + tolerance,
+				`${ joint.name } exceeds ${ role } limit: ${ deviation }`,
+			);
 
 		}
 
 	}
-	assert.equal( physics.stats.invalidBodies, 0 );
-	assert.ok( peakContacts >= 1 );
-	assert.ok( maximumAnchorGap < 0.035, 'full-body anchor gap ' + maximumAnchorGap );
 
-	ragdoll.dispose();
-	physics.dispose();
+}
+
+function vectorMagnitude( value ) {
+
+	return Math.hypot( value.x, value.y, value.z );
+
+}
+
+test( 'CHAMELEON-LAB-RAGDOLL-001 hybrid architecture owns one dynamic root and four IK supports', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon, physics } = fixture;
+	assert.equal( chameleon.architecture, 'hybrid-root-ik' );
+	assert.equal( HYBRID_PHYSICS_BODY_COUNT, 1 );
+	assert.equal( HYBRID_FOOT_COUNT, 4 );
+	assert.equal( chameleon.parts.length, HYBRID_PHYSICS_BODY_COUNT );
+	assert.equal( chameleon.feet.length, HYBRID_FOOT_COUNT );
+	assert.equal( chameleon.maxContactCount, HYBRID_FOOT_COUNT );
+	assert.equal( physics.stats.registeredBodies, HYBRID_PHYSICS_BODY_COUNT );
+	assert.equal( chameleon.pelvis.body.isDynamic(), true );
+	assert.equal( chameleon.parts[ 0 ].colliders.length, 2 );
+	assert.ok( chameleon.feet.every( ( foot ) => foot.part.body === chameleon.pelvis.body ) );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
 
 } );
 
-test( 'CHAMELEON-LAB-RAGDOLL-007 grip rays reject embedded exits and accept external faces', () => {
+test( 'CHAMELEON-LAB-RAGDOLL-002 controller gains and anatomical limits are finite and bounded', () => {
 
-	const direction = { x: 0, y: -1, z: 0 };
-	assert.equal( isExternalGripRayHit( 0, { x: 0, y: 1, z: 0 }, direction ), false );
-	assert.equal( isExternalGripRayHit( 0.04, { x: 0, y: -1, z: 0 }, direction ), false );
-	assert.equal( isExternalGripRayHit( 0.04, { x: 0, y: 1, z: 0 }, direction ), true );
+	assert.deepEqual( Object.keys( HYBRID_JOINT_LIMITS ), [ 'girdle', 'upper', 'lower', 'palm' ] );
+	assert.ok( Object.values( HYBRID_JOINT_LIMITS ).every(
+		( value ) => Number.isFinite( value ) && value > 0 && value < Math.PI * 0.5,
+	) );
+	assert.equal( clampJointAngle( 4, 0.7 ), 0.7 );
+	assert.equal( clampJointAngle( -4, 0.7 ), -0.7 );
+
+	const light = criticalDampingGains( { mass: 0.5, frequency: 6 } );
+	const heavy = criticalDampingGains( { mass: 1, frequency: 6 } );
+	assert.equal( heavy.stiffness, light.stiffness * 2 );
+	assert.equal( heavy.damping, light.damping * 2 );
+	assert.equal( heavy.maximum, light.maximum * 2 );
+
+	const force = stableRootForce( {
+		error: { x: 100, y: -100, z: 50 },
+		velocity: { x: -20, y: 10, z: 5 },
+		mass: 1,
+		frequency: 8,
+		maximumAcceleration: 24,
+	} );
+	assert.ok( Object.values( force ).every( Number.isFinite ) );
+	assert.ok( Math.hypot( force.x, force.y, force.z ) <= 24 + 1e-10 );
+
+	const positions = new Float32Array( [
+		-1, 0, -1, 1, 0, -1,
+		-1, 0, 1, 1, 0, 1,
+	] );
+	const normals = new Float32Array( [
+		0, 1, 0, 0, 1, 0,
+		0, 1, 0, 0, 1, 0,
+	] );
+	const support = supportFrameFromContacts(
+		positions,
+		normals,
+		new Uint8Array( [ 1, 1, 1, 1 ] ),
+	);
+	assert.equal( support.count, HYBRID_FOOT_COUNT );
+	assert.deepEqual( support.centroid, { x: 0, y: 0, z: 0 } );
+	assert.deepEqual( support.normal, { x: 0, y: 1, z: 0 } );
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-003 procedural IK never exceeds anatomical joint limits', async () => {
+
+	const fixture = await createGroundedHybrid();
+	fixture.chameleon.setCommand( { move: new THREE.Vector3( 0.62, 0, -0.28 ) } );
+	runFrames( fixture, 120, 4, () => {
+
+		fixture.chameleon.syncVisual( 1 );
+		assertAnatomicalPose( fixture.chameleon );
+		assertFiniteHybrid( fixture );
+
+	} );
+	assert.equal( fixture.physics.stats.totalSteps, 480 );
+	assert.ok( fixture.chameleon.contactCount >= 2 );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-004 idle hybrid remains stable during a twelve-second soak', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const spawn = new THREE.Vector3( 0, 0.3, 0.75 );
+	let lateLinearSpeed = 0;
+	let lateAngularSpeed = 0;
+	runFrames( fixture, 120, 12, ( _, fixedStep ) => {
+
+		assertFiniteHybrid( fixture );
+		if ( fixedStep <= 960 ) return;
+		lateLinearSpeed = Math.max(
+			lateLinearSpeed,
+			vectorMagnitude( fixture.chameleon.pelvis.body.linvel() ),
+		);
+		lateAngularSpeed = Math.max(
+			lateAngularSpeed,
+			vectorMagnitude( fixture.chameleon.pelvis.body.angvel() ),
+		);
+
+	} );
+	const position = fixture.chameleon.pelvis.body.translation();
+	assert.ok(
+		spawn.distanceTo( new THREE.Vector3( position.x, position.y, position.z ) ) < 0.02,
+		`idle root drifted to ${ JSON.stringify( position ) }`,
+	);
+	assert.ok( lateLinearSpeed < 0.002, `late linear speed ${ lateLinearSpeed }` );
+	assert.ok( lateAngularSpeed < 0.01, `late angular speed ${ lateAngularSpeed }` );
+	assert.equal( fixture.chameleon.contactCount, HYBRID_FOOT_COUNT );
+	assertAnatomicalPose( fixture.chameleon );
+	assert.equal( fixture.physics.stats.totalSteps, 1_440 );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-005 root recovers after an impulse while mouse control is released', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const root = fixture.chameleon.pelvis.body;
+	runFrames( fixture, 120, 2 );
+	fixture.chameleon.setDragging( true );
+	root.applyImpulse( { x: 0.65, y: 0.95, z: 0.3 }, true );
+	root.applyTorqueImpulse( { x: 0.08, y: 0.14, z: 0.22 }, true );
+	runFrames( fixture, 120, 0.4 );
+	const displaced = root.translation();
+	assert.ok(
+		new THREE.Vector3( displaced.x, displaced.y, displaced.z )
+			.distanceTo( new THREE.Vector3( 0, 0.3, 0.75 ) ) > 0.15,
+		'the disturbance must actually displace the body',
+	);
+
+	fixture.chameleon.setDragging( false );
+	let recoveryPeakAngularSpeed = 0;
+	runFrames( fixture, 120, 10, () => {
+
+		assertFiniteHybrid( fixture );
+		recoveryPeakAngularSpeed = Math.max(
+			recoveryPeakAngularSpeed,
+			vectorMagnitude( root.angvel() ),
+		);
+
+	} );
+	assert.ok( recoveryPeakAngularSpeed < 12, `angular spike ${ recoveryPeakAngularSpeed }` );
+	assert.ok( vectorMagnitude( root.linvel() ) < 0.01 );
+	assert.ok( vectorMagnitude( root.angvel() ) < 0.02 );
+	assert.ok( Math.abs( root.translation().y - 0.3 ) < 0.03 );
+	assert.ok( fixture.chameleon.contactCount >= 3 );
+	assertAnatomicalPose( fixture.chameleon );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-006 fixed-step outcome is identical at 60 and 240 render Hz', async () => {
+
+	const slow = await createGroundedHybrid();
+	const fast = await createGroundedHybrid();
+	const move = new THREE.Vector3( 0.55, 0, -0.2 );
+	slow.chameleon.setCommand( { move } );
+	fast.chameleon.setCommand( { move } );
+	const slowSteps = runFrames( slow, 60, 4 );
+	const fastSteps = runFrames( fast, 240, 4 );
+	assert.equal( slowSteps, 480 );
+	assert.equal( fastSteps, 480 );
+	assert.equal( slow.physics.stats.totalSteps, 480 );
+	assert.equal( fast.physics.stats.totalSteps, 480 );
+
+	const slowState = bodyState( slow.chameleon.pelvis.body );
+	const fastState = bodyState( fast.chameleon.pelvis.body );
+	for ( let index = 0; index < slowState.length; index ++ ) {
+
+		assert.ok(
+			Math.abs( slowState[ index ] - fastState[ index ] ) < 1e-7,
+			`state[${ index }]: ${ slowState[ index ] } != ${ fastState[ index ] }`,
+		);
+
+	}
+	assert.equal( slow.chameleon.contactCount, fast.chameleon.contactCount );
+	assertFiniteHybrid( slow );
+	assertFiniteHybrid( fast );
+	slow.dispose();
+	fast.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-007 repeated control and reset cycles never create NaN', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const root = fixture.chameleon.pelvis.body;
+	for ( let cycle = 0; cycle < 4; cycle ++ ) {
+
+		fixture.chameleon.setDragging( true );
+		root.applyImpulse( {
+			x: cycle % 2 === 0 ? 0.22 : -0.22,
+			y: 0.32,
+			z: 0.08 * ( cycle - 1.5 ),
+		}, true );
+		root.applyTorqueImpulse( { x: 0.025, y: -0.035, z: 0.04 }, true );
+		runFrames( fixture, 120, 0.2, () => assertFiniteHybrid( fixture ) );
+		fixture.chameleon.setDragging( false );
+		fixture.chameleon.setCommand( {
+			move: new THREE.Vector3( cycle % 2 === 0 ? 0.4 : -0.4, 0, 0.18 ),
+		} );
+		runFrames( fixture, 120, 1.8, () => {
+
+			assertFiniteHybrid( fixture );
+			fixture.chameleon.syncVisual( 1 );
+			assertAnatomicalPose( fixture.chameleon );
+
+		} );
+
+	}
+	fixture.chameleon.reset();
+	runFrames( fixture, 120, 2, () => assertFiniteHybrid( fixture ) );
+	assert.ok( bodyState( root ).every( Number.isFinite ) );
+	assert.equal( fixture.physics.stats.invalidBodies, 0 );
+	assert.ok( fixture.chameleon.contactCount >= 3 );
+	fixture.dispose();
 
 } );
