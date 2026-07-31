@@ -7,6 +7,7 @@ import {
 	AutonomousExplorer,
 	cameraRelativeMovement,
 	movementAxesFromKeys,
+	ThirdPersonCamera,
 } from '../src/chameleon-lab/third-person-controller.js';
 
 const EPSILON = 1e-10;
@@ -179,5 +180,104 @@ test( 'CHAMELEON-LAB-CONTROLLER-006 autonomous exploration steers back inside wo
 		assert.ok( Math.abs( movement.length() - 0.72 ) <= EPSILON );
 
 	}
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-007 autonomous watchdog reroutes only after sustained lack of progress', () => {
+
+	const floor = new THREE.Vector3( 0, 1, 0 );
+	const staticPosition = new THREE.Vector3();
+	const stuck = new AutonomousExplorer( 0x9a7f );
+	stuck.heading.set( 1, 0, 0 );
+	stuck.timeToChange = 100;
+	stuck.resetProgress( staticPosition );
+	for ( let step = 0; step < 211; step ++ )
+		stuck.update( 1 / 120, floor, staticPosition );
+	assert.ok( stuck.heading.distanceToSquared( new THREE.Vector3( 1, 0, 0 ) ) > 0.01 );
+	assert.ok( stuck.timeToChange < 3 );
+
+	const moving = new AutonomousExplorer( 0x9a7f );
+	const movingPosition = new THREE.Vector3();
+	moving.heading.set( 1, 0, 0 );
+	moving.timeToChange = 100;
+	moving.resetProgress( movingPosition );
+	for ( let step = 0; step < 211; step ++ ) {
+
+		movingPosition.x += 0.001;
+		moving.update( 1 / 120, floor, movingPosition );
+
+	}
+	assert.ok( moving.heading.distanceToSquared( new THREE.Vector3( 1, 0, 0 ) ) <= EPSILON );
+	assert.ok( moving.timeToChange > 98 );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-008 pointer cancellation always releases camera rotation', () => {
+
+	class FakeCanvas {
+
+		constructor() {
+
+			this.listeners = new Map();
+			this.captured = null;
+
+		}
+
+		addEventListener( type, listener ) {
+
+			this.listeners.set( type, listener );
+
+		}
+
+		removeEventListener( type, listener ) {
+
+			if ( this.listeners.get( type ) === listener ) this.listeners.delete( type );
+
+		}
+
+		setPointerCapture( pointerId ) {
+
+			this.captured = pointerId;
+
+		}
+
+		hasPointerCapture( pointerId ) {
+
+			return this.captured === pointerId;
+
+		}
+
+		releasePointerCapture( pointerId ) {
+
+			if ( this.captured === pointerId ) this.captured = null;
+
+		}
+
+		emit( type, event ) {
+
+			this.listeners.get( type )( event );
+
+		}
+
+	}
+
+	const canvas = new FakeCanvas();
+	const controller = new ThirdPersonCamera( {
+		camera: new THREE.PerspectiveCamera(),
+		domElement: canvas,
+		physics: {},
+		targetProvider: () => new THREE.Vector3(),
+	} );
+	canvas.emit( 'pointerdown', { button: 2, clientX: 20, clientY: 30, pointerId: 7 } );
+	assert.equal( controller.rotating, true );
+	canvas.emit( 'pointercancel', { button: -1, pointerId: 7 } );
+	assert.equal( controller.rotating, false );
+	assert.equal( canvas.captured, null );
+
+	canvas.emit( 'pointerdown', { button: 2, clientX: 20, clientY: 30, pointerId: 8 } );
+	canvas.emit( 'lostpointercapture', { pointerId: 8 } );
+	assert.equal( controller.rotating, false );
+	controller.dispose();
+	assert.equal( canvas.listeners.size, 0 );
 
 } );

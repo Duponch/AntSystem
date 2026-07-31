@@ -365,6 +365,7 @@ const CONTRACTS = Object.freeze( {
 		document: 'doc/technique/cameleons.md',
 		guides: [ 'doc/guide/cameleons.md', 'doc/guide/laboratoire-cameleon.md' ],
 		sources: [
+			'index.html',
 			'blender/chameleon_physics_rig.blend',
 			'public/assets/ChameleonPhysical.glb',
 			'src/app-entry.js',
@@ -373,6 +374,7 @@ const CONTRACTS = Object.freeze( {
 			'src/chameleon-lab/active-ragdoll.js',
 			'src/chameleon-lab/environment.js',
 			'src/chameleon-lab/grab-controller.js',
+			'src/chameleon-lab/lab.css',
 			'src/chameleon-lab/lab-ui.js',
 			'src/chameleon-lab/main.js',
 			'src/chameleon-lab/physics-world.js',
@@ -420,6 +422,32 @@ const CONTRACTS = Object.freeze( {
 		],
 		runtimeTests: [],
 		evidence: [
+			'CHAMELEON-LAB-RAGDOLL-001',
+			'CHAMELEON-LAB-RAGDOLL-002',
+			'CHAMELEON-LAB-RAGDOLL-003',
+			'CHAMELEON-LAB-RAGDOLL-004',
+			'CHAMELEON-LAB-RAGDOLL-005',
+			'CHAMELEON-LAB-RAGDOLL-006',
+			'CHAMELEON-LAB-RAGDOLL-007',
+			'CHAMELEON-LAB-CONTROLLER-001',
+			'CHAMELEON-LAB-CONTROLLER-002',
+			'CHAMELEON-LAB-CONTROLLER-003',
+			'CHAMELEON-LAB-CONTROLLER-004',
+			'CHAMELEON-LAB-CONTROLLER-005',
+			'CHAMELEON-LAB-CONTROLLER-006',
+			'CHAMELEON-LAB-CONTROLLER-007',
+			'CHAMELEON-LAB-CONTROLLER-008',
+			'CHAMELEON-LAB-PHYSICS-001',
+			'CHAMELEON-LAB-PHYSICS-002',
+			'CHAMELEON-LAB-PHYSICS-003',
+			'CHAMELEON-LAB-PHYSICS-004',
+			'CHAMELEON-LAB-PHYSICS-005',
+			'CHAMELEON-LAB-PHYSICS-006',
+			'CHAMELEON-LAB-ROUTE-001',
+			'CHAMELEON-LAB-ROUTE-002',
+			'CHAMELEON-LAB-ROUTE-003',
+			'CHAMELEON-PHYSICAL-ASSET-001',
+			'CHAMELEON-PHYSICAL-ASSET-002',
 			'CHAMELEON-SIM-001',
 			'CHAMELEON-SIM-002',
 			'CHAMELEON-SIM-003',
@@ -591,6 +619,7 @@ const REQUIRED_GUIDES = Object.freeze( [
 	{ path: 'doc/guide/papillons.md', order: 59 },
 	{ path: 'doc/guide/inspecteur.md', order: 60 },
 	{ path: 'doc/guide/cameleons.md', order: 61 },
+	{ path: 'doc/guide/laboratoire-cameleon.md', order: 62 },
 ] );
 
 const REQUIRED_DOCS = Object.freeze( [
@@ -603,6 +632,7 @@ const REQUIRED_DOCS = Object.freeze( [
 	'doc/technique/performance.md',
 	'doc/technique/papillons.md',
 	'doc/technique/cameleons.md',
+	'doc/technique/laboratoire-cameleon-physique.md',
 	'doc/technique/pollinisateurs.md',
 	'doc/technique/rendu-souterrain-stylise.md',
 	'doc/qualite/strategie-tests.md',
@@ -620,8 +650,15 @@ const full = ( relative ) => path.join( ROOT, ... relative.split( '/' ) );
 const posix = ( value ) => value.split( path.sep ).join( '/' );
 const normalize = ( value ) => value.replace( /^\uFEFF/, '' ).replace( /\r\n?/g, '\n' );
 const read = ( relative ) => normalize( readFileSync( full( relative ), 'utf8' ) );
-const digest = ( relative ) => `sha256:${ createHash( 'sha256' )
-	.update( read( relative ), 'utf8' ).digest( 'hex' ) }`;
+const BINARY_EXTENSIONS = new Set( [ '.blend', '.glb' ] );
+const digest = ( relative ) => {
+
+	const content = BINARY_EXTENSIONS.has( path.extname( relative ).toLowerCase() )
+		? readFileSync( full( relative ) )
+		: read( relative );
+	return `sha256:${ createHash( 'sha256' ).update( content ).digest( 'hex' ) }`;
+
+};
 const contractTestFiles = ( contract ) => [
 	... contract.tests,
 	... ( contract.runtimeTests ?? [] ),

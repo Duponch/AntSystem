@@ -19,7 +19,7 @@ La suite couvre notamment :
 - `BEE-SIM` : cycle de butinage complet, déterminisme, météo, démographie agrégée, cohortes et recyclage stables, continuité de phase par clip, ciblage borné, vues SoA, layout/GLB/VAT bornés, draws fixes et boucle chaude sans allocation ;
 - `BUTTERFLY-SIM` : cycle œuf→larve→chrysalide→adulte→œuf, immatures invisibles, activité adulte, météo indépendante du vieillissement, ciblage de quatre fleurs, SoA fixe, asset/clip/VAT, draw unique, chargement paresseux, perception bornée du caméléon et fuite continue ;
 - `CHAMELEON-SIM` : prédation complète, rig et langue, graphe global borné de terrain/rochers/souches/troncs/branches/arbres, transitions, clearance, corridors locaux continus, exploration déterministe sans A* de routine, repères de support et réglages UI ;
-- laboratoire physique du caméléon : route isolée, GLB riggé borné, monde Rapier à pas fixe, interpolation, reset, plafond de rattrapage et rejet des valeurs non finies ;
+- laboratoire physique du caméléon : route isolée, GLB riggé borné, monde Rapier à pas fixe, interpolation, reset, plafond de rattrapage, rejet des valeurs non finies, politique fixe/charnière de la queue, gains PD, chaîne de queue isolée, corps complet de 33 proxies, auto-collisions, rayons externes, watchdog autonome et annulation caméra ;
 - `UNDERGROUND-VISUAL` : palette volumique configurable, plongée bornée au bloc, excavation visuelle indépendante, pools périodiques déterministes, suppression de la poussière, chargement unique des GLB, masque SDF propre et budgets fixes ;
 - `OBS` : intentions, arrêts attendus, détection d’immobilité, pause à vitesse nulle, distances monde, reset temporel, sélection faune bornée, menace, support, camouflage et volumes du seul individu suivi ;
 - réseau de corridors : déterminisme, routage, budget résiduel multi-arêtes, invariance au découpage temporel, continuité, profondeur, limites, croissance append-only et complexité structurelle ;
@@ -114,7 +114,7 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
 - proxies et contacts cohérents en debug ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
-Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`, `chameleon-lab-controller`, `chameleon-lab-active-ragdoll` et `chameleon-physical-asset` protègent la structure, les commandes et les bornes. Ils ne peuvent pas prouver la qualité d’une prise multi-surface ni la sensation du pilotage : ces points exigent cette inspection runtime.
+Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`, `chameleon-lab-controller`, `chameleon-lab-active-ragdoll` et `chameleon-physical-asset` protègent la structure, les commandes et les bornes. Le test active-ragdoll charge le GLB, instancie les 33 proxies et vérifie quatre secondes de simulation, les auto-collisions, les ancres et les valeurs finies. Les transitions multi-surfaces complexes, la saisie visuelle, le basculement actif/passif et la sensation du pilotage exigent encore l’inspection runtime.
 
 ## Garde documentaire
 

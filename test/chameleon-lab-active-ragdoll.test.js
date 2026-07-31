@@ -1,19 +1,28 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
+import { createActiveRagdoll, CHAMELEON_GROUP } from '../src/chameleon-lab/active-ragdoll.js';
 import {
 	anatomicalSwingLimit,
+	chameleonCollisionGroups,
 	idleHoldControllerGains,
+	isExternalGripRayHit,
 	muscleControllerGains,
 	TAIL_HINGE_LIMIT,
 	tailJointPolicy,
 } from '../src/chameleon-lab/active-ragdoll-model.js';
 import { createPhysicsWorld } from '../src/chameleon-lab/physics-world.js';
 
-function vec( value ) {
+async function loadPhysicalScene() {
 
-	return { x: value.x, y: value.y, z: value.z };
+	const path = fileURLToPath( new URL( '../public/assets/ChameleonPhysical.glb', import.meta.url ) );
+	const bytes = await readFile( path );
+	const data = bytes.buffer.slice( bytes.byteOffset, bytes.byteOffset + bytes.byteLength );
+	return ( await new GLTFLoader().parseAsync( data, '' ) ).scene;
 
 }
 
@@ -159,5 +168,81 @@ test( 'CHAMELEON-LAB-RAGDOLL-005 fixed simulation is render-rate invariant at 60
 	assert.equal( at240.steps, 480 );
 	assert.ok( at60.tip.distanceTo( at240.tip ) < 1e-6 );
 	assert.ok( Math.abs( at60.maximumAnchorGap - at240.maximumAnchorGap ) < 1e-7 );
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-006 complete 33-body rig remains finite, joined and self-collision ready', async () => {
+
+	const physics = await createPhysicsWorld( {
+		gravity: { x: 0, y: -9.81, z: 0 },
+		fixedDt: 1 / 120,
+		maxSubsteps: 4,
+	} );
+	physics.surfaceByCollider = new Map();
+	const { RAPIER, world } = physics;
+	const groundBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( 0, -0.2, 0 ),
+	);
+	const groundCollider = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 4, 0.2, 4 )
+			.setFriction( 0.92 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		groundBody,
+	);
+	physics.surfaceByCollider.set( groundCollider.handle, Object.freeze( {
+		kind: 'ground',
+		clawEligible: true,
+		gripStrengthScale: 1,
+	} ) );
+
+	const ragdoll = await createActiveRagdoll( {
+		scene: new THREE.Scene(),
+		physics,
+		assetScene: await loadPhysicalScene(),
+	} );
+	assert.equal( ragdoll.parts.length, 33 );
+	assert.equal( CHAMELEON_GROUP, chameleonCollisionGroups() );
+	assert.ok( ragdoll.parts.every( ( part ) => part.collider.collisionGroups() === CHAMELEON_GROUP ) );
+	assert.ok( ragdoll.parts.filter( ( part ) => part.parent ).every( ( part ) => part.joint.contactsEnabled() === false ) );
+
+	ragdoll.setCommand( { move: new THREE.Vector3( 0.35, 0, 0 ) } );
+	let peakContacts = 0;
+	let maximumAnchorGap = 0;
+	for ( let step = 0; step < 480; step ++ ) {
+
+		physics.step(
+			1 / 120,
+			( dt ) => ragdoll.beforeStep( dt ),
+			() => ragdoll.afterStep(),
+		);
+		peakContacts = Math.max( peakContacts, ragdoll.contactCount );
+		for ( const part of ragdoll.parts ) {
+
+			const translation = part.body.translation();
+			const rotation = part.body.rotation();
+			assert.ok( [ translation.x, translation.y, translation.z, rotation.x, rotation.y, rotation.z, rotation.w ].every( Number.isFinite ) );
+			if ( ! part.parent ) continue;
+			const parentAnchor = worldAnchor( part.parent.body, part.parentAnchor );
+			const childAnchor = worldAnchor( part.body, part.childAnchor );
+			maximumAnchorGap = Math.max( maximumAnchorGap, parentAnchor.distanceTo( childAnchor ) );
+
+		}
+
+	}
+	assert.equal( physics.stats.invalidBodies, 0 );
+	assert.ok( peakContacts >= 1 );
+	assert.ok( maximumAnchorGap < 0.035, 'full-body anchor gap ' + maximumAnchorGap );
+
+	ragdoll.dispose();
+	physics.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-007 grip rays reject embedded exits and accept external faces', () => {
+
+	const direction = { x: 0, y: -1, z: 0 };
+	assert.equal( isExternalGripRayHit( 0, { x: 0, y: 1, z: 0 }, direction ), false );
+	assert.equal( isExternalGripRayHit( 0.04, { x: 0, y: -1, z: 0 }, direction ), false );
+	assert.equal( isExternalGripRayHit( 0.04, { x: 0, y: 1, z: 0 }, direction ), true );
 
 } );

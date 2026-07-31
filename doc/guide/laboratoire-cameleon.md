@@ -65,16 +65,20 @@ comportement est normal et distingue la préhension d’une adhésion de gecko.
 
 Passez en **Ragdoll passif**, saisissez un membre au clic gauche, secouez
 l’animal puis relâchez-le. Son corps entier doit réagir à la gravité et aux
-articulations. Réactivez ensuite le corps actif : les muscles doivent chercher
-progressivement la pose, sans téléportation.
+articulations. Les butées PD souples continuent uniquement de limiter les angles
+extrêmes ; elles ne recherchent pas la pose de repos. Réactivez ensuite le corps
+actif : les muscles doivent chercher progressivement la pose, sans
+téléportation.
 
 ## Réglages
 
 ### Pilotage
 
 - **Exploration autonome** laisse le caméléon choisir périodiquement une
-  direction et favorise la montée sur les surfaces verticales ;
-- **Ragdoll passif** coupe muscles et prises ;
+  direction, favorise la montée sur les surfaces verticales et change de cap
+  si aucune progression réelle n’est mesurée pendant 1,75 seconde ;
+- **Ragdoll passif** coupe les moteurs qui recherchent la pose et les prises ;
+  les butées articulaires PD souples restent actives pour limiter les angles ;
 - **Vitesse** règle la vitesse monde visée ;
 - **Animation** règle la fréquence visuelle du cycle des membres sans changer
   directement la vitesse monde ;

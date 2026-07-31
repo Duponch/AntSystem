@@ -168,11 +168,23 @@ export class ThirdPersonCamera {
 			this.pitch = THREE.MathUtils.clamp( this.pitch + dy * this.sensitivity, -0.18, 1.22 );
 
 		};
+		this._stopRotation = ( event ) => {
+
+			this.rotating = false;
+			if ( this.domElement.hasPointerCapture?.( event.pointerId ) )
+				this.domElement.releasePointerCapture?.( event.pointerId );
+
+		};
 		this._onPointerUp = ( event ) => {
 
 			if ( event.button !== 2 ) return;
+			this._stopRotation( event );
+
+		};
+		this._onPointerCancel = ( event ) => this._stopRotation( event );
+		this._onLostPointerCapture = () => {
+
 			this.rotating = false;
-			this.domElement.releasePointerCapture?.( event.pointerId );
 
 		};
 		this._onWheel = ( event ) => {
@@ -189,7 +201,8 @@ export class ThirdPersonCamera {
 		domElement.addEventListener( 'pointerdown', this._onPointerDown );
 		domElement.addEventListener( 'pointermove', this._onPointerMove );
 		domElement.addEventListener( 'pointerup', this._onPointerUp );
-		domElement.addEventListener( 'pointercancel', this._onPointerUp );
+		domElement.addEventListener( 'pointercancel', this._onPointerCancel );
+		domElement.addEventListener( 'lostpointercapture', this._onLostPointerCapture );
 		domElement.addEventListener( 'wheel', this._onWheel, { passive: false } );
 
 	}
@@ -268,7 +281,8 @@ export class ThirdPersonCamera {
 		this.domElement.removeEventListener( 'pointerdown', this._onPointerDown );
 		this.domElement.removeEventListener( 'pointermove', this._onPointerMove );
 		this.domElement.removeEventListener( 'pointerup', this._onPointerUp );
-		this.domElement.removeEventListener( 'pointercancel', this._onPointerUp );
+		this.domElement.removeEventListener( 'pointercancel', this._onPointerCancel );
+		this.domElement.removeEventListener( 'lostpointercapture', this._onLostPointerCapture );
 		this.domElement.removeEventListener( 'wheel', this._onWheel );
 
 	}
@@ -283,6 +297,10 @@ export class AutonomousExplorer {
 		this.timeToChange = 0;
 		this.heading = new THREE.Vector3( -1, 0, 0 );
 		this.phase = 0;
+		this.lastPosition = new THREE.Vector3();
+		this.hasProgressSample = false;
+		this.progressSeconds = 0;
+		this.progressDistance = 0;
 
 	}
 
@@ -293,10 +311,48 @@ export class AutonomousExplorer {
 
 	}
 
+	resetProgress( position = null ) {
+
+		this.hasProgressSample = position !== null;
+		if ( position ) this.lastPosition.copy( position );
+		this.progressSeconds = 0;
+		this.progressDistance = 0;
+
+	}
+
+	_trackProgress( dt, position ) {
+
+		if ( ! this.hasProgressSample ) {
+
+			this.lastPosition.copy( position );
+			this.hasProgressSample = true;
+			return false;
+
+		}
+		this.progressDistance += Math.min( 0.25, this.lastPosition.distanceTo( position ) );
+		this.lastPosition.copy( position );
+		this.progressSeconds += dt;
+		if ( this.progressSeconds < 1.75 ) return false;
+		const stuck = this.progressDistance < 0.065;
+		this.progressSeconds = 0;
+		this.progressDistance = 0;
+		return stuck;
+
+	}
+
 	update( dt, supportNormal, position, target = new THREE.Vector3() ) {
 
 		this.timeToChange -= dt;
 		this.phase += dt;
+		if ( this._trackProgress( dt, position ) ) {
+
+			const turnSign = this._random() < 0.5 ? -1 : 1;
+			const angle = Math.atan2( this.heading.z, this.heading.x )
+				+ turnSign * ( 0.9 + this._random() * 0.8 );
+			this.heading.set( Math.cos( angle ), 0, Math.sin( angle ) );
+			this.timeToChange = 1.2 + this._random() * 1.6;
+
+		}
 		if ( this.timeToChange <= 0 ) {
 
 			const angle = this._random() * Math.PI * 2;

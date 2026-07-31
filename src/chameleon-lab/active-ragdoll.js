@@ -2,12 +2,14 @@ import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
 	anatomicalSwingLimit,
+	chameleonCollisionGroups,
 	idleHoldControllerGains,
+	isExternalGripRayHit,
 	muscleControllerGains,
 	tailJointPolicy,
 } from './active-ragdoll-model.js';
 
-const CHAMELEON_GROUP = ( 0x0002 << 16 ) | 0x0001;
+const CHAMELEON_GROUP = chameleonCollisionGroups();
 const WORLD_UP = new THREE.Vector3( 0, 1, 0 );
 const BODY_SCALE = new THREE.Vector3( 1, 1, 1 );
 const ZERO = new THREE.Vector3();
@@ -336,11 +338,10 @@ export async function createActiveRagdoll( {
 	physics,
 	spawn = new THREE.Vector3( 0, 0.95, 0.75 ),
 	assetUrl = '/assets/ChameleonPhysical.glb',
+	assetScene = null,
 } ) {
 
-	const loader = new GLTFLoader();
-	const gltf = await loader.loadAsync( assetUrl );
-	const model = gltf.scene;
+	const model = assetScene || ( await new GLTFLoader().loadAsync( assetUrl ) ).scene;
 	model.name = 'PhysicalChameleon';
 	model.updateMatrixWorld( true );
 	model.traverse( ( object ) => {
@@ -589,14 +590,16 @@ export async function createActiveRagdoll( {
 			const hit = world.castRayAndGetNormal(
 				ray,
 				settings.gripReach + 0.035,
-				true,
+				false,
 				undefined,
 				undefined,
 				undefined,
 				contact.part.body,
 				( collider ) => physics.surfaceByCollider?.has( collider.handle ) === true,
 			);
-			if ( ! hit || ( best && hit.timeOfImpact >= best.timeOfImpact ) ) continue;
+			if ( ! hit
+				|| ! isExternalGripRayHit( hit.timeOfImpact, hit.normal, direction )
+				|| ( best && hit.timeOfImpact >= best.timeOfImpact ) ) continue;
 			const surface = physics.surfaceByCollider.get( hit.collider.handle );
 			if ( ! surface?.clawEligible ) continue;
 			if ( contact.tail && surface.kind !== 'branch' ) continue;
@@ -656,7 +659,7 @@ export async function createActiveRagdoll( {
 		contact.overloadSeconds = contact.load > 0.98 && errorDistance > 0.075
 			? contact.overloadSeconds + dt
 			: Math.max( 0, contact.overloadSeconds - dt * 2 );
-		if ( contact.overloadSeconds > 0.16 ) {
+		if ( contact.overloadSeconds > 0.22 ) {
 
 			releaseContact( contact, 'slipping' );
 			return false;

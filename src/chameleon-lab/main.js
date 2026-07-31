@@ -147,6 +147,7 @@ async function main() {
 
 		grab.cancel();
 		ragdoll.reset();
+		explorer.resetProgress();
 		cameraRig.snap();
 
 	};
@@ -178,7 +179,12 @@ async function main() {
 		const dt = Math.min( 0.05, Math.max( 0, ( now - previousTime ) / 1000 ) );
 		previousTime = now;
 
-		if ( input.consume( 'toggleAutoQueued' ) ) state.autonomous = ! state.autonomous;
+		if ( input.consume( 'toggleAutoQueued' ) ) {
+
+			state.autonomous = ! state.autonomous;
+			if ( state.autonomous ) explorer.resetProgress();
+
+		}
 		if ( input.consume( 'toggleRagdollQueued' ) ) state.fullRagdoll = ! state.fullRagdoll;
 		if ( input.consume( 'toggleDebugQueued' ) ) {
 
@@ -200,29 +206,33 @@ async function main() {
 
 		const pelvisTranslation = ragdoll.pelvis.body.translation();
 		creaturePosition.set( pelvisTranslation.x, pelvisTranslation.y, pelvisTranslation.z );
-		if ( state.autonomous ) {
-
-			explorer.update( dt, ragdoll.supportNormal, creaturePosition, move );
-
-		} else {
+		if ( ! state.autonomous ) {
 
 			cameraRig.getForward( cameraForward );
 			cameraRelativeMovement( input.axes, cameraForward, ragdoll.supportNormal, move );
 
 		}
 		if ( grabbedBone ) move.set( 0, 0, 0 );
-		ragdoll.setCommand( {
-			move,
-			sprint: input.sprint,
-			release: releaseSeconds > 0,
-			fullRagdoll: state.fullRagdoll,
-		} );
 
 		const result = physics.step(
 			dt,
 			( fixedDt ) => {
 
 				releaseSeconds = Math.max( 0, releaseSeconds - fixedDt );
+				if ( state.autonomous ) {
+
+					const position = ragdoll.pelvis.body.translation();
+					creaturePosition.set( position.x, position.y, position.z );
+					explorer.update( fixedDt, ragdoll.supportNormal, creaturePosition, move );
+
+				}
+				if ( grabbedBone ) move.set( 0, 0, 0 );
+				ragdoll.setCommand( {
+					move,
+					sprint: input.sprint,
+					release: releaseSeconds > 0,
+					fullRagdoll: state.fullRagdoll,
+				} );
 				ragdoll.beforeStep( fixedDt );
 				grab.beforeStep( fixedDt );
 

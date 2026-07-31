@@ -55,17 +55,25 @@ Le solveur instancie 33 proxies dynamiques :
 - 16 capsules pour les quatre chaînes de membres ;
 - 12 capsules pour la queue.
 
-Les proxies d’un même animal ne se collisionnent pas entre eux. Ils sont liés
-par des rotules anatomiquement bornées ; la queue alterne charnières limitées et
-liaisons fixes afin de conserver sa longueur tout en laissant cinq sections
-physiquement flexibles. Cette représentation bornée évite un collider par
-triangle et garde un coût stable.
+Les proxies non adjacents d’un même animal se collisionnent entre eux afin que
+les pattes, la tête et la queue ne traversent pas le torse. Rapier désactive en
+revanche les contacts entre chaque paire directement reliée par une
+articulation, ce qui évite les conflits au niveau des pivots. Hors queue,
+Rapier les relie par des rotules sphériques libres ; des couples PD souples les
+ramènent vers une limite anatomique sans transformer cette limite en butée
+Rapier dure. La queue suit une politique différente et explicite : les sections
+3, 5, 7, 9 et 11 sont des charnières Rapier limitées à ±0,38 radian, tandis que
+les sept autres liaisons sont fixes. Elle conserve ainsi sa longueur tout en
+laissant cinq degrés de flexion physiques. Cette représentation évite un
+collider par triangle et maintient un coût borné.
 
 Les muscles du corps utilisent un contrôle PD quaternion amorti, borné et
 mis à l’échelle par l’inertie. Ceux de la queue pilotent ses charnières. Ils
 cherchent la pose de repos et ajoutent un cycle diagonal aux membres pendant la marche. Ils restent des forces : un choc, une chute ou une
 traction peut les écarter de la pose cible. Le mode **Ragdoll passif** désactive
-ces moteurs et les prises sans remplacer les corps.
+ces moteurs de pose et les prises sans remplacer les corps. Les couples de
+butée anatomique souple restent actifs : ils jouent le rôle d’une contrainte
+articulaire et non celui d’un muscle cherchant la pose de repos.
 
 ## Contacts et surfaces
 
@@ -79,10 +87,12 @@ Chaque collider fixe publie des métadonnées :
 
 Quatre pieds et l’extrémité de la queue sondent un petit ensemble borné de
 directions. Lorsqu’un support rugueux est atteint, le contact mémorise une
-ancre en coordonnées monde. Un ressort amorti maintient ensuite le bout du
-membre autour de cette ancre jusqu’au pas suivant, à une surcharge, à une perte
-de portée ou à une libération volontaire. La queue ne prend actuellement que
-les surfaces déclarées comme branches.
+ancre en coordonnées monde. Tant que cette ancre reste valide, aucune nouvelle
+sonde n’est lancée pour ce membre ; la recherche reprend après sa libération.
+Un ressort amorti maintient le bout du membre autour de l’ancre jusqu’au pas de
+transfert suivant, à une surcharge, à une perte de portée ou à une libération
+volontaire. La queue ne prend actuellement que les surfaces déclarées comme
+branches.
 
 Le plan de support moyen oriente la commande et permet de marcher sur un sol,
 un plan incliné, un mur rugueux ou un tronc. La direction clavier, d’abord
@@ -115,9 +125,11 @@ rattrapage. Il ne faut donc pas utiliser ce laboratoire comme oracle de
 l’horloge stricte de la simulation principale.
 
 Les buffers de poses, les corps, les articulations, les proxies de debug et les
-contacts sont créés au chargement puis réutilisés. Les sondes de pieds sont
-espacées lorsqu’une ancre est déjà valide. Le panneau affiche le p95 du coût complet d’un sous-pas, sondes, muscles,
-validation et résolution Rapier inclus, afin de détecter une dérive de performance.
+contacts sont créés au chargement puis réutilisés pendant la simulation. Une
+réinitialisation recrée volontairement les articulations. Les sondes sont
+suspendues pour les prises déjà ancrées. Le panneau affiche le p95 du coût
+complet d’un sous-pas, sondes, muscles, validation et résolution Rapier inclus,
+afin de détecter une dérive de performance.
 
 ## Caméra, pilotage et manipulation
 
@@ -167,6 +179,15 @@ déformée après un lancer sont des conséquences physiques attendues. Une
 téléportation hors réinitialisation, un proxy non fini, une prise sur le verre
 ou une traversée durable d’un collider sont des régressions.
 
+## Sources de conception
+
+- [Rapier — articulations](https://rapier.rs/docs/user_guides/javascript/joints/) ;
+- [Rapier — forces et impulsions](https://rapier.rs/docs/user_guides/javascript/rigid_body_forces_and_impulses/) ;
+- [Rapier — paramètres d’intégration](https://rapier.rs/docs/user_guides/javascript/integration_parameters/) ;
+- [Three.js — WebGPURenderer](https://threejs.org/manual/en/webgpurenderer) ;
+- [Étude biomécanique sur la friction et la préhension des caméléons](https://pmc.ncbi.nlm.nih.gov/articles/PMC3866397/) ;
+- [Cinématique des caméléons sur perchoirs](https://pubmed.ncbi.nlm.nih.gov/14668308/).
+
 ## Preuves et règle de modification
 
 Les preuves automatiques actuelles sont :
@@ -177,15 +198,25 @@ Les preuves automatiques actuelles sont :
   invariance 60/240 Hz, plafond de rattrapage, interpolation, reset et rejet des
   valeurs non finies ;
 - `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY,
-  projection caméra-support et exploration autonome bornée ;
-- `test/chameleon-lab-active-ragdoll.test.js` : politique de queue, gains
-  inertiels, limites anatomiques et invariance au taux de rendu ;
+  projection caméra-support, exploration autonome bornée, détection
+  d’immobilité et libération fiable de la rotation caméra ;
+- `test/chameleon-lab-active-ragdoll.test.js` : `CHAMELEON-LAB-RAGDOLL-001` vérifie la
+  politique fixe/charnière de la queue ; `CHAMELEON-LAB-RAGDOLL-002` les limites anatomiques
+  et les gains inertiels ; `CHAMELEON-LAB-RAGDOLL-003` le maintien au repos proportionnel à
+  la masse ; `CHAMELEON-LAB-RAGDOLL-004` la non-rétraction de la chaîne de queue et la
+  coïncidence de ses ancres ; `CHAMELEON-LAB-RAGDOLL-005` son invariance entre rendus à 60 et
+  240 Hz ; `CHAMELEON-LAB-RAGDOLL-006` charge le GLB et simule le corps complet
+  de 33 proxies avec ses auto-collisions ; `CHAMELEON-LAB-RAGDOLL-007` rejette
+  les sorties de rayon provenant de l’intérieur d’un collider ;
 - `test/chameleon-physical-asset.test.js` : structure GLB, budget, skin,
   influences et hiérarchie anatomique.
 
-Le build WebGPU protège l’assemblage des modules. Une inspection dans un
-navigateur WebGPU reste indispensable pour les contacts multi-surfaces, la
-caméra, la saisie, le lancer, les ombres et le coût p95.
+Le build WebGPU protège l’assemblage des modules. Le test d’intégration Node
+instancie désormais le GLB et les 33 proxies, vérifie les groupes
+d’auto-collision, les ancres, les prises au sol et l’absence de valeurs non
+finies pendant quatre secondes. Une inspection dans un navigateur WebGPU reste
+indispensable pour les transitions multi-surfaces, la caméra, la saisie, le
+lancer, les ombres, la qualité visuelle et le coût p95 réel.
 
 Toute modification du laboratoire qui touche une commande, une articulation,
 un contact, une borne temporelle, une ressource ou un budget doit mettre à jour
