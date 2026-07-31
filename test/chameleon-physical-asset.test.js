@@ -32,6 +32,11 @@ const EXPECTED_SOURCE_TRIANGLES = 50_000;
 const EXPECTED_ORIGINAL_TAIL_VERTICES = 7_206;
 const EXPECTED_SOURCE_MIN = Object.freeze( [ -0.5564488172531128, -0.5407788157463074, -0.39481300115585327 ] );
 const EXPECTED_SOURCE_MAX = Object.freeze( [ 0.4548959732055664, 0.39516758918762207, 0.39570799469947815 ] );
+const TAIL_BONE_NAMES = Object.freeze(
+	Array.from( { length: 12 }, ( _, index ) => `tail_${ String( index + 1 ).padStart( 2, '0' ) }` ),
+);
+const EXPECTED_REST_MESH_SHA256 = '1732a987975806e9e34a48e529347dfca2291e02b8b9c967b3a7ae18f6f2287c';
+const EXPECTED_TAIL_REST_SHA256 = '6b493bfe12b33cc1e7caba9884b4681ad9317f24ab4da3d14c12b8599a820bd1';
 
 function parseGlb( bytes ) {
 
@@ -143,6 +148,107 @@ function assertChain( gltf, nodeByName, names ) {
 
 }
 
+function multiplyMatrices( left, right ) {
+
+	const result = new Array( 16 ).fill( 0 );
+	for ( let column = 0; column < 4; column ++ ) {
+
+		for ( let row = 0; row < 4; row ++ ) {
+
+			for ( let lane = 0; lane < 4; lane ++ ) {
+
+				result[ column * 4 + row ] += left[ lane * 4 + row ] * right[ column * 4 + lane ];
+
+			}
+
+		}
+
+	}
+	return result;
+
+}
+
+function nodeLocalMatrix( node ) {
+
+	if ( node.matrix ) return [ ...node.matrix ];
+	const [ x, y, z, w ] = node.rotation ?? [ 0, 0, 0, 1 ];
+	const [ scaleX, scaleY, scaleZ ] = node.scale ?? [ 1, 1, 1 ];
+	const [ translationX, translationY, translationZ ] = node.translation ?? [ 0, 0, 0 ];
+	const x2 = x + x;
+	const y2 = y + y;
+	const z2 = z + z;
+	const xx = x * x2;
+	const xy = x * y2;
+	const xz = x * z2;
+	const yy = y * y2;
+	const yz = y * z2;
+	const zz = z * z2;
+	const wx = w * x2;
+	const wy = w * y2;
+	const wz = w * z2;
+	return [
+		( 1 - ( yy + zz ) ) * scaleX, ( xy + wz ) * scaleX, ( xz - wy ) * scaleX, 0,
+		( xy - wz ) * scaleY, ( 1 - ( xx + zz ) ) * scaleY, ( yz + wx ) * scaleY, 0,
+		( xz + wy ) * scaleZ, ( yz - wx ) * scaleZ, ( 1 - ( xx + yy ) ) * scaleZ, 0,
+		translationX, translationY, translationZ, 1,
+	];
+
+}
+
+function createWorldMatrixReader( gltf ) {
+
+	const parentByNode = new Map();
+	for ( let parent = 0; parent < gltf.nodes.length; parent ++ ) {
+
+		for ( const child of gltf.nodes[ parent ].children ?? [] ) parentByNode.set( child, parent );
+
+	}
+	const cache = new Map();
+	return function worldMatrix( nodeIndex ) {
+
+		if ( cache.has( nodeIndex ) ) return cache.get( nodeIndex );
+		const local = nodeLocalMatrix( gltf.nodes[ nodeIndex ] );
+		const parent = parentByNode.get( nodeIndex );
+		const world = parent === undefined ? local : multiplyMatrices( worldMatrix( parent ), local );
+		cache.set( nodeIndex, world );
+		return world;
+
+	};
+
+}
+
+function transformPoint( matrix, point ) {
+
+	const [ x, y, z ] = point;
+	return [
+		matrix[ 0 ] * x + matrix[ 4 ] * y + matrix[ 8 ] * z + matrix[ 12 ],
+		matrix[ 1 ] * x + matrix[ 5 ] * y + matrix[ 9 ] * z + matrix[ 13 ],
+		matrix[ 2 ] * x + matrix[ 6 ] * y + matrix[ 10 ] * z + matrix[ 14 ],
+	];
+
+}
+
+function distance( first, second ) {
+
+	return Math.hypot(
+		first[ 0 ] - second[ 0 ],
+		first[ 1 ] - second[ 1 ],
+		first[ 2 ] - second[ 2 ],
+	);
+
+}
+
+function pointLineDistance( point, start, end ) {
+
+	const line = end.map( ( value, lane ) => value - start[ lane ] );
+	const relative = point.map( ( value, lane ) => value - start[ lane ] );
+	const squaredLength = line.reduce( ( total, value ) => total + value * value, 0 );
+	const parameter = relative.reduce( ( total, value, lane ) => total + value * line[ lane ], 0 ) / squaredLength;
+	const projection = start.map( ( value, lane ) => value + parameter * line[ lane ] );
+	return distance( point, projection );
+
+}
+
 test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structurally valid', () => {
 
 	assert.ok( assetBytes.length >= 250 * 1024, 'asset is unexpectedly empty or incomplete' );
@@ -160,13 +266,34 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.name, 'Chameleon_Physics_Body' );
 	assert.equal( meshNode.skin, 0, 'the original mesh must reference the rig skin' );
 	assert.equal( meshNode.extras?.physics_ready, true );
-	assert.equal( meshNode.extras?.mesh_contract_version, '3.0.0' );
+	assert.equal( meshNode.extras?.mesh_contract_version, '3.1.0' );
 	assert.equal( meshNode.extras?.source_object, 'Chameleon_Imported_Source' );
 	assert.equal( meshNode.extras?.exact_source_geometry, true );
 	assert.equal( meshNode.extras?.source_vertex_count, EXPECTED_SOURCE_VERTICES );
 	assert.equal( meshNode.extras?.source_polygon_count, EXPECTED_SOURCE_TRIANGLES );
+	assert.equal( meshNode.extras?.rest_mesh_position_topology_sha256, EXPECTED_REST_MESH_SHA256 );
 	assert.equal( meshNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
-	assert.equal( meshNode.extras?.tail_deformation_mode, 'rigid_pelvis' );
+	assert.equal( meshNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
+	assert.equal( meshNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
+	assert.equal( meshNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline' );
+	assert.equal( meshNode.extras?.tail_weighted_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
+	assert.equal( meshNode.extras?.tail_weight_bones, TAIL_BONE_NAMES.length );
+	assert.equal( meshNode.extras?.tail_weight_max_influences, 4 );
+	assert.equal( meshNode.extras?.tail_centerline_samples, TAIL_BONE_NAMES.length + 1 );
+	assert.equal( meshNode.extras?.tail_interface_vertices, 107 );
+	assert.ok( meshNode.extras?.tail_surface_geodesic_length > 1.16 );
+	assert.ok( meshNode.extras?.tail_surface_geodesic_length < 1.18 );
+	assert.ok( meshNode.extras?.tail_rest_arc_length > 1.13 );
+	assert.ok( meshNode.extras?.tail_rest_arc_length < 1.15 );
+	assert.equal( meshNode.extras?.tail_rest_coordinate_space, 'blender-rig-local-z-up' );
+	assert.deepEqual( meshNode.extras?.tail_roll_reference, [ 0, 1, 0 ] );
+	assert.equal( meshNode.extras?.tail_rest_centerline?.length, ( TAIL_BONE_NAMES.length + 1 ) * 3 );
+	assert.equal( meshNode.extras?.tail_rest_segment_lengths?.length, TAIL_BONE_NAMES.length );
+	assert.ok( meshNode.extras.tail_rest_segment_lengths.every( ( length ) => length >= 0.015 && length <= 0.35 ) );
+	assert.ok( Math.abs(
+		meshNode.extras.tail_rest_segment_lengths.reduce( ( sum, length ) => sum + length, 0 )
+		- meshNode.extras.tail_rest_arc_length
+	) < 1e-8 );
 	assert.equal( meshNode.extras?.tail_physics_dofs, 0 );
 	assert.equal( meshNode.extras?.origin_normalized, true );
 	assert.deepEqual( meshNode.extras?.origin_shift, [ 0, 0, 6.119999885559082 ] );
@@ -257,6 +384,8 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisfy the hybrid-controller contract', () => {
 
 	const { gltf, binary } = parseGlb( assetBytes );
+	const meshNode = gltf.nodes.find( ( node ) => node.mesh !== undefined );
+	assert.ok( meshNode, 'skinned mesh node is missing' );
 	const skin = gltf.skins[ 0 ];
 	assert.equal( skin.joints.length, 43, 'the visual rig must retain its complete 43-joint hierarchy' );
 	assert.equal( new Set( skin.joints ).size, skin.joints.length, 'skin joints must be unique' );
@@ -283,7 +412,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		'front_girdle.R', 'front_upper.R', 'front_lower.R', 'front_palm.R',
 		'hind_girdle.L', 'hind_upper.L', 'hind_lower.L', 'hind_palm.L',
 		'hind_girdle.R', 'hind_upper.R', 'hind_lower.R', 'hind_palm.R',
-		...Array.from( { length: 12 }, ( _, index ) => `tail_${ String( index + 1 ).padStart( 2, '0' ) }` ),
+		...TAIL_BONE_NAMES,
 	];
 	const skinJointSet = new Set( skin.joints );
 	for ( const name of requiredBones ) {
@@ -311,16 +440,14 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		}
 
 	}
-	assertChain(
-		gltf,
-		nodeByName,
-		Array.from( { length: 12 }, ( _, index ) => `tail_${ String( index + 1 ).padStart( 2, '0' ) }` ),
-	);
+	assertChain( gltf, nodeByName, TAIL_BONE_NAMES );
 
 	const skinJointNames = skin.joints.map( ( nodeIndex ) => gltf.nodes[ nodeIndex ].name );
+	const tailBoneNameSet = new Set( TAIL_BONE_NAMES );
+	const tailWeightUse = new Map( TAIL_BONE_NAMES.map( ( name ) => [ name, 0 ] ) );
 	const usedBoneNames = new Set();
 	let multiInfluenceVertices = 0;
-	let rigidPelvisVertices = 0;
+	let tailInfluencedVertices = 0;
 	for ( const primitive of gltf.meshes.flatMap( ( mesh ) => mesh.primitives ) ) {
 
 		const joints = createAccessorReader( gltf, binary, primitive.attributes.JOINTS_0 );
@@ -335,8 +462,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 
 			let sum = 0;
 			let positiveInfluences = 0;
-			let soleBoneName = null;
-			let soleWeight = 0;
+			let hasTailInfluence = false;
 			for ( let lane = 0; lane < 4; lane ++ ) {
 
 				const joint = joints.read( vertex, lane );
@@ -347,9 +473,14 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 				if ( weight > 1e-6 ) {
 
 					positiveInfluences ++;
-					soleBoneName = skinJointNames[ joint ];
-					soleWeight = weight;
-					usedBoneNames.add( soleBoneName );
+					const boneName = skinJointNames[ joint ];
+					usedBoneNames.add( boneName );
+					if ( tailBoneNameSet.has( boneName ) ) {
+
+						hasTailInfluence = true;
+						tailWeightUse.set( boneName, tailWeightUse.get( boneName ) + 1 );
+
+					}
 
 				}
 
@@ -357,47 +488,130 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 			assert.ok( positiveInfluences >= 1 && positiveInfluences <= 4 );
 			assert.ok( Math.abs( sum - 1 ) < 2e-4, `vertex ${ vertex } weights sum to ${ sum }` );
 			if ( positiveInfluences > 1 ) multiInfluenceVertices ++;
-			if ( positiveInfluences === 1 && soleBoneName === 'pelvis' && Math.abs( soleWeight - 1 ) < 1e-6 ) {
-
-				rigidPelvisVertices ++;
-
-			}
+			if ( hasTailInfluence ) tailInfluencedVertices ++;
 
 		}
 
 	}
-	assert.ok( multiInfluenceVertices > 100, 'the body rig must retain smoothly blended vertices' );
-	assert.ok( rigidPelvisVertices >= EXPECTED_ORIGINAL_TAIL_VERTICES,
-		'the rigid original tail must contribute a substantial pelvis-only vertex set' );
+	assert.ok( multiInfluenceVertices > 100, 'body and tail skinning must retain smooth blends' );
+	assert.ok( tailInfluencedVertices >= EXPECTED_ORIGINAL_TAIL_VERTICES,
+		'the complete original tail must be bound to its curved visual chain' );
+	for ( const [ name, uses ] of tailWeightUse ) {
 
-	const intentionallyUnweighted = new Set( [
-		'root',
-		...Array.from( { length: 9 }, ( _, index ) => `tail_${ String( index + 4 ).padStart( 2, '0' ) }` ),
-	] );
-	const expectedWeightedBoneNames = new Set(
-		skinJointNames.filter( ( name ) => ! intentionallyUnweighted.has( name ) ),
-	);
+		assert.ok( uses > 0, `${ name } must influence the preserved original tail` );
+
+	}
 	assert.deepEqual(
 		usedBoneNames,
-		expectedWeightedBoneNames,
-		'the rigid tail may not reintroduce weights on its distal visual-only bones',
+		new Set( skinJointNames.filter( ( name ) => name !== 'root' ) ),
+		'all deformation bones except the non-deforming root must carry skin weights',
 	);
-
 	const rigNodeIndex = nodeByName.get( 'Chameleon_Physics_Armature' );
 	assert.notEqual( rigNodeIndex, undefined, 'rig root node is missing' );
 	const rigNode = gltf.nodes[ rigNodeIndex ];
-	assert.equal( rigNode.extras?.rig_version, '3.0.0' );
-	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail=\+X.*glTF Y-up/u );
+	assert.equal( rigNode.extras?.rig_version, '3.1.0' );
+	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail-root=\+X.*original-curled.*glTF Y-up/u );
 	assert.equal( rigNode.extras?.visual_bones, 43 );
+	assert.equal( rigNode.extras?.visual_deformation_bones, 42 );
 	assert.equal( rigNode.extras?.physics_proxy_bodies, 1 );
+	assert.equal( rigNode.extras?.physics_proxy_bone, 'pelvis' );
 	assert.equal( rigNode.extras?.runtime_controller, 'hybrid-root-ik' );
 	assert.equal( rigNode.extras?.render_mesh_count, 1 );
 	assert.equal( rigNode.extras?.exact_source_geometry, true );
+	assert.equal( rigNode.extras?.rest_mesh_position_topology_sha256, EXPECTED_REST_MESH_SHA256 );
 	assert.equal( rigNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
-	assert.equal( rigNode.extras?.tail_deformation_mode, 'rigid_pelvis' );
+	assert.equal( rigNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
+	assert.equal( rigNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
+	assert.equal( rigNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline' );
+	assert.equal( rigNode.extras?.tail_rest_bone_axis, 'local +Y' );
 	assert.equal( rigNode.extras?.tail_physics_dofs, 0 );
+	assert.deepEqual( rigNode.extras?.tail_rest_centerline, meshNode.extras.tail_rest_centerline );
+	assert.deepEqual( rigNode.extras?.tail_rest_segment_lengths, meshNode.extras.tail_rest_segment_lengths );
 	assert.ok( rigNode.children.includes( nodeByName.get( 'root' ) ) );
 	assert.ok( rigNode.children.includes( nodeByName.get( 'Chameleon_Physics_Body' ) ) );
+
+	const physicsBodyBones = skinJointNames.filter(
+		( name ) => gltf.nodes[ nodeByName.get( name ) ].extras?.physics_body === true,
+	);
+	assert.deepEqual( physicsBodyBones, [ 'pelvis' ], 'only the pelvis may describe the single physics proxy' );
+	for ( const name of skinJointNames ) {
+
+		const extras = gltf.nodes[ nodeByName.get( name ) ].extras;
+		assert.equal( extras?.rest_axis, 'local +Y', `${ name } must publish its rest axis` );
+		assert.equal( extras?.rest_head_local?.length, 3, `${ name } must publish a rest head` );
+		assert.equal( extras?.rest_tail_local?.length, 3, `${ name } must publish a rest tail` );
+		assert.ok( extras.rest_head_local.every( Number.isFinite ) );
+		assert.ok( extras.rest_tail_local.every( Number.isFinite ) );
+		assert.ok( Number.isFinite( extras?.rest_length ) && extras.rest_length > 0.015 );
+
+	}
+	for ( let index = 0; index < TAIL_BONE_NAMES.length; index ++ ) {
+
+		const extras = gltf.nodes[ nodeByName.get( TAIL_BONE_NAMES[ index ] ) ].extras;
+		assert.equal( extras.physics_body, false );
+		assert.equal( extras.physics_role, 'visual-deformation' );
+		assert.equal( extras.joint, 'fixed-visual' );
+		assert.equal( extras.tail_rest_index, index );
+		assert.equal( extras.tail_deformation_only, true );
+
+	}
+
+	const centerlineBlender = Array.from(
+		{ length: TAIL_BONE_NAMES.length + 1 },
+		( _, index ) => meshNode.extras.tail_rest_centerline.slice( index * 3, index * 3 + 3 ),
+	);
+	const centerlineGltf = centerlineBlender.map( ( [ x, y, z ] ) => [ x, z, - y ] );
+	const maximumCurlDeviation = Math.max(
+		...centerlineGltf.slice( 1, -1 ).map(
+			( point ) => pointLineDistance( point, centerlineGltf[ 0 ], centerlineGltf.at( - 1 ) ),
+		),
+	);
+	assert.ok( maximumCurlDeviation > 0.2,
+		'the twelve-bone rest chain must follow the original spiral instead of a straight substitute' );
+
+	const worldMatrix = createWorldMatrixReader( gltf );
+	for ( let index = 0; index < TAIL_BONE_NAMES.length; index ++ ) {
+
+		const name = TAIL_BONE_NAMES[ index ];
+		const node = gltf.nodes[ nodeByName.get( name ) ];
+		const matrix = worldMatrix( nodeByName.get( name ) );
+		const actualHead = transformPoint( matrix, [ 0, 0, 0 ] );
+		const actualTail = transformPoint( matrix, [ 0, node.extras.rest_length, 0 ] );
+		assert.ok( distance( actualHead, centerlineGltf[ index ] ) < 2e-5,
+			`${ name } world head must coincide with centerline sample ${ index }` );
+		assert.ok( distance( actualTail, centerlineGltf[ index + 1 ] ) < 2e-5,
+			`${ name } world tail must coincide with centerline sample ${ index + 1 }` );
+		assert.ok( distance( node.extras.rest_head_local, centerlineBlender[ index ] ) < 1e-6 );
+		assert.ok( distance( node.extras.rest_tail_local, centerlineBlender[ index + 1 ] ) < 1e-6 );
+		assert.ok( Math.abs( node.extras.rest_length - meshNode.extras.tail_rest_segment_lengths[ index ] ) < 1e-6 );
+
+	}
+
+	const positionReaders = gltf.meshes.flatMap( ( mesh ) => mesh.primitives ).map(
+		( primitive ) => createAccessorReader( gltf, binary, primitive.attributes.POSITION ),
+	);
+	for ( let pointIndex = 0; pointIndex < centerlineGltf.length; pointIndex ++ ) {
+
+		const point = centerlineGltf[ pointIndex ];
+		let nearestSurface = Infinity;
+		for ( const positions of positionReaders ) {
+
+			for ( let vertex = 0; vertex < positions.accessor.count; vertex ++ ) {
+
+				nearestSurface = Math.min( nearestSurface, distance( point, [
+					positions.read( vertex, 0 ),
+					positions.read( vertex, 1 ),
+					positions.read( vertex, 2 ),
+				] ) );
+
+			}
+
+		}
+		assert.ok( nearestSurface < 0.09,
+			`centerline sample ${ pointIndex } is ${ nearestSurface } away from the original tail surface` );
+
+	}
+
 	assert.equal( nodeByName.has( 'Chameleon_Physics_Tail' ), false,
 		'the procedural straight tail must not leak into the hybrid export' );
 

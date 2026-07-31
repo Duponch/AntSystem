@@ -141,6 +141,8 @@ function assertFiniteHybrid( fixture ) {
 		].every( Number.isFinite ), `non-finite bone transform: ${ object.name }` );
 
 	} );
+	assert.equal( chameleon.tailPhysics.isFinite(), true );
+	assert.ok( Number.isFinite( chameleon.tailPhysics.maxSegmentError() ) );
 	assert.equal( physics.stats.invalidBodies, 0 );
 
 }
@@ -193,6 +195,10 @@ test( 'CHAMELEON-LAB-RAGDOLL-001 hybrid architecture owns one dynamic root and f
 	assert.equal( chameleon.pelvis.body.isDynamic(), true );
 	assert.equal( chameleon.parts[ 0 ].colliders.length, 2 );
 	assert.ok( chameleon.feet.every( ( foot ) => foot.part.body === chameleon.pelvis.body ) );
+	assert.equal( chameleon.tail.deformationMode, 'passive-xpbd-original-mesh' );
+	assert.equal( chameleon.tail.nodeCount, 13 );
+	assert.equal( chameleon.tail.physicsDofs, 12 );
+	assert.equal( chameleon.tailPhysics.getView().positions.length, 39 );
 	assertFiniteHybrid( fixture );
 	fixture.dispose();
 
@@ -394,6 +400,118 @@ test( 'CHAMELEON-LAB-RAGDOLL-007 repeated control and reset cycles never create 
 	assert.ok( bodyState( root ).every( Number.isFinite ) );
 	assert.equal( fixture.physics.stats.invalidBodies, 0 );
 	assert.ok( fixture.chameleon.contactCount >= 3 );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-008 whole-body strides engage proximal joints without wrist jitter', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon } = fixture;
+	chameleon.setCommand( { move: new THREE.Vector3( -1, 0, 0.12 ) } );
+	runFrames( fixture, 120, 1 );
+	const baselines = chameleon.rig.legs.map( ( leg ) => ( {
+		girdle: leg.girdle.quaternion.clone(),
+		upper: leg.upper.quaternion.clone(),
+		lower: leg.lower.quaternion.clone(),
+		palm: leg.palm.quaternion.clone(),
+	} ) );
+	const excursions = chameleon.rig.legs.map( () => ( {
+		girdle: 0, upper: 0, lower: 0, palmFrame: 0,
+	} ) );
+	const bodyRest = new Map( chameleon.rig.rest.map( ( pose ) => [
+		pose.bone.name,
+		pose.quaternion,
+	] ) );
+	const bodyPeak = { pelvis: 0, spine_01: 0, spine_02: 0, neck: 0, head: 0 };
+	runFrames( fixture, 120, 5, () => {
+
+		chameleon.syncVisual( 1 );
+		for ( let index = 0; index < chameleon.rig.legs.length; index ++ ) {
+
+			const leg = chameleon.rig.legs[ index ];
+			const baseline = baselines[ index ];
+			const peak = excursions[ index ];
+			peak.girdle = Math.max( peak.girdle, baseline.girdle.angleTo( leg.girdle.quaternion ) );
+			peak.upper = Math.max( peak.upper, baseline.upper.angleTo( leg.upper.quaternion ) );
+			peak.lower = Math.max( peak.lower, baseline.lower.angleTo( leg.lower.quaternion ) );
+			peak.palmFrame = Math.max( peak.palmFrame, baseline.palm.angleTo( leg.palm.quaternion ) );
+			baseline.palm.copy( leg.palm.quaternion );
+
+		}
+		for ( const name of Object.keys( bodyPeak ) ) {
+
+			const bone = chameleon.rig.byName.get( name );
+			bodyPeak[ name ] = Math.max(
+				bodyPeak[ name ],
+				bodyRest.get( name ).angleTo( bone.quaternion ),
+			);
+
+		}
+
+	} );
+	for ( const [ index, peak ] of excursions.entries() ) {
+
+		assert.ok( peak.girdle > 0.08, `girdle ${ index } excursion ${ peak.girdle }` );
+		assert.ok( peak.upper > 0.12, `upper ${ index } excursion ${ peak.upper }` );
+		assert.ok( peak.lower > 0.16, `lower ${ index } excursion ${ peak.lower }` );
+		assert.ok( peak.palmFrame < 0.18, `palm ${ index } frame delta ${ peak.palmFrame }` );
+
+	}
+	assert.ok( bodyPeak.pelvis > 0.035 );
+	assert.ok( bodyPeak.spine_01 > 0.015 );
+	assert.ok( bodyPeak.head > 0.005 );
+	assert.ok( bodyPeak.head < bodyPeak.pelvis + bodyPeak.spine_01 + bodyPeak.spine_02 );
+	assertAnatomicalPose( chameleon );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground without penetration', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon } = fixture;
+	const restTailRotations = chameleon.tailVisualRig.bones.map(
+		( bone ) => bone.quaternion.clone(),
+	);
+	runFrames( fixture, 120, 4, () => assertFiniteHybrid( fixture ) );
+	chameleon.syncVisual( 1 );
+	const positions = chameleon.tailPhysics.getView().positions;
+	const radii = chameleon.tailPhysics.getView().radii;
+	for ( let node = 1; node < chameleon.tail.nodeCount; node ++ ) {
+
+		assert.ok(
+			positions[ node * 3 + 1 ] >= radii[ node ] * chameleon.settings.tailCollisionScale - 0.006,
+			`tail node ${ node } penetrates ground: ${ positions[ node * 3 + 1 ] }`,
+		);
+
+	}
+	let deformedBones = 0;
+	const boneAxis = new THREE.Vector3( 0, 1, 0 );
+	const physicalDirection = new THREE.Vector3();
+	const boneQuaternion = new THREE.Quaternion();
+	for ( let index = 0; index < chameleon.tailVisualRig.bones.length; index ++ ) {
+
+		const bone = chameleon.tailVisualRig.bones[ index ];
+		if ( restTailRotations[ index ].angleTo( bone.quaternion ) > 0.01 ) deformedBones ++;
+		bone.getWorldQuaternion( boneQuaternion );
+		boneAxis.set( 0, 1, 0 ).applyQuaternion( boneQuaternion ).normalize();
+		physicalDirection.set(
+			positions[ index * 3 + 3 ] - positions[ index * 3 ],
+			positions[ index * 3 + 4 ] - positions[ index * 3 + 1 ],
+			positions[ index * 3 + 5 ] - positions[ index * 3 + 2 ],
+		).normalize();
+		assert.ok(
+			boneAxis.dot( physicalDirection ) > 0.995,
+			`tail bone ${ index } does not follow the passive centreline`,
+		);
+
+	}
+	assert.ok( deformedBones >= 8, `only ${ deformedBones } tail bones deformed` );
+	assert.ok( chameleon.tailPhysics.kineticEnergy() < chameleon.tailPhysics.maximumKineticEnergy() );
+	assert.ok( chameleon.tailPhysics.stats.totalSteps >= 480 );
+	assert.ok( chameleon.tailPhysics.maxSegmentError() < 0.006, `tail segment error ${ chameleon.tailPhysics.maxSegmentError() }` );
 	fixture.dispose();
 
 } );

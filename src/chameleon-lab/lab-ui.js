@@ -194,6 +194,108 @@ export function createLabUI( {
 		step: 0.05,
 		format: ( value ) => `${ value.toFixed( 2 ) } Hz`,
 	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Longueur du pas',
+		object: ragdoll.settings,
+		property: 'stepLength',
+		min: 0.08,
+		max: 0.28,
+		step: 0.005,
+		format: ( value ) => `${ value.toFixed( 3 ) } m`,
+	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Hauteur du pas',
+		object: ragdoll.settings,
+		property: 'stepHeight',
+		min: 0.015,
+		max: 0.14,
+		step: 0.005,
+		format: ( value ) => `${ value.toFixed( 3 ) } m`,
+	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Amplitude épaules / hanches',
+		object: ragdoll.settings,
+		property: 'strideAmplitude',
+		min: 0.1,
+		max: 0.72,
+		step: 0.01,
+		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
+	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Levée des membres',
+		object: ragdoll.settings,
+		property: 'limbLift',
+		min: 0,
+		max: 0.55,
+		step: 0.01,
+		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
+	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Flexion coudes / genoux',
+		object: ragdoll.settings,
+		property: 'jointFlex',
+		min: 0,
+		max: 0.9,
+		step: 0.01,
+		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
+	} );
+	makeRange( {
+		parent: muscles,
+		label: 'Mouvement du corps',
+		object: ragdoll.settings,
+		property: 'bodyMotion',
+		min: 0,
+		max: 2,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) }×`,
+	} );
+
+	const tail = fieldset( panel, 'Queue passive' );
+	makeRange( {
+		parent: tail,
+		label: 'Souplesse',
+		object: ragdoll.settings,
+		property: 'tailFlexibility',
+		min: 0,
+		max: 1,
+		step: 0.01,
+		format: ( value ) => value.toFixed( 2 ),
+	} );
+	makeRange( {
+		parent: tail,
+		label: 'Amortissement',
+		object: ragdoll.settings,
+		property: 'tailDamping',
+		min: 0,
+		max: 8,
+		step: 0.1,
+		format: ( value ) => value.toFixed( 1 ),
+	} );
+	makeRange( {
+		parent: tail,
+		label: 'Collision',
+		object: ragdoll.settings,
+		property: 'tailCollisionScale',
+		min: 0.5,
+		max: 1.75,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) }×`,
+	} );
+	makeRange( {
+		parent: tail,
+		label: 'Gravité de la queue',
+		object: ragdoll.settings,
+		property: 'tailGravity',
+		min: 0,
+		max: 2,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) }×`,
+	} );
 
 	const grip = fieldset( panel, 'Appuis' );
 	makeToggle( {

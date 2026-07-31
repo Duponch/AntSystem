@@ -110,12 +110,26 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
 - marche sur les troncs rugueux, puis glissement attendu sur le verre ;
 - passage locomotion stabilisée ↔ **Physique libre** sans téléportation, vrille ni articulation qui s’entortille ;
 - saisie, secousse, lancer du corps unique et récupération progressive ;
-- conservation exacte de la queue originale enroulée, sans tube de remplacement ;
+- enjambées lisibles initiées aux épaules/hanches, flexion des coudes/genoux,
+  mouvement du bassin et du thorax, tête stabilisée et absence de jitter distal ;
+- conservation exacte des 7 206 sommets de la queue originale, sans tube de
+  remplacement, avec inertie, amortissement et contacts continus sur le décor ;
 - caméra sans traversée persistante du décor ;
 - debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
-Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`, `chameleon-lab-controller`, `chameleon-lab-active-ragdoll` et `chameleon-physical-asset` protègent la structure, les commandes et les bornes. Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `007` sont maintenant l’autorité de non-régression de l’architecture hybride : un corps Rapier, quatre appuis, IK et efforts bornés, mode libre et valeurs finies. `CHAMELEON-PHYSICAL-ASSET-001/002` verrouillent le mesh source exact et `original_tail_vertices = 7206`. Les transitions multi-surfaces complexes, la saisie visuelle, le retour du mode libre et la sensation du pilotage exigent encore l’inspection runtime.
+Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
+`chameleon-lab-controller`, `chameleon-lab-whole-body-gait`,
+`chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll` et
+`chameleon-physical-asset` protègent la structure, les commandes et les bornes.
+Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `009` sont l’autorité de
+non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
+corps entier et IK proximale bornées, mode libre, queue XPBD passive et valeurs
+finies. Les preuves d’asset verrouillent le mesh source exact,
+`original_tail_vertices = 7206`, la ligne centrale courbe, les douze os et les
+poids géodésiques. Les transitions multi-surfaces complexes, la saisie visuelle,
+la déformation cutanée de la queue et la sensation du pilotage exigent encore
+l’inspection runtime.
 ## Garde documentaire
 
 ```powershell

@@ -14,9 +14,10 @@ Cette architecture hybride privilégie la stabilité : les articulations
 visuelles ne sont pas une chaîne de corps rigides libre de s’entortiller.
 
 Le modèle visible reprend la géométrie originale, y compris les **7 206 sommets
-de la queue d’origine**. La queue conserve donc sa forme enroulée ; elle n’est
-ni remplacée par un tube, ni reconstruite. Le laboratoire ne fait pas avancer
-la colonie.
+de la queue d’origine**. Elle n’est ni remplacée par un tube, ni reconstruite :
+douze os suivent sa courbure source, puis une simulation passive la laisse
+traîner, se balancer et se poser sur le décor. Le laboratoire ne fait pas
+avancer la colonie.
 
 ## Ouvrir le laboratoire
 
@@ -57,9 +58,11 @@ ne signifie donc pas revenir horizontalement vers le sol.
 
 Un seul corps Rapier porte la masse, la gravité, les collisions et les
 impulsions. Jusqu’à quatre appuis sont recherchés sur les surfaces autorisées.
-Leur cadre moyen stabilise progressivement le corps, tandis qu’une IK à angles
-limités place les pattes. Les appuis peuvent avoir des normales différentes,
-par exemple dans un angle entre le sol et un mur.
+Leur cadre moyen stabilise progressivement le corps. Une animation procédurale
+prépare d’abord une vraie enjambée depuis l’épaule ou la hanche, plie le coude
+ou le genou et anime bassin, thorax, cou et tête ; une IK à angles limités ferme
+ensuite précisément le contact du pied. Les appuis peuvent avoir des normales
+différentes, par exemple dans un angle entre le sol et un mur.
 
 ### Physique libre
 
@@ -110,11 +113,31 @@ progressivement, sans téléportation.
   directement la vitesse monde ;
 - **Force motrice** règle la force disponible pour atteindre la vitesse visée.
 
-### Stabilisation
+### Stabilisation et démarche
 
 - **Stabilité du corps** dose le rappel vers le cadre formé par les appuis ;
 - **Amortissement** réduit les oscillations et dépassements ;
-- **Cadence** règle le rythme des pas diagonaux.
+- **Cadence** règle le rythme des pas diagonaux ;
+- **Longueur du pas** détermine l’avancée de chaque cible ;
+- **Hauteur du pas** règle le dégagement pendant le transfert ;
+- **Amplitude épaules / hanches** règle la part du pas produite par les
+  articulations proximales ;
+- **Levée des membres** et **Flexion coudes / genoux** règlent séparément le
+  geste de franchissement ;
+- **Mouvement du corps** dose les oscillations du bassin et du thorax ainsi que
+  la compensation du cou et de la tête.
+
+### Queue passive
+
+- **Souplesse** règle la conservation de la courbure et l’ampleur du balancement ;
+- **Amortissement** dissipe l’énergie secondaire ;
+- **Collision** agrandit ou réduit le rayon de contact des treize nœuds ;
+- **Gravité queue** dose son poids sans modifier la gravité du corps.
+
+La racine de la queue suit le bassin ; ses douze segments restants sont passifs.
+Ils conservent leur longueur, répondent à l’inertie et sont projetés hors du sol,
+des murs, des rochers et des troncs. La queue n’est pas préhensile dans ce
+prototype.
 
 ### Appuis
 
@@ -122,10 +145,6 @@ progressivement, sans téléportation.
 - **Force de maintien** borne l’effort transmis au corps ;
 - **Rigidité d’appui** règle la rapidité du rappel ;
 - **Portée capteurs** règle la distance maximale de recherche d’un support.
-
-La queue originale est actuellement visuelle et solidaire du bassin. Elle ne
-possède ni prise autonome, ni degré de liberté physique : ce choix conserve sa
-silhouette exacte et supprime une source importante d’instabilité.
 
 ### Affichage et coût
 
@@ -153,7 +172,8 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
   disponibles ;
 - l’animal glisse sur le verre ;
 - tout le modèle suit le corps unique pendant un lancer ;
-- la queue conserve sa forme originale enroulée avec le bassin ;
+- la queue se déroule ou se replie passivement selon les contacts, traîne sur le
+  sol et continue brièvement son mouvement lorsque le corps tourne ou s’arrête ;
 - la caméra se rapproche lorsqu’un obstacle masque le caméléon ;
 - `R` replace immédiatement le corps, car il s’agit d’une réinitialisation
   volontaire.
@@ -165,7 +185,8 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 - le corps change instantanément de position sans `R` ;
 - un pied reste pris dans le vide ou sur le verre ;
 - le corps traverse durablement le sol, un mur, un rocher ou un tronc ;
-- la queue est remplacée par une forme tubulaire ou perd sa courbure originale ;
+- la queue est remplacée par une forme tubulaire, s’allonge, se détache du
+  bassin, traverse durablement un obstacle ou oscille sans perdre d’énergie ;
 - **Intégrité** affiche un nombre au lieu de `OK` ;
 - la route normale de la colonie charge le laboratoire ou son moteur Rapier.
 

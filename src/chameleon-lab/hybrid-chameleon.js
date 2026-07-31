@@ -12,10 +12,20 @@ import {
 	stableRootForce,
 	supportFrameFromContacts,
 } from './hybrid-controller-model.js';
+import {
+	WholeBodyGaitModel,
+	WHOLE_BODY_POSE,
+} from './whole-body-gait-model.js';
+import {
+	PassiveTailPhysics,
+	PASSIVE_TAIL_NODE_COUNT,
+} from './passive-tail-physics.js';
+import { PassiveTailVisualRig } from './passive-tail-visual-rig.js';
 
 const WORLD_UP = new THREE.Vector3( 0, 1, 0 );
 const LOCAL_FORWARD = new THREE.Vector3( -1, 0, 0 );
 const LOCAL_UP = new THREE.Vector3( 0, 1, 0 );
+const LOCAL_SIDE = new THREE.Vector3( 0, 0, 1 );
 const ZERO = new THREE.Vector3();
 const IDENTITY_QUATERNION = new THREE.Quaternion();
 const BODY_COLLISION_GROUP = chameleonCollisionGroups();
@@ -137,6 +147,10 @@ class StableVisualRig {
 
 		} );
 		this.pelvis = this._require( 'pelvis' );
+		this.spine01 = this._require( 'spine_01' );
+		this.spine02 = this._require( 'spine_02' );
+		this.neck = this._require( 'neck' );
+		this.head = this._require( 'head' );
 		this.rest = this.bones.map( ( bone ) => ( {
 			bone,
 			position: bone.position.clone(),
@@ -156,7 +170,10 @@ class StableVisualRig {
 				upper,
 				lower,
 				palm,
-				joints: [ lower, upper, girdle ],
+				// A proximal-to-distal solve makes each stride originate at the
+				// shoulder/hip instead of shaking the wrist or ankle in place.
+				joints: [ girdle, upper, lower ],
+				jointWeights: [ 0.62, 0.82, 0.7 ],
 				restQuaternions: new Map( [
 					[ girdle, girdle.quaternion.clone() ],
 					[ upper, upper.quaternion.clone() ],
@@ -179,6 +196,84 @@ class StableVisualRig {
 		this._currentNormal = new THREE.Vector3();
 		this._target = new THREE.Vector3();
 		this._desiredNormal = new THREE.Vector3();
+		this._modelWorldQuaternion = new THREE.Quaternion();
+		this._axisWorld = new THREE.Vector3();
+		this._bodyCandidate = new THREE.Quaternion();
+		this._pelvisRestPosition = this.pelvis.position.clone();
+
+	}
+
+	_rotateInModelSpace( bone, modelAxis, angle ) {
+
+		if ( Math.abs( angle ) < 1e-7 ) return;
+		bone.updateWorldMatrix( true, false );
+		this.model.getWorldQuaternion( this._modelWorldQuaternion );
+		this._axisWorld.copy( modelAxis ).applyQuaternion( this._modelWorldQuaternion ).normalize();
+		this._delta.setFromAxisAngle( this._axisWorld, angle );
+		bone.getWorldQuaternion( this._jointWorldQuaternion );
+		this._bodyCandidate.copy( this._delta ).multiply( this._jointWorldQuaternion );
+		bone.parent.getWorldQuaternion( this._parentWorldQuaternion ).invert();
+		bone.quaternion.copy(
+			this._bodyCandidate.premultiply( this._parentWorldQuaternion ),
+		).normalize();
+		bone.updateWorldMatrix( false, true );
+
+	}
+
+	applyWholeBodyPose( pose, weight = 1 ) {
+
+		if ( ! pose || pose.length <= WHOLE_BODY_POSE.MOTION_WEIGHT ) return;
+		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
+		if ( influence <= 0 ) return;
+		this.pelvis.position.copy( this._pelvisRestPosition );
+		this.pelvis.position.y += pose[ WHOLE_BODY_POSE.PELVIS_BOB ] * influence;
+		this.pelvis.position.z += pose[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] * influence;
+		this._rotateInModelSpace(
+			this.pelvis, LOCAL_UP, pose[ WHOLE_BODY_POSE.PELVIS_YAW ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.pelvis, LOCAL_FORWARD, pose[ WHOLE_BODY_POSE.PELVIS_ROLL ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.spine01, LOCAL_UP, pose[ WHOLE_BODY_POSE.CHEST_YAW ] * 0.56 * influence,
+		);
+		this._rotateInModelSpace(
+			this.spine02, LOCAL_UP, pose[ WHOLE_BODY_POSE.CHEST_YAW ] * 0.44 * influence,
+		);
+		this._rotateInModelSpace(
+			this.spine01, LOCAL_FORWARD, pose[ WHOLE_BODY_POSE.CHEST_ROLL ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.spine02, LOCAL_SIDE, pose[ WHOLE_BODY_POSE.CHEST_PITCH ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.neck, LOCAL_UP, pose[ WHOLE_BODY_POSE.NECK_YAW ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.neck, LOCAL_SIDE, pose[ WHOLE_BODY_POSE.NECK_PITCH ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.head, LOCAL_UP, pose[ WHOLE_BODY_POSE.HEAD_YAW ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.head, LOCAL_SIDE, pose[ WHOLE_BODY_POSE.HEAD_PITCH ] * influence,
+		);
+
+		for ( let index = 0; index < this.legs.length; index ++ ) {
+
+			const leg = this.legs[ index ];
+			const side = index === 0 || index === 2 ? 1 : -1;
+			const stride = pose[ WHOLE_BODY_POSE.STRIDE_0 + index ] * influence;
+			const lift = pose[ WHOLE_BODY_POSE.LIFT_0 + index ] * influence;
+			const flex = pose[ WHOLE_BODY_POSE.FLEX_0 + index ] * influence;
+			this._rotateInModelSpace( leg.girdle, LOCAL_UP, -stride * side * 0.58 );
+			this._rotateInModelSpace( leg.upper, LOCAL_UP, -stride * side * 0.52 );
+			this._rotateInModelSpace( leg.girdle, LOCAL_FORWARD, lift * 0.58 );
+			this._rotateInModelSpace( leg.upper, LOCAL_FORWARD, lift * 0.54 );
+			this._rotateInModelSpace( leg.lower, LOCAL_FORWARD, flex * side * 0.76 );
+
+		}
+		this.model.updateMatrixWorld( true );
 
 	}
 
@@ -229,7 +324,7 @@ class StableVisualRig {
 
 	}
 
-	solve( footTargets, footNormals, weight = 1 ) {
+	solve( footTargets, footNormals, wholeBodyPose = null, weight = 1 ) {
 
 		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
 		if ( influence <= 0 ) {
@@ -238,6 +333,7 @@ class StableVisualRig {
 			return;
 
 		}
+		this.applyWholeBodyPose( wholeBodyPose, influence );
 		for ( let index = 0; index < this.legs.length; index ++ ) {
 
 			const offset = index * 3;
@@ -245,9 +341,11 @@ class StableVisualRig {
 				footTargets[ offset ], footTargets[ offset + 1 ], footTargets[ offset + 2 ],
 			);
 			const leg = this.legs[ index ];
-			for ( let iteration = 0; iteration < 4; iteration ++ ) {
+			for ( let iteration = 0; iteration < 5; iteration ++ ) {
 
-				for ( const joint of leg.joints ) {
+				for ( let jointIndex = 0; jointIndex < leg.joints.length; jointIndex ++ ) {
+
+					const joint = leg.joints[ jointIndex ];
 
 					joint.updateWorldMatrix( true, true );
 					joint.getWorldPosition( this._jointWorld );
@@ -256,12 +354,16 @@ class StableVisualRig {
 					this._toTarget.copy( target ).sub( this._jointWorld );
 					if ( this._toPalm.lengthSq() < 1e-9 || this._toTarget.lengthSq() < 1e-9 ) continue;
 					this._delta.setFromUnitVectors( this._toPalm.normalize(), this._toTarget.normalize() );
+					this._delta.slerp(
+						IDENTITY_QUATERNION,
+						1 - leg.jointWeights[ jointIndex ],
+					);
 					joint.getWorldQuaternion( this._jointWorldQuaternion );
 					this._candidate.copy( this._delta ).multiply( this._jointWorldQuaternion );
 					joint.parent.getWorldQuaternion( this._parentWorldQuaternion ).invert();
 					this._candidate.premultiply( this._parentWorldQuaternion ).normalize();
 					const bounded = this._boundJoint( leg, joint, this._candidate );
-					joint.quaternion.slerpQuaternions( leg.restQuaternions.get( joint ), bounded, influence );
+					joint.quaternion.slerp( bounded, influence );
 
 				}
 
@@ -372,6 +474,39 @@ export async function createHybridChameleon( {
 	visualRoot.position.copy( spawn );
 	visualRoot.updateMatrixWorld( true );
 	rig.restore();
+	const tailVisualRig = new PassiveTailVisualRig( model );
+	const tailInitialPositions = tailVisualRig.captureRestWorldPositions();
+	const tailRootBodyOffset = new THREE.Vector3(
+		tailInitialPositions[ 0 ] - spawn.x,
+		tailInitialPositions[ 1 ] - spawn.y,
+		tailInitialPositions[ 2 ] - spawn.z,
+	);
+	const tailRadii = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
+	for ( let node = 0; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+		const ratio = node / ( PASSIVE_TAIL_NODE_COUNT - 1 );
+		tailRadii[ node ] = THREE.MathUtils.lerp( 0.052, 0.007, Math.pow( ratio, 0.72 ) );
+
+	}
+	const tailPhysics = new PassiveTailPhysics( {
+		fixedDt: physics.fixedDt || 1 / 120,
+		maxSubsteps: 1,
+		solverIterations: 7,
+		stretchCompliance: 0,
+		bendCompliance: 5e-6,
+		damping: 2.1,
+		collisionFriction: 0.34,
+		maxSpeed: 8,
+		gravity: physics.world.gravity,
+		initialPositions: tailInitialPositions,
+		radii: tailRadii,
+	} );
+	for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+		const ratio = node / ( PASSIVE_TAIL_NODE_COUNT - 1 );
+		tailPhysics.inverseMasses[ node ] = THREE.MathUtils.lerp( 0.38, 1, ratio );
+
+	}
 
 	const { RAPIER, world } = physics;
 	const body = world.createRigidBody(
@@ -424,14 +559,17 @@ export async function createHybridChameleon( {
 	} ) );
 	const tail = Object.freeze( {
 		name: 'tail_original',
-		deformationMode: 'rigid-pelvis',
-		physicsDofs: 0,
+		deformationMode: 'passive-xpbd-original-mesh',
+		physicsDofs: PASSIVE_TAIL_NODE_COUNT - 1,
+		nodeCount: PASSIVE_TAIL_NODE_COUNT,
+		solver: tailPhysics,
+		visualRig: tailVisualRig,
 	} );
 
 	const settings = {
 		motorStrength: 1,
 		motorDamping: 1,
-		moveSpeed: 1.25,
+		moveSpeed: 0.68,
 		sprintMultiplier: 1.75,
 		moveForce: 13,
 		turnTorque: 0.9,
@@ -440,8 +578,18 @@ export async function createHybridChameleon( {
 		gripStiffness: 175,
 		gripDamping: 8,
 		gripReach: 0.42,
-		gaitFrequency: 1.55,
+		gaitFrequency: 0.82,
 		animationSpeed: 1,
+		stepLength: 0.15,
+		stepHeight: 0.06,
+		strideAmplitude: 0.52,
+		limbLift: 0.3,
+		jointFlex: 0.7,
+		bodyMotion: 1,
+		tailDamping: 2.1,
+		tailFlexibility: 0.46,
+		tailCollisionScale: 1,
+		tailGravity: 1,
 	};
 	const command = {
 		move: new THREE.Vector3(),
@@ -452,12 +600,24 @@ export async function createHybridChameleon( {
 	const gait = new ChameleonProceduralGait( {
 		fixedStep: physics.fixedDt || 1 / 120,
 		maxSubsteps: 1,
-		stepDistance: 0.09,
-		stepHeight: 0.045,
+		stepDistance: settings.stepLength,
+		stepHeight: settings.stepHeight,
 		minSwingDuration: 0.09,
 		maxSwingDuration: 0.24,
 		minTargetError: 0.018,
 		bodyClearance: 0,
+	} );
+	const wholeBodyGait = new WholeBodyGaitModel( {
+		responseFrequency: 7.5,
+		dampingRatio: 1.05,
+	} );
+	const wholeBodyInput = Object.seal( {
+		gaitView: gait.getView(),
+		speed: 0,
+		strideAmplitude: settings.strideAmplitude,
+		limbLift: settings.limbLift,
+		jointFlex: settings.jointFlex,
+		bodyMotion: settings.bodyMotion,
 	} );
 	const candidatePositions = new Float32Array( 12 );
 	const candidateNormals = new Float32Array( 12 );
@@ -496,6 +656,71 @@ export async function createHybridChameleon( {
 	const tempRight = new THREE.Vector3();
 	const desiredRoot = new THREE.Vector3();
 	const rootSuggestion = new THREE.Vector3();
+	const tailRootAnchor = new THREE.Vector3();
+	const tailCollisionNormalFallback = new THREE.Vector3();
+	const tailSurfaceProjectors = [];
+	for ( const [ colliderHandle, surface ] of physics.surfaceByCollider?.entries?.() ?? [] ) {
+
+		const collider = world.getCollider( colliderHandle );
+		if ( ! collider ) continue;
+		const centre = collider.translation();
+		let boundRadius = Infinity;
+		let oneSidedGround = false;
+		let halfX = 0;
+		let halfZ = 0;
+		let topY = 0;
+		const shapeType = collider.shapeType();
+		if ( shapeType === RAPIER.ShapeType.Cuboid ) {
+
+			const half = collider.halfExtents();
+			boundRadius = Math.hypot( half.x, half.y, half.z );
+			oneSidedGround = surface?.kind === 'ground' || surface?.kind === 'soil';
+			if ( oneSidedGround ) {
+
+				halfX = half.x;
+				halfZ = half.z;
+				topY = centre.y + half.y;
+
+			}
+
+		} else if ( shapeType === RAPIER.ShapeType.Cylinder
+			|| shapeType === RAPIER.ShapeType.Capsule
+			|| shapeType === RAPIER.ShapeType.Cone ) {
+
+			boundRadius = Math.hypot( collider.radius(), collider.halfHeight() )
+				+ ( shapeType === RAPIER.ShapeType.Capsule ? collider.radius() : 0 );
+
+		} else if ( shapeType === RAPIER.ShapeType.Ball ) {
+
+			boundRadius = collider.radius();
+
+		} else {
+
+			const vertices = collider.vertices?.();
+			if ( vertices?.length >= 3 ) {
+
+				boundRadius = 0;
+				for ( let offset = 0; offset < vertices.length; offset += 3 )
+					boundRadius = Math.max( boundRadius, Math.hypot(
+						vertices[ offset ], vertices[ offset + 1 ], vertices[ offset + 2 ],
+					) );
+
+			}
+
+		}
+		tailSurfaceProjectors.push( Object.freeze( {
+			collider,
+			x: centre.x,
+			y: centre.y,
+			z: centre.z,
+			boundRadius,
+			oneSidedGround,
+			halfX,
+			halfZ,
+			topY,
+		} ) );
+
+	}
 	let contactCount = 0;
 	let dragging = false;
 	let elapsed = 0;
@@ -573,7 +798,8 @@ export async function createHybridChameleon( {
 
 			const offset = foot * 3;
 			const nominal = bodyToFootOffsets[ foot ].clone().applyQuaternion( rotation ).add( position );
-			if ( movement.lengthSq() > 0 ) nominal.addScaledVector( movement, 0.055 );
+			if ( movement.lengthSq() > 0 )
+				nominal.addScaledVector( movement, Math.max( 0.055, settings.stepLength * 0.72 ) );
 			nominalFootPositions[ offset ] = nominal.x;
 			nominalFootPositions[ offset + 1 ] = nominal.y;
 			nominalFootPositions[ offset + 2 ] = nominal.z;
@@ -622,9 +848,18 @@ export async function createHybridChameleon( {
 		gaitInput.forwardY = forward.y;
 		gaitInput.forwardZ = forward.z;
 		const cadence = Math.max( 0.1, settings.gaitFrequency * settings.animationSpeed );
-		gait.minSwingDuration = 0.12 / cadence;
-		gait.maxSwingDuration = 0.28 / cadence;
+		gait.stepDistance = THREE.MathUtils.clamp( settings.stepLength, 0.08, 0.28 );
+		gait.stepHeight = THREE.MathUtils.clamp( settings.stepHeight, 0.015, 0.14 );
+		gait.minSwingDuration = 0.16 / cadence;
+		gait.maxSwingDuration = 0.34 / cadence;
 		const view = gait.update( dt, gaitInput );
+		wholeBodyInput.gaitView = view;
+		wholeBodyInput.speed = gaitInput.speed;
+		wholeBodyInput.strideAmplitude = settings.strideAmplitude;
+		wholeBodyInput.limbLift = settings.limbLift;
+		wholeBodyInput.jointFlex = settings.jointFlex;
+		wholeBodyInput.bodyMotion = settings.bodyMotion;
+		wholeBodyGait.update( dt, wholeBodyInput );
 		currentFootPositions.set( view.footPositions );
 		currentFootNormals.set( view.footNormals );
 		const frame = supportFrameFromContacts( currentFootPositions, currentFootNormals, activeContacts );
@@ -700,6 +935,122 @@ export async function createHybridChameleon( {
 
 	}
 
+	function projectTailPoint( point, radius, outPoint, outNormal ) {
+
+		const scaledRadius = radius * THREE.MathUtils.clamp( settings.tailCollisionScale, 0.25, 2 );
+		let bestCorrection = 0;
+		let bestPointX = 0;
+		let bestPointY = 0;
+		let bestPointZ = 0;
+		let bestNormalX = 0;
+		let bestNormalY = 1;
+		let bestNormalZ = 0;
+		for ( const entry of tailSurfaceProjectors ) {
+
+			if ( entry.oneSidedGround
+				&& Math.abs( point.x - entry.x ) <= entry.halfX + scaledRadius
+				&& Math.abs( point.z - entry.z ) <= entry.halfZ + scaledRadius ) {
+
+				const correction = entry.topY + scaledRadius - point.y;
+				if ( correction > bestCorrection ) {
+
+					bestCorrection = correction;
+					bestNormalX = 0;
+					bestNormalY = 1;
+					bestNormalZ = 0;
+					bestPointX = point.x;
+					bestPointY = entry.topY + scaledRadius;
+					bestPointZ = point.z;
+
+				}
+				continue;
+
+			}
+			const broadRadius = entry.boundRadius + scaledRadius;
+			if ( Number.isFinite( broadRadius ) ) {
+
+				const broadX = point.x - entry.x;
+				const broadY = point.y - entry.y;
+				const broadZ = point.z - entry.z;
+				if ( broadX * broadX + broadY * broadY + broadZ * broadZ
+					> broadRadius * broadRadius ) continue;
+
+			}
+			const projection = entry.collider.projectPoint( point, false );
+			if ( ! projection ) continue;
+			let nx = projection.isInside
+				? projection.point.x - point.x
+				: point.x - projection.point.x;
+			let ny = projection.isInside
+				? projection.point.y - point.y
+				: point.y - projection.point.y;
+			let nz = projection.isInside
+				? projection.point.z - point.z
+				: point.z - projection.point.z;
+			const distance = Math.hypot( nx, ny, nz );
+			const correction = projection.isInside
+				? distance + scaledRadius
+				: scaledRadius - distance;
+			if ( correction <= bestCorrection ) continue;
+			if ( distance > 1e-8 ) {
+
+				nx /= distance;
+				ny /= distance;
+				nz /= distance;
+
+			} else {
+
+				tailCollisionNormalFallback.set(
+					point.x - entry.x,
+					point.y - entry.y,
+					point.z - entry.z,
+				);
+				if ( tailCollisionNormalFallback.lengthSq() < 1e-8 )
+					tailCollisionNormalFallback.copy( averageSupportNormal );
+				if ( tailCollisionNormalFallback.lengthSq() < 1e-8 )
+					tailCollisionNormalFallback.copy( WORLD_UP );
+				tailCollisionNormalFallback.normalize();
+				nx = tailCollisionNormalFallback.x;
+				ny = tailCollisionNormalFallback.y;
+				nz = tailCollisionNormalFallback.z;
+
+			}
+			bestCorrection = correction;
+			bestNormalX = nx;
+			bestNormalY = ny;
+			bestNormalZ = nz;
+			bestPointX = projection.point.x + nx * scaledRadius;
+			bestPointY = projection.point.y + ny * scaledRadius;
+			bestPointZ = projection.point.z + nz * scaledRadius;
+
+		}
+		if ( bestCorrection <= 0 ) return false;
+		outNormal.x = bestNormalX;
+		outNormal.y = bestNormalY;
+		outNormal.z = bestNormalZ;
+		outPoint.x = bestPointX;
+		outPoint.y = bestPointY;
+		outPoint.z = bestPointZ;
+		return true;
+
+	}
+	function updatePassiveTail() {
+
+		const position = readVector( body.translation(), tempPosition );
+		const rotation = readQuaternion( body.rotation(), tempQuaternion );
+		tailRootAnchor.copy( tailRootBodyOffset ).applyQuaternion( rotation ).add( position );
+		tailPhysics.gravityX = world.gravity.x * settings.tailGravity;
+		tailPhysics.gravityY = world.gravity.y * settings.tailGravity;
+		tailPhysics.gravityZ = world.gravity.z * settings.tailGravity;
+		tailPhysics.damping = THREE.MathUtils.clamp( settings.tailDamping, 0, 8 );
+		tailPhysics.bendCompliance = 2e-7 * Math.pow(
+			10,
+			THREE.MathUtils.clamp( settings.tailFlexibility, 0, 1 ) * 3.2,
+		);
+		tailPhysics.stepFixed( tailRootAnchor, projectTailPoint );
+
+	}
+
 	function beforeStep( dt ) {
 
 		elapsed += dt;
@@ -709,6 +1060,7 @@ export async function createHybridChameleon( {
 		previousQuaternion.copy( currentQuaternion );
 		updateCandidates();
 		updateGait( dt );
+		updatePassiveTail();
 		applyRootController();
 
 	}
@@ -741,7 +1093,13 @@ export async function createHybridChameleon( {
 		rig.restore();
 		const ikWeight = settings.motorStrength > 0
 			&& ! dragging && ! command.fullRagdoll && ! command.release ? 1 : 0;
-		rig.solve( renderFootPositions, renderFootNormals, ikWeight );
+		rig.solve(
+			renderFootPositions,
+			renderFootNormals,
+			wholeBodyGait.interpolate( t ),
+			ikWeight,
+		);
+		tailVisualRig.applyPositions( tailPhysics.interpolate( t ) );
 		debug.bodyRoot.position.copy( renderPosition );
 		debug.bodyRoot.quaternion.copy( renderQuaternion );
 		for ( let foot = 0; foot < 4; foot ++ ) {
@@ -787,6 +1145,9 @@ export async function createHybridChameleon( {
 
 		}
 		gait.reset( gaitInput );
+		wholeBodyGait.reset();
+		tailRootAnchor.copy( tailRootBodyOffset ).add( nextSpawn );
+		tailPhysics.reset( tailRootAnchor );
 		currentFootPositions.set( gait.getView().footPositions );
 		currentFootNormals.set( gait.getView().footNormals );
 		previousFootPositions.set( currentFootPositions );
@@ -855,6 +1216,9 @@ export async function createHybridChameleon( {
 		model,
 		visualRoot,
 		rig,
+		wholeBodyGait,
+		tailPhysics,
+		tailVisualRig,
 		parts: [ corePart ],
 		partByBone: new Map( [ [ 'pelvis', corePart ], [ 'body', corePart ] ] ),
 		feet,

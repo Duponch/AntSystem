@@ -7,13 +7,16 @@ This script is intentionally executable in Blender background mode:
 
 The original imported mesh is the geometric authority.  Body weights are
 copied vertex-for-vertex from the former physics body.  The original curled
-tail remains visually exact but is bound rigidly to the pelvis, so it adds no
-unstable physical degrees of freedom.
+tail remains visually exact while a surface-geodesic parameterization binds it
+smoothly to twelve rest bones following its real curled medial line.
 """
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import json
+import math
 import os
 import struct
 from pathlib import Path
@@ -28,6 +31,11 @@ EXPECTED_SOURCE_POLYGONS = 50_000
 EXPECTED_BODY_VERTICES = 17_796
 EXPECTED_TAIL_VERTICES = 7_206
 MAPPING_TOLERANCE = 1e-6
+TAIL_BONE_COUNT = 12
+TAIL_CENTERLINE_POINT_COUNT = TAIL_BONE_COUNT + 1
+TAIL_BONE_NAMES = tuple(f"tail_{index:02d}" for index in range(1, TAIL_BONE_COUNT + 1))
+EXPECTED_REST_MESH_SHA256 = "1732a987975806e9e34a48e529347dfca2291e02b8b9c967b3a7ae18f6f2287c"
+EXPECTED_TAIL_REST_SHA256 = "6b493bfe12b33cc1e7caba9884b4681ad9317f24ab4da3d14c12b8599a820bd1"
 
 SOURCE_NAME = "Chameleon_Imported_Source"
 ARMATURE_NAME = "Chameleon_Physics_Armature"
@@ -114,6 +122,239 @@ def source_to_rig_matrix(source: bpy.types.Object, body_template: bpy.types.Obje
     return transform
 
 
+def mesh_rest_sha256(mesh: bpy.types.Mesh) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"chameleon-rest-mesh-v1\0")
+    digest.update(struct.pack("<II", len(mesh.vertices), len(mesh.polygons)))
+    for vertex in mesh.vertices:
+        digest.update(struct.pack("<3f", *vertex.co))
+    for polygon in mesh.polygons:
+        digest.update(struct.pack("<I", len(polygon.vertices)))
+        for vertex_index in polygon.vertices:
+            digest.update(struct.pack("<I", vertex_index))
+    return digest.hexdigest()
+
+
+def tail_rest_sha256(mesh: bpy.types.Mesh, tail_indices: set[int]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"chameleon-original-tail-rest-v1\0")
+    digest.update(struct.pack("<I", len(tail_indices)))
+    for vertex_index in sorted(tail_indices):
+        digest.update(struct.pack("<I3f", vertex_index, *mesh.vertices[vertex_index].co))
+    return digest.hexdigest()
+
+
+def build_tail_geodesic_contract(
+    mesh: bpy.types.Mesh,
+    tail_indices: set[int],
+) -> tuple[list[float], list[Vector], float, list[float], int]:
+    """Parameterize the preserved tail without spatial shortcuts across its curl."""
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in mesh.vertices]
+    interface_vertices: set[int] = set()
+    for edge in mesh.edges:
+        first, second = edge.vertices
+        first_is_tail = first in tail_indices
+        second_is_tail = second in tail_indices
+        if first_is_tail and second_is_tail:
+            length = (mesh.vertices[first].co - mesh.vertices[second].co).length
+            require(length > 1e-9, f"tail edge {edge.index} has zero length")
+            adjacency[first].append((second, length))
+            adjacency[second].append((first, length))
+        elif first_is_tail != second_is_tail:
+            interface_vertices.add(first if first_is_tail else second)
+
+    require(len(interface_vertices) >= 3,
+            f"tail/body interface is undersampled: {len(interface_vertices)} vertices")
+    distances = [math.inf] * len(mesh.vertices)
+    pending: list[tuple[float, int]] = []
+    for vertex_index in sorted(interface_vertices):
+        distances[vertex_index] = 0.0
+        heapq.heappush(pending, (0.0, vertex_index))
+
+    while pending:
+        distance, vertex_index = heapq.heappop(pending)
+        if distance != distances[vertex_index]:
+            continue
+        for neighbour, edge_length in adjacency[vertex_index]:
+            candidate = distance + edge_length
+            if candidate < distances[neighbour]:
+                distances[neighbour] = candidate
+                heapq.heappush(pending, (candidate, neighbour))
+
+    unreachable = [index for index in tail_indices if not math.isfinite(distances[index])]
+    require(not unreachable, f"tail geodesic left {len(unreachable)} vertices unreachable")
+    maximum_distance = max(distances[index] for index in tail_indices)
+    require(0.5 <= maximum_distance <= 3.0,
+            f"tail surface geodesic length is implausible: {maximum_distance:.9g}")
+
+    ordered_tail = sorted(tail_indices)
+    sigma = maximum_distance / (TAIL_BONE_COUNT * 1.8)
+
+    def centroid(indices: list[int], target: float | None = None) -> Vector:
+        require(indices, "tail centerline shell is empty")
+        total = Vector()
+        total_weight = 0.0
+        for vertex_index in indices:
+            weight = 1.0 if target is None else math.exp(
+                -0.5 * ((distances[vertex_index] - target) / sigma) ** 2
+            )
+            total += mesh.vertices[vertex_index].co * weight
+            total_weight += weight
+        require(total_weight > 1e-9, "tail centerline shell has zero weight")
+        return total / total_weight
+
+    raw_points: list[Vector] = []
+    for sample in range(TAIL_CENTERLINE_POINT_COUNT):
+        target = maximum_distance * sample / TAIL_BONE_COUNT
+        if sample == 0:
+            point = centroid(sorted(interface_vertices))
+        elif sample == TAIL_BONE_COUNT:
+            terminal = [
+                index for index in ordered_tail
+                if distances[index] >= maximum_distance - sigma * 0.65
+            ]
+            point = centroid(terminal, maximum_distance)
+        else:
+            shell = [
+                index for index in ordered_tail
+                if abs(distances[index] - target) <= sigma * 2.5
+            ]
+            point = centroid(shell, target)
+        raw_points.append(point)
+
+    centerline = [raw_points[0]]
+    for index in range(1, TAIL_CENTERLINE_POINT_COUNT - 1):
+        centerline.append(
+            raw_points[index - 1] * 0.15
+            + raw_points[index] * 0.70
+            + raw_points[index + 1] * 0.15
+        )
+    centerline.append(raw_points[-1])
+
+    segment_lengths = [
+        (centerline[index + 1] - centerline[index]).length
+        for index in range(TAIL_BONE_COUNT)
+    ]
+    require(all(length >= 0.015 for length in segment_lengths),
+            f"tail centerline contains a degenerate segment: {segment_lengths}")
+    require(all(length <= 0.35 for length in segment_lengths),
+            f"tail centerline contains an excessive segment: {segment_lengths}")
+    rest_arc_length = sum(segment_lengths)
+    require(0.45 <= rest_arc_length <= 2.5,
+            f"tail rest centerline length is implausible: {rest_arc_length:.9g}")
+
+    return distances, centerline, maximum_distance, segment_lengths, len(interface_vertices)
+
+
+def reposition_tail_rest_bones(
+    armature: bpy.types.Object,
+    centerline: list[Vector],
+) -> None:
+    require(len(centerline) == TAIL_CENTERLINE_POINT_COUNT,
+            "tail centerline must expose thirteen rest points")
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for obj in bpy.context.scene.objects:
+        try:
+            obj.select_set(False)
+        except RuntimeError:
+            pass
+    armature.hide_viewport = False
+    armature.hide_render = False
+    try:
+        armature.hide_set(False)
+    except RuntimeError:
+        pass
+    armature.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    result = bpy.ops.object.mode_set(mode="EDIT")
+    require(result == {"FINISHED"}, f"entering armature edit mode returned {result}")
+    try:
+        edit_bones = armature.data.edit_bones
+        pelvis = edit_bones.get("pelvis")
+        require(pelvis is not None, "pelvis edit bone is missing")
+        previous = None
+        for index, name in enumerate(TAIL_BONE_NAMES):
+            bone = edit_bones.get(name)
+            require(bone is not None, f"tail rest bone {name} is missing")
+            bone.use_connect = False
+            bone.parent = pelvis if previous is None else previous
+            bone.head = centerline[index]
+            bone.tail = centerline[index + 1]
+            if previous is not None:
+                bone.use_connect = True
+            direction = (bone.tail - bone.head).normalized()
+            roll_reference = Vector((0.0, 1.0, 0.0))
+            if abs(direction.dot(roll_reference)) > 0.94:
+                roll_reference = Vector((0.0, 0.0, 1.0))
+            bone.align_roll(roll_reference)
+            previous = bone
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    for index, name in enumerate(TAIL_BONE_NAMES):
+        bone = armature.data.bones[name]
+        require((bone.head_local - centerline[index]).length <= 1e-5,
+                f"tail rest head {name} moved away from its centerline")
+        require((bone.tail_local - centerline[index + 1]).length <= 1e-5,
+                f"tail rest tail {name} moved away from its centerline")
+
+
+def cubic_bspline_tail_weights(parameter: float) -> list[tuple[int, float]]:
+    coordinate = max(0.0, min(1.0, parameter)) * (TAIL_BONE_COUNT - 1)
+    base = math.floor(coordinate)
+    fraction = coordinate - base
+    one_minus = 1.0 - fraction
+    basis = (
+        one_minus ** 3 / 6.0,
+        (3.0 * fraction ** 3 - 6.0 * fraction ** 2 + 4.0) / 6.0,
+        (-3.0 * fraction ** 3 + 3.0 * fraction ** 2 + 3.0 * fraction + 1.0) / 6.0,
+        fraction ** 3 / 6.0,
+    )
+    merged: dict[int, float] = {}
+    for offset, weight in zip((-1, 0, 1, 2), basis):
+        bone_index = max(0, min(TAIL_BONE_COUNT - 1, base + offset))
+        merged[bone_index] = merged.get(bone_index, 0.0) + weight
+    total = sum(merged.values())
+    require(abs(total - 1.0) <= 1e-9, f"tail B-spline basis sums to {total:.9g}")
+    return [(index, weight / total) for index, weight in sorted(merged.items()) if weight > 1e-9]
+
+
+def bind_original_tail_smoothly(
+    exact_object: bpy.types.Object,
+    groups_by_name: dict[str, bpy.types.VertexGroup],
+    tail_indices: set[int],
+    distances: list[float],
+    maximum_distance: float,
+) -> None:
+    tail_groups = []
+    for name in TAIL_BONE_NAMES:
+        group = groups_by_name.get(name)
+        require(group is not None, f"tail vertex group {name} is missing")
+        tail_groups.append(group)
+
+    for vertex_index in sorted(tail_indices):
+        parameter = distances[vertex_index] / maximum_distance
+        weights = cubic_bspline_tail_weights(parameter)
+        require(1 <= len(weights) <= 4,
+                f"tail vertex {vertex_index} has {len(weights)} spline influences")
+        for bone_index, weight in weights:
+            tail_groups[bone_index].add([vertex_index], weight, "REPLACE")
+
+    for vertex_index in tail_indices:
+        vertex = exact_object.data.vertices[vertex_index]
+        memberships = [
+            (exact_object.vertex_groups[item.group].name, item.weight)
+            for item in vertex.groups if item.weight > 1e-9
+        ]
+        require(1 <= len(memberships) <= 4,
+                f"tail vertex {vertex_index} has an invalid influence count")
+        require(all(name in TAIL_BONE_NAMES for name, _ in memberships),
+                f"tail vertex {vertex_index} leaked outside the visual tail chain")
+        require(abs(sum(weight for _, weight in memberships) - 1.0) <= 2e-4,
+                f"tail vertex {vertex_index} weights are not normalized")
+
+
 def archive_legacy_objects() -> tuple[bpy.types.Object, bpy.types.Object, bpy.types.Collection]:
     archive = bpy.data.collections.get(ARCHIVE_COLLECTION_NAME)
     if archive is None:
@@ -184,6 +425,9 @@ def build_exact_source_mesh(
             "source transform changed the vertex count")
     require(len(exact_mesh.polygons) == EXPECTED_SOURCE_POLYGONS,
             "source transform changed the polygon count")
+    rest_mesh_hash = mesh_rest_sha256(exact_mesh)
+    require(rest_mesh_hash == EXPECTED_REST_MESH_SHA256,
+            f"rest mesh fingerprint changed: {rest_mesh_hash}")
     assert_closed_manifold(exact_mesh, "transformed source")
 
     exact_object = bpy.data.objects.new(OUTPUT_NAME, exact_mesh)
@@ -248,7 +492,20 @@ def build_exact_source_mesh(
     tail_indices = set(range(EXPECTED_SOURCE_VERTICES)) - mapped_source_indices
     require(len(tail_indices) == EXPECTED_TAIL_VERTICES,
             f"detected {len(tail_indices)} original tail vertices instead of {EXPECTED_TAIL_VERTICES}")
-    groups_by_name["pelvis"].add(sorted(tail_indices), 1.0, "REPLACE")
+    tail_mesh_hash = tail_rest_sha256(exact_mesh, tail_indices)
+    require(tail_mesh_hash == EXPECTED_TAIL_REST_SHA256,
+            f"original tail rest fingerprint changed: {tail_mesh_hash}")
+    distances, centerline, surface_geodesic_length, segment_lengths, interface_count = (
+        build_tail_geodesic_contract(exact_mesh, tail_indices)
+    )
+    reposition_tail_rest_bones(armature, centerline)
+    bind_original_tail_smoothly(
+        exact_object,
+        groups_by_name,
+        tail_indices,
+        distances,
+        surface_geodesic_length,
+    )
 
     # Verify the final skin contract directly on Blender's authoritative data.
     for vertex in exact_mesh.vertices:
@@ -256,20 +513,31 @@ def build_exact_source_mesh(
         total = sum(membership.weight for membership in vertex.groups)
         require(abs(total - 1.0) <= 2e-4,
                 f"rebuilt vertex {vertex.index} weights sum to {total:.9g}")
-        if vertex.index in tail_indices:
-            memberships = [(exact_object.vertex_groups[item.group].name, item.weight) for item in vertex.groups]
-            require(len(memberships) == 1 and memberships[0][0] == "pelvis"
-                    and abs(memberships[0][1] - 1.0) <= 1e-6,
-                    f"tail vertex {vertex.index} is not rigidly bound to pelvis")
 
+    flattened_centerline = [coordinate for point in centerline for coordinate in point]
+    rest_arc_length = sum(segment_lengths)
     exact_object["physics_ready"] = True
-    exact_object["mesh_contract_version"] = "3.0.0"
+    exact_object["mesh_contract_version"] = "3.1.0"
     exact_object["source_object"] = SOURCE_NAME
     exact_object["exact_source_geometry"] = True
     exact_object["source_vertex_count"] = EXPECTED_SOURCE_VERTICES
     exact_object["source_polygon_count"] = EXPECTED_SOURCE_POLYGONS
+    exact_object["rest_mesh_position_topology_sha256"] = rest_mesh_hash
     exact_object["original_tail_vertices"] = EXPECTED_TAIL_VERTICES
-    exact_object["tail_deformation_mode"] = "rigid_pelvis"
+    exact_object["original_tail_rest_position_sha256"] = tail_mesh_hash
+    exact_object["tail_deformation_mode"] = "surface-geodesic-bspline-12"
+    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline"
+    exact_object["tail_weighted_vertices"] = EXPECTED_TAIL_VERTICES
+    exact_object["tail_weight_bones"] = TAIL_BONE_COUNT
+    exact_object["tail_weight_max_influences"] = 4
+    exact_object["tail_centerline_samples"] = TAIL_CENTERLINE_POINT_COUNT
+    exact_object["tail_interface_vertices"] = interface_count
+    exact_object["tail_surface_geodesic_length"] = surface_geodesic_length
+    exact_object["tail_rest_arc_length"] = rest_arc_length
+    exact_object["tail_rest_centerline"] = flattened_centerline
+    exact_object["tail_rest_segment_lengths"] = segment_lengths
+    exact_object["tail_rest_coordinate_space"] = "blender-rig-local-z-up"
+    exact_object["tail_roll_reference"] = [0.0, 1.0, 0.0]
     exact_object["tail_physics_dofs"] = 0
     exact_object["origin_normalized"] = True
     exact_object["origin_shift"] = list(body_template["origin_shift"])
@@ -277,18 +545,72 @@ def build_exact_source_mesh(
     return exact_object, tail_indices
 
 
-def update_armature_contract(armature: bpy.types.Object) -> None:
-    armature["rig_version"] = "3.0.0"
+def update_armature_contract(
+    armature: bpy.types.Object,
+    exact_object: bpy.types.Object,
+) -> None:
+    armature["rig_version"] = "3.1.0"
     armature["physics_proxy_bodies"] = 1
     armature["runtime_controller"] = "hybrid-root-ik"
     armature["visual_bones"] = len(armature.data.bones)
-    armature["coordinate_contract"] = "head=-X tail=+X up=+Z Blender; glTF Y-up"
+    armature["coordinate_contract"] = (
+        "head=-X tail-root=+X original-curled up=+Z Blender; glTF Y-up"
+    )
     armature["source_model"] = SOURCE_NAME
     armature["render_mesh_count"] = 1
     armature["exact_source_geometry"] = True
-    armature["original_tail_vertices"] = EXPECTED_TAIL_VERTICES
-    armature["tail_deformation_mode"] = "rigid_pelvis"
-    armature["tail_physics_dofs"] = 0
+    armature["physics_proxy_bone"] = "pelvis"
+    armature["visual_deformation_bones"] = len(armature.data.bones) - 1
+    armature["tail_rest_bone_axis"] = "local +Y"
+
+    # The former ragdoll metadata is intentionally retired.  Runtime physics
+    # owns one pelvis/root proxy; every other bone is a deterministic visual
+    # deformation target (IK or authored pose), including the curled tail.
+    for bone in armature.data.bones:
+        for legacy_key in (
+            "collider",
+            "limit_min_deg",
+            "limit_max_deg",
+            "swing_limit_deg",
+            "twist_limit_deg",
+        ):
+            if legacy_key in bone:
+                del bone[legacy_key]
+        is_proxy = bone.name == "pelvis"
+        bone["physics_body"] = is_proxy
+        bone["physics_role"] = "root-proxy" if is_proxy else "visual-deformation"
+        bone["joint"] = "proxy-root" if is_proxy else "fixed-visual"
+        bone["rest_head_local"] = list(bone.head_local)
+        bone["rest_tail_local"] = list(bone.tail_local)
+        bone["rest_length"] = bone.length
+        bone["rest_axis"] = "local +Y"
+        if bone.name in TAIL_BONE_NAMES:
+            bone["tail_rest_index"] = TAIL_BONE_NAMES.index(bone.name)
+            bone["tail_deformation_only"] = True
+
+    for key in (
+        "rest_mesh_position_topology_sha256",
+        "original_tail_vertices",
+        "original_tail_rest_position_sha256",
+        "tail_deformation_mode",
+        "tail_weighting",
+        "tail_weighted_vertices",
+        "tail_weight_bones",
+        "tail_weight_max_influences",
+        "tail_centerline_samples",
+        "tail_interface_vertices",
+        "tail_surface_geodesic_length",
+        "tail_rest_arc_length",
+        "tail_rest_centerline",
+        "tail_rest_segment_lengths",
+        "tail_rest_coordinate_space",
+        "tail_roll_reference",
+        "tail_physics_dofs",
+    ):
+        value = exact_object[key]
+        if not isinstance(value, (str, int, float, bool)):
+            value = list(value)
+        armature[key] = value
 
 
 def export_selected_asset(armature: bpy.types.Object, exact_object: bpy.types.Object) -> None:
@@ -354,7 +676,7 @@ def main() -> None:
     body_template, _, _ = archive_legacy_objects()
     exact_object, tail_indices = build_exact_source_mesh(source, body_template, armature)
     require(len(tail_indices) == EXPECTED_TAIL_VERTICES, "tail contract changed after rebuild")
-    update_armature_contract(armature)
+    update_armature_contract(armature, exact_object)
 
     export_selected_asset(armature, exact_object)
     # The tracked .blend is reproducible from the preserved source and this
@@ -371,7 +693,8 @@ def main() -> None:
             "vertices": EXPECTED_SOURCE_VERTICES,
             "polygons": EXPECTED_SOURCE_POLYGONS,
             "mapped_body_vertices": EXPECTED_BODY_VERTICES,
-            "rigid_original_tail_vertices": EXPECTED_TAIL_VERTICES,
+            "smooth_original_tail_vertices": EXPECTED_TAIL_VERTICES,
+            "tail_rest_arc_length": exact_object["tail_rest_arc_length"],
             "tail_physics_dofs": 0,
         }, sort_keys=True),
     )
