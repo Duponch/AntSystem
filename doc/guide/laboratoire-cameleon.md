@@ -29,6 +29,12 @@ les facettes du modèle ; il conserve donc exactement la même silhouette, le
 même squelette et le même coût de rendu. Le shader toon commun à l’ensemble du
 jeu sera traité séparément plus tard.
 
+La peau peut aussi reprendre automatiquement la couleur et les motifs de la
+surface tenue : terre mouchetée, pierre facettée ou stries d’écorce. Ce
+camouflage reste un vrai matériau opaque. Le caméléon conserve son volume, ses
+ombres et son éclairage ; il ne montre jamais une image de la caméra à travers
+son corps.
+
 ## Ouvrir le laboratoire
 
 Démarrez le serveur puis ouvrez :
@@ -243,6 +249,21 @@ impossible à agripper.
 - **Mouvement du corps** dose les oscillations du bassin et du thorax ainsi que
   la compensation du cou et de la tête.
 
+### Camouflage de surface
+
+- **Peau adaptative** active ou coupe l’adaptation automatique au support tenu ;
+- **Correspondance** règle la part exacte de pigment et de motif reprise. À
+  100 %, seuls les détails protégés de l’œil conservent leur contraste naturel ;
+- **Temps d’adaptation** règle la montée progressive du camouflage ;
+- **Retour naturel** règle sa disparition après un saut, un lancer ou une perte
+  de prise ;
+- **Transition de support** règle le fondu entre deux matériaux à une arête ;
+- **Détails des yeux** conserve plus ou moins la pupille et son reflet.
+
+Le choix ne dépend que des pattes réellement en prise. Une griffe en transfert
+ou proche d’une autre surface ne suffit pas à faire clignoter la peau. Le motif
+est ancré dans le repère du support et ne suit ni la caméra, ni le brouillard.
+
 ### Suspension et saut
 
 - **Suspension anatomique** dose l’assiette et l’amorti transmis au tronc ;
@@ -309,7 +330,8 @@ les surfaces voisines.
 - **Mode** : joueur, autonome ou libre, complété pendant un saut par impulsion,
   montée, apogée, chute ou amorti ;
 - **Altitude** : hauteur du corps physique ;
-- **Intégrité** : `OK` tant qu’aucune pose non finie n’a été détectée.
+- **Intégrité** : `OK` tant qu’aucune pose non finie n’a été détectée ;
+- **Camouflage** : profil du support élu et pourcentage de transition visuelle.
 
 Le nombre d’appuis varie pendant la marche. Il peut être nul après `Espace`,
 sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
@@ -317,6 +339,9 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 ## Ce qui est normal
 
 - un pied lâche, avance puis reprend un support pendant son pas ;
+- la peau met un court instant à adopter un support, puis fond doucement vers
+  le suivant à une arête ; elle revient au naturel lorsque les prises sont
+  réellement perdues ;
 - une fois le verrou statique acquis, le corps physique et les ancres des
   griffes restent exactement fixes tandis que l’idle du squelette anime très
   légèrement le bassin et le thorax ; ce mouvement peut redonner une faible vie
@@ -354,8 +379,11 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
   bassin, creuse la croupe, traverse durablement un obstacle ou oscille sans
   perdre d’énergie ;
 - **Intégrité** affiche un nombre au lieu de `OK` ;
+- le camouflage change avec la caméra, affiche le ciel ou le brouillard, devient
+  transparent, ou oscille rapidement entre deux profils alors que les prises
+  restent stables ;
 - la route normale de la colonie charge le laboratoire ou son moteur Rapier.
 
-Le laboratoire valide la mécanique du prototype. Le camouflage, l’exploration
-écologique, la peur des papillons et la prédation restent décrits dans le
-[guide du caméléon principal](./cameleons.md).
+Le laboratoire valide la mécanique et le matériau adaptatif du prototype.
+L’exploration écologique, la peur des papillons et la prédation restent décrites
+dans le [guide du caméléon principal](./cameleons.md).

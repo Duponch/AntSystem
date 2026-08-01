@@ -16,6 +16,8 @@ import { createLabUI } from './lab-ui.js';
 import { PlatformerControlModel } from './platformer-control-model.js';
 import { PlatformerJumpModel } from './platformer-jump-model.js';
 import { createRigDebugView } from './rig-debug-view.js';
+import { disposeLabSurfacePatternTexture } from './surface-appearance.js';
+import { createSurfaceCamouflageController } from './surface-camouflage.js';
 
 function createLoadingScreen() {
 
@@ -154,6 +156,14 @@ async function main() {
 		rigDebug: false,
 		jumpPhase: platformerJump.phase,
 	};
+	const camouflageMeshes = [];
+	ragdoll.model.traverse( ( object ) => {
+
+		if ( object.isMesh ) camouflageMeshes.push( object );
+
+	} );
+	const camouflage = createSurfaceCamouflageController( camouflageMeshes, state );
+	await camouflage.prewarm( renderer, camera, ragdoll.visualRoot, scene );
 	let grabbedBone = null;
 	const grab = new GrabController( {
 		camera,
@@ -169,6 +179,7 @@ async function main() {
 	const reset = () => {
 
 		grab.cancel();
+		camouflage.reset();
 		ragdoll.reset();
 		explorer.clearDestination();
 		explorer.resetProgress();
@@ -188,6 +199,7 @@ async function main() {
 		renderer,
 		onReset: reset,
 		rigDebugView,
+		camouflage,
 	} );
 	loading.done();
 
@@ -442,6 +454,7 @@ async function main() {
 			() => ragdoll.afterStep(),
 		);
 		ragdoll.syncVisual( result.alpha, dt );
+		camouflage.update( dt, ragdoll.feet );
 		cameraRig.update( dt );
 		ui.update( dt );
 		renderer.render( scene, camera );
@@ -460,8 +473,10 @@ async function main() {
 		cameraRig.dispose();
 		ui.dispose();
 		rigDebugView.dispose();
+		camouflage.dispose();
 		ragdoll.dispose();
 		environment.dispose();
+		disposeLabSurfacePatternTexture();
 		physics.dispose();
 		renderer.dispose();
 
@@ -481,6 +496,7 @@ async function main() {
 		platformerControl,
 		platformerJump,
 		rigDebugView,
+		camouflage,
 		grab,
 		destinationPicker,
 		surfaceRoutePlanner,

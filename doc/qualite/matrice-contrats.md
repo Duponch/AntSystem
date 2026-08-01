@@ -66,7 +66,7 @@ Une modification d’un des neuf contrats est livrable lorsque :
 
 Toute modification de la simulation doit mettre à jour dans la même livraison les tests qui prouvent le comportement et la documentation technique et fonctionnelle qui l’explique. Un changement uniquement documentaire doit également exécuter `docs:sync`, car le hash du document fait partie du manifeste.
 
-Le laboratoire physique reste une annexe expérimentale de `CHAMELEON-SIM` et non un dixième contrat de la colonie. Une modification de sa route, de son corps unique, de ses appuis, de ses limites IK, de son mode libre, de son pas fixe, de ses commandes, de son asset original ou de son budget est livrable lorsque les preuves associées passent, que le build WebGPU passe, que la scène a été inspectée sur un GPU réel et que le [document technique](../technique/laboratoire-cameleon-physique.md) ainsi que le [guide utilisateur](../guide/laboratoire-cameleon.md) décrivent le résultat observé.
+Le laboratoire physique reste une annexe expérimentale de `CHAMELEON-SIM` et non un dixième contrat de la colonie. Une modification de sa route, de son corps unique, de ses appuis, de ses limites IK, de son mode libre, de son pas fixe, de ses commandes, de son asset original, de son camouflage de surface ou de son budget est livrable lorsque les preuves associées — dont `test/chameleon-lab-surface-camouflage.test.js` (`CHAMELEON-LAB-CAMOUFLAGE-001` à `007`) — passent, que le build WebGPU passe, que la scène a été inspectée sur un GPU réel et que le [document technique](../technique/laboratoire-cameleon-physique.md) ainsi que le [guide utilisateur](../guide/laboratoire-cameleon.md) décrivent le résultat observé.
 
 ## Invariant transversal TIME-SCALE
 

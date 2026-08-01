@@ -1,3 +1,7 @@
+import {
+	ensureSurfaceCamouflageSettings,
+} from './surface-camouflage.js';
+
 function makeRange( {
 	parent,
 	label,
@@ -177,10 +181,12 @@ export function createLabUI( {
 	renderer,
 	onReset,
 	rigDebugView = null,
+	camouflage = null,
 } ) {
 
 	ensureLabMovementSettings( state );
 	ensureLabDisplaySettings( state );
+	ensureSurfaceCamouflageSettings( state );
 
 	const shell = document.createElement( 'div' );
 	shell.className = 'chameleon-lab-shell';
@@ -235,6 +241,72 @@ export function createLabUI( {
 		max: 35,
 		step: 0.5,
 		format: ( value ) => value.toFixed( 1 ),
+	} );
+
+	const adaptiveSkin = fieldset(
+		panel,
+		'Camouflage de surface',
+		'La peau reprend le pigment et le motif du support tenu par les pattes. Le rendu reste opaque, éclairé et sans copie de l’écran.',
+	);
+	const camouflageToggle = makeToggle( {
+		parent: adaptiveSkin,
+		label: 'Peau adaptative',
+		object: state,
+		property: 'camouflageEnabled',
+	} );
+	makeRange( {
+		parent: adaptiveSkin,
+		label: 'Correspondance',
+		object: state,
+		property: 'camouflageStrength',
+		min: 0,
+		max: 1,
+		step: 0.01,
+		format: ( value ) => `${ Math.round( value * 100 ) } %`,
+		help: 'Part de la couleur et du motif exacts du support appliquée aux chromatophores.',
+	} );
+	makeRange( {
+		parent: adaptiveSkin,
+		label: 'Temps d’adaptation',
+		object: state,
+		property: 'camouflageAdaptSeconds',
+		min: 0.05,
+		max: 4,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) } s`,
+	} );
+	makeRange( {
+		parent: adaptiveSkin,
+		label: 'Retour naturel',
+		object: state,
+		property: 'camouflageReleaseSeconds',
+		min: 0.05,
+		max: 3,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) } s`,
+		help: 'Transition quand aucune patte ne conserve un support fiable.',
+	} );
+	makeRange( {
+		parent: adaptiveSkin,
+		label: 'Transition de support',
+		object: state,
+		property: 'camouflageSurfaceTransitionSeconds',
+		min: 0.05,
+		max: 1.5,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) } s`,
+		help: 'Fondu stable entre deux surfaces aux arêtes et changements de prise.',
+	} );
+	makeRange( {
+		parent: adaptiveSkin,
+		label: 'Détails des yeux',
+		object: state,
+		property: 'camouflageEyeRetention',
+		min: 0,
+		max: 1,
+		step: 0.01,
+		format: ( value ) => `${ Math.round( value * 100 ) } %`,
+		help: 'Préserve la pupille et le reflet tout en adaptant la tourelle oculaire.',
 	} );
 
 	const platforming = fieldset(
@@ -591,6 +663,7 @@ export function createLabUI( {
 	const stateValue = stat( status, 'Mode' );
 	const heightValue = stat( status, 'Altitude' );
 	const validityValue = stat( status, 'Intégrité' );
+	const camouflageValue = stat( status, 'Camouflage' );
 
 	const help = document.createElement( 'div' );
 	help.className = 'chameleon-lab-help';
@@ -620,6 +693,7 @@ export function createLabUI( {
 		ragdollToggle.checked = state.fullRagdoll;
 		debugToggle.checked = state.debug;
 		rigDebugToggle.checked = state.rigDebug;
+		camouflageToggle.checked = state.camouflageEnabled;
 		fpsValue.textContent = `${ lastFps } fps`;
 		stepValue.textContent = `${ physics.stats.p95StepMs.toFixed( 2 ) } ms`;
 		contactsValue.textContent = `${ ragdoll.contactCount } / ${ ragdoll.maxContactCount ?? 4 }${
@@ -634,6 +708,10 @@ export function createLabUI( {
 		const position = ragdoll.pelvis.body.translation();
 		heightValue.textContent = `${ position.y.toFixed( 2 ) } m`;
 		validityValue.textContent = physics.stats.invalidBodies === 0 ? 'OK' : `${ physics.stats.invalidBodies } NaN`;
+		const camouflageView = camouflage?.getView?.();
+		camouflageValue.textContent = camouflageView?.active
+			? `${ camouflageView.profile ?? 'support' } · ${ Math.round( camouflageView.blend * 100 ) } %`
+			: 'naturel';
 		shell.dataset.pelvis = `${ position.x },${ position.y },${ position.z }`;
 		shell.dataset.forward = `${ ragdoll.forward.x },${ ragdoll.forward.y },${ ragdoll.forward.z }`;
 		shell.dataset.supportNormal = `${ ragdoll.supportNormal.x },${ ragdoll.supportNormal.y },${ ragdoll.supportNormal.z }`;
@@ -641,6 +719,9 @@ export function createLabUI( {
 		shell.dataset.contacts = ragdoll.feet
 			.map( ( contact ) => `${ contact.part.name }:${ contact.state }:${ contact.load.toFixed( 2 ) }:${ contact.surface?.kind ?? 'none' }:${ contact._candidateSurface?.kind ?? 'none' }:${ contact.normal.x.toFixed( 2 ) },${ contact.normal.y.toFixed( 2 ) },${ contact.normal.z.toFixed( 2 ) }` )
 			.join( '|' );
+		shell.dataset.camouflage = camouflageView
+			? `${ camouflageView.supportHandle ?? 'none' }:${ camouflageView.profile ?? 'natural' }:${ camouflageView.blend }`
+			: 'none:natural:0';
 		const bounds = {
 			minX: Infinity, minY: Infinity, minZ: Infinity,
 			maxX: - Infinity, maxY: - Infinity, maxZ: - Infinity,

@@ -49,30 +49,34 @@ CPU, la mémoire et le temps de démarrage de la colonie.
 
 ## Chaîne d’exécution
 
-Le laboratoire associe onze couches :
+Le laboratoire associe treize couches :
 
-1. `environment.js` crée les meshes WebGPU et leurs colliders Rapier fixes ;
-2. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis
+1. `surface-appearance.js` définit les pigments procéduraux partagés et le
+   repère local immuable de chaque support ;
+2. `environment.js` crée les meshes WebGPU et leurs colliders Rapier fixes ;
+3. `surface-camouflage.js` élit le support tenu et pilote la variante de peau
+   adaptative opaque ;
+4. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis
    et coordonne le rig visuel ;
-3. `anatomical-limb-solver.js` résout les ceintures, les deux segments et la
+5. `anatomical-limb-solver.js` résout les ceintures, les deux segments et la
    surface complète de chaque main ou pied à partir du contrat exact du GLB ;
-4. `whole-body-gait-model.js` prépare une pose anatomique corps entier à partir
+6. `whole-body-gait-model.js` prépare une pose anatomique corps entier à partir
    des phases d’appui et de transfert ;
-5. `hybrid-controller-model.js` fournit les calculs purs de cadre de support,
+7. `hybrid-controller-model.js` fournit les calculs purs de cadre de support,
    gains amortis, limites articulaires et forces bornées ;
-6. `passive-limb-ragdoll.js` relâche les quatre membres pendant la saisie ou le
+8. `passive-limb-ragdoll.js` relâche les quatre membres pendant la saisie ou le
    mode libre, sans ajouter de corps Rapier ;
-7. `passive-tail-physics.js` simule la ligne centrale passive de la queue et
+9. `passive-tail-physics.js` simule la ligne centrale passive de la queue et
    `passive-tail-visual-rig.js` la reporte sur les os du mesh original ;
-8. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
+10. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
    l’interpolation visuelle ;
-9. `third-person-controller.js` et `platformer-control-model.js` transforment
+11. `third-person-controller.js` et `platformer-control-model.js` transforment
    AZERTY/QWERTY en accélérateur et direction arcade, sélectionnent au clic une
    destination physique et transportent le cap tangent le long des supports ;
-10. `platformer-jump-model.js` possède la charge du saut, ses cibles de hauteur
+12. `platformer-jump-model.js` possède la charge du saut, ses cibles de hauteur
     et de portée, la tolérance au bord, le buffer et les enveloppes anatomiques
     de décollage, vol et atterrissage ;
-11. `grab-controller.js` applique la saisie et le lancer, tandis que
+13. `grab-controller.js` applique la saisie et le lancer, tandis que
     `rig-debug-view.js` peut afficher le squelette complet à travers la peau.
 
 Le mouvement global ne réécrit jamais directement la position du modèle : la
@@ -163,6 +167,41 @@ python scripts/author-chameleon-physical-look.py
 Blender et son MCP n’ont donc pas besoin d’être ouverts pour lancer, tester ou
 reconstruire l’asset. L’interface Blender reste utile uniquement pour une
 modification artistique ou anatomique volontaire de la scène source.
+
+## Camouflage opaque piloté par le support
+
+Le laboratoire ajoute une couche de chromatophores sans transformer le
+caméléon en écran transparent. Chaque collider agrippable publie un profil
+d’apparence immuable : trois pigments, une famille de motif, son échelle, sa
+graine, sa rugosité et les matrices qui ramènent le monde dans le repère du
+support. Le sol, les pierres, les murs rugueux et l’écorce utilisent eux-mêmes
+ce profil comme source de leur `colorNode`.
+
+La peau évalue exactement le même graphe TSL dans le repère du support élu. Un
+motif d’écorce reste axial autour d’un tronc ; les mottes du sol et les facettes
+de pierre restent ancrées sur leur plan local. Seuls l’albédo et une partie de
+la rugosité s’adaptent : skinning, normales, lumière, ombres, profondeur et
+relief PBR restent ceux du vrai modèle. Un masque dérivé de `COLOR_0` préserve
+la pupille et son reflet sans ajouter d’attribut ou de primitive.
+
+Le support est choisi parmi les seules pattes en état `holding`. Le vote porte
+sur quatre entrées fixes, favorise le propriétaire courant en cas d’égalité et
+doit rester stable pendant un court délai avant validation. Deux jeux
+d’uniformes conservent l’ancien et le nouveau repère ; leur fondu évite un flash
+aux arêtes. En l’air, le dernier pigment est retenu brièvement puis la palette
+naturelle revient progressivement.
+
+Cette architecture ne réalise aucun raycast supplémentaire, aucun readback,
+aucun dispatch compute et aucune copie du framebuffer. Les quatre motifs sont
+précalculés une fois dans une `DataArrayTexture` RGBA8 périodique de
+`64 × 64 × 4` couches, partagée par le décor et la peau. Ses mipmaps isolées
+par couche suppriment scintillement lointain et contamination entre profils
+pour environ 86 Kio. Le modèle reste une primitive et un draw. Lorsque le
+camouflage est revenu à zéro, le matériau GLB naturel est restauré : le shader
+adaptatif n’a alors aucun coût. Lorsqu’il est stable, il effectue un seul
+échantillon cache-local par pixel visible du caméléon ; le second n’est évalué
+que pendant le fondu entre deux supports. Le coût ne dépend ni de la résolution
+complète de l’écran, ni du nombre de colliders.
 
 ## Corps physique unique
 
@@ -734,6 +773,11 @@ Les preuves automatiques actuelles sont :
   verrou statique sain ; `CHAMELEON-LAB-RAGDOLL-034` conduit le corps du flanc
   au bouchon physique d’un cylindre fini et exige deux contacts, la rotation du
   cadre vers l’axe, une progression au-delà du bord et aucun saut de position ;
+- `test/chameleon-lab-surface-camouflage.test.js`, de
+  `CHAMELEON-LAB-CAMOUFLAGE-001` à `007`, protège les profils et repères
+  immuables, le vote des quatre pattes, les délais et fondus, la concordance
+  exacte entre support rendu et pigment copié, le matériau opaque, l’absence de
+  capture écran/compute/raycast et le cycle complet runtime/UI ;
 - `test/chameleon-physical-asset.test.js` protège les contrats de mesh/rig
   `3.6.0` et d’anatomie `2.2.0`, le mesh source exact, le skin, les 7 206 sommets
   originaux, l’absence de poids `tail_*` sur le corps, le collet `tail_01`, la

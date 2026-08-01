@@ -1,5 +1,10 @@
 import * as THREE from 'three/webgpu';
 
+import {
+	createLabSurfaceMaterial,
+	createSurfaceAppearanceBinding,
+} from './surface-appearance.js';
+
 const ENVIRONMENT_GROUP = ( 0x0001 << 16 ) | 0xffff;
 
 function setShadowFlags( object, cast = true, receive = true ) {
@@ -39,12 +44,15 @@ function addFixedCollider( physics, object, colliderDesc, surface ) {
 			.setCollisionGroups( ENVIRONMENT_GROUP ),
 		body,
 	);
+	const appearance = surface.appearance
+		?? ( surface.kind === 'glass' ? null : createSurfaceAppearanceBinding( object, surface.kind ) );
 	physics.surfaceByCollider ??= new Map();
 	physics.surfaceByCollider.set( collider.handle, Object.freeze( {
 		kind: 'rough',
 		clawEligible: true,
 		gripStrengthScale: 1,
 		...surface,
+		...( appearance ? { appearance } : {} ),
 	} ) );
 	object.userData.physicsColliderHandle = collider.handle;
 	object.userData.surface = physics.surfaceByCollider.get( collider.handle );
@@ -54,31 +62,19 @@ function addFixedCollider( physics, object, colliderDesc, surface ) {
 
 function createGroundMaterial() {
 
-	return new THREE.MeshStandardMaterial( {
-		color: 0x604225,
-		roughness: 0.96,
-		metalness: 0,
-	} );
+	return createLabSurfaceMaterial( 'soil' );
 
 }
 
 function createBarkMaterial() {
 
-	return new THREE.MeshStandardMaterial( {
-		color: 0x49321e,
-		roughness: 0.92,
-		metalness: 0,
-	} );
+	return createLabSurfaceMaterial( 'bark' );
 
 }
 
 function createStoneMaterial() {
 
-	return new THREE.MeshStandardMaterial( {
-		color: 0x5c625d,
-		roughness: 0.84,
-		metalness: 0.02,
-	} );
+	return createLabSurfaceMaterial( 'stone' );
 
 }
 
@@ -314,10 +310,7 @@ export function createLabEnvironment( { scene, physics } ) {
 
 	const groundMaterial = createGroundMaterial();
 	const stone = createStoneMaterial();
-	const roughWall = new THREE.MeshStandardMaterial( {
-		color: 0x796047,
-		roughness: 0.93,
-	} );
+	const roughWall = createLabSurfaceMaterial( 'wall' );
 	const smoothWall = new THREE.MeshPhysicalMaterial( {
 		color: 0x8bc4c9,
 		roughness: 0.13,
@@ -358,7 +351,7 @@ export function createLabEnvironment( { scene, physics } ) {
 		name: 'RoughSideWall',
 		size: [ 0.45, 6, 10 ],
 		position: [ 7, 3, -1.8 ],
-		material: roughWall,
+		material: stone,
 		surface: {
 			kind: 'rock-wall',
 			friction: 0.92,
