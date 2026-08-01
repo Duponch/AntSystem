@@ -239,7 +239,7 @@ async function main() {
 			},
 			() => ragdoll.afterStep(),
 		);
-		ragdoll.syncVisual( result.alpha );
+		ragdoll.syncVisual( result.alpha, dt );
 		cameraRig.update( dt );
 		ui.update( dt );
 		renderer.render( scene, camera );

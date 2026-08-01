@@ -111,21 +111,30 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
 - passage locomotion stabilisée ↔ **Physique libre** sans téléportation, vrille ni articulation qui s’entortille ;
 - saisie, secousse, lancer du corps unique et récupération progressive ;
 - enjambées lisibles initiées aux épaules/hanches, flexion des coudes/genoux,
-  mouvement du bassin et du thorax, tête stabilisée et absence de jitter distal ;
+  mouvement du bassin et du thorax, regard cou/tête vivant au repos, semelles
+  complètes à plat et absence de jitter distal ;
 - conservation exacte des 7 206 sommets de la queue originale, sans tube de
-  remplacement, avec inertie, amortissement et contacts continus sur le décor ;
+  remplacement, avec inertie, amortissement, contacts continus sur le décor et
+  sommeil sans micro-mouvement ;
+- membres relâchés pendant la saisie ou le mode libre, puis récupération bornée
+  du tonus sans déchirure visuelle ;
+- lancer sur mur et cylindre rugueux : accrochage à la surface réellement
+  touchée, rotation continue du corps et absence de téléportation ;
 - caméra sans traversée persistante du décor ;
 - debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
 Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
 `chameleon-lab-controller`, `chameleon-lab-whole-body-gait`,
-`chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll` et
+`chameleon-lab-anatomical-limb`, `chameleon-lab-passive-limbs`,
+`chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll`,
+`chameleon-lab-hybrid-controller-allocation` et
 `chameleon-physical-asset` protègent la structure, les commandes et les bornes.
-Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `009` sont l’autorité de
+Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `013` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
-corps entier et IK proximale bornées, mode libre, queue XPBD passive et valeurs
-finies. Les preuves d’asset verrouillent le mesh source exact,
+corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
+endormable, récupération d’impact et valeurs finies. Les preuves d’asset
+verrouillent le mesh source exact,
 `original_tail_vertices = 7206`, la ligne centrale courbe, les douze os et les
 poids géodésiques. Les transitions multi-surfaces complexes, la saisie visuelle,
 la déformation cutanée de la queue et la sensation du pilotage exigent encore

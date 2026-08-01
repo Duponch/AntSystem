@@ -90,6 +90,19 @@ export class PassiveTailPhysics {
 			'collisionFriction', options.collisionFriction ?? 0.18,
 		) );
 		this.maxSpeed = positiveNumber( 'maxSpeed', options.maxSpeed ?? 12 );
+		this.sleepEnabled = options.sleepEnabled !== false;
+		this.sleepSpeedThreshold = nonNegativeNumber(
+			'sleepSpeedThreshold', options.sleepSpeedThreshold ?? 0.01,
+		);
+		this.sleepDisplacementThreshold = nonNegativeNumber(
+			'sleepDisplacementThreshold', options.sleepDisplacementThreshold ?? 8e-5,
+		);
+		this.sleepRootThreshold = nonNegativeNumber(
+			'sleepRootThreshold', options.sleepRootThreshold ?? 2e-5,
+		);
+		this.sleepSteps = options.sleepSteps ?? 48;
+		if ( ! Number.isInteger( this.sleepSteps ) || this.sleepSteps < 1 )
+			throw new RangeError( 'sleepSteps must be a positive integer' );
 		this.projectPoint = options.projectPoint ?? null;
 		if ( this.projectPoint !== null && typeof this.projectPoint !== 'function' )
 			throw new TypeError( 'projectPoint must be a function or null' );
@@ -100,6 +113,24 @@ export class PassiveTailPhysics {
 		this.rootX = vectorComponent( 'rootPosition', options.rootPosition, 'x', 0 );
 		this.rootY = vectorComponent( 'rootPosition', options.rootPosition, 'y', 0 );
 		this.rootZ = vectorComponent( 'rootPosition', options.rootPosition, 'z', 0 );
+		this.baseDirectionX = 1;
+		this.baseDirectionY = 0;
+		this.baseDirectionZ = 0;
+		this.baseConeMaxAngle = Math.PI;
+		this.baseConeCos = -1;
+		this.baseConeSin = 0;
+		this.baseConeEnabled = false;
+		this._sleeping = false;
+		this._sleepCandidateSteps = 0;
+		this._sleepCount = 0;
+		this._wakeCount = 0;
+		this._sleepRootX = this.rootX;
+		this._sleepRootY = this.rootY;
+		this._sleepRootZ = this.rootZ;
+		this._sleepDirectionX = this.baseDirectionX;
+		this._sleepDirectionY = this.baseDirectionY;
+		this._sleepDirectionZ = this.baseDirectionZ;
+		this._sleepMaxAngle = this.baseConeMaxAngle;
 
 		this.positions = new Float32Array( COMPONENT_COUNT );
 		this.previousPositions = new Float32Array( COMPONENT_COUNT );
@@ -133,6 +164,10 @@ export class PassiveTailPhysics {
 			totalSteps: 0,
 			invalidCorrections: 0,
 			rejectedProjections: 0,
+			sleeping: false,
+			sleepCandidateSteps: 0,
+			sleepCount: 0,
+			wakeCount: 0,
 		} );
 		this.view = Object.seal( {
 			nodeCount: PASSIVE_TAIL_NODE_COUNT,
@@ -145,6 +180,10 @@ export class PassiveTailPhysics {
 			radii: this.radii,
 		} );
 		this.reset( { x: this.rootX, y: this.rootY, z: this.rootZ } );
+		if ( options.baseDirection !== undefined ) this.setBaseDirection(
+			options.baseDirection,
+			options.baseMaxAngle ?? options.maxBaseAngle ?? Math.PI / 3,
+		);
 
 	}
 
@@ -230,9 +269,62 @@ export class PassiveTailPhysics {
 
 	setRoot( rootPosition ) {
 
-		this.rootX = vectorComponent( 'rootPosition', rootPosition, 'x' );
-		this.rootY = vectorComponent( 'rootPosition', rootPosition, 'y' );
-		this.rootZ = vectorComponent( 'rootPosition', rootPosition, 'z' );
+		const x = vectorComponent( 'rootPosition', rootPosition, 'x' );
+		const y = vectorComponent( 'rootPosition', rootPosition, 'y' );
+		const z = vectorComponent( 'rootPosition', rootPosition, 'z' );
+		const referenceX = this._sleeping ? this._sleepRootX : this.rootX;
+		const referenceY = this._sleeping ? this._sleepRootY : this.rootY;
+		const referenceZ = this._sleeping ? this._sleepRootZ : this.rootZ;
+		const dx = x - referenceX;
+		const dy = y - referenceY;
+		const dz = z - referenceZ;
+		if ( dx * dx + dy * dy + dz * dz
+			> this.sleepRootThreshold * this.sleepRootThreshold ) this.wake();
+		this.rootX = x;
+		this.rootY = y;
+		this.rootZ = z;
+		return this;
+
+	}
+
+	/**
+	 * Keeps the first tail segment inside a world-space cone. This is a
+	 * structural root limit, not a pose motor: every other node remains fully
+	 * passive. Updating the direction only writes scalar state and allocates no
+	 * temporary vectors.
+	 */
+	setBaseDirection( direction, maxAngle = this.baseConeMaxAngle ) {
+
+		let x = vectorComponent( 'baseDirection', direction, 'x' );
+		let y = vectorComponent( 'baseDirection', direction, 'y' );
+		let z = vectorComponent( 'baseDirection', direction, 'z' );
+		const length = Math.hypot( x, y, z );
+		if ( length <= EPSILON ) throw new RangeError( 'baseDirection must be non-zero' );
+		maxAngle = finiteNumber( 'maxAngle', maxAngle );
+		if ( maxAngle < 0 || maxAngle > Math.PI )
+			throw new RangeError( 'maxAngle must be between zero and PI' );
+		x /= length;
+		y /= length;
+		z /= length;
+		const referenceDirectionX = this._sleeping
+			? this._sleepDirectionX : this.baseDirectionX;
+		const referenceDirectionY = this._sleeping
+			? this._sleepDirectionY : this.baseDirectionY;
+		const referenceDirectionZ = this._sleeping
+			? this._sleepDirectionZ : this.baseDirectionZ;
+		const referenceMaxAngle = this._sleeping
+			? this._sleepMaxAngle : this.baseConeMaxAngle;
+		const directionDot = x * referenceDirectionX
+			+ y * referenceDirectionY + z * referenceDirectionZ;
+		if ( directionDot < 1 - 1e-10
+			|| Math.abs( maxAngle - referenceMaxAngle ) > 1e-10 ) this.wake();
+		this.baseDirectionX = x;
+		this.baseDirectionY = y;
+		this.baseDirectionZ = z;
+		this.baseConeMaxAngle = maxAngle;
+		this.baseConeCos = Math.cos( maxAngle );
+		this.baseConeSin = Math.sin( maxAngle );
+		this.baseConeEnabled = maxAngle < Math.PI;
 		return this;
 
 	}
@@ -254,10 +346,34 @@ export class PassiveTailPhysics {
 		this.segmentLambdas.fill( 0 );
 		this.bendLambdas.fill( 0 );
 		this._accumulator = 0;
+		this._sleeping = false;
+		this._sleepCandidateSteps = 0;
+		this.stats.sleeping = false;
+		this.stats.sleepCandidateSteps = 0;
+		this.stats.sleepCount = this._sleepCount;
+		this.stats.wakeCount = this._wakeCount;
 		this._advanceResult.steps = 0;
 		this._advanceResult.alpha = 0;
 		this._advanceResult.droppedSeconds = 0;
 		return this;
+
+	}
+
+	wake() {
+
+		if ( this._sleeping ) this._wakeCount ++;
+		this._sleeping = false;
+		this._sleepCandidateSteps = 0;
+		this.stats.sleeping = false;
+		this.stats.sleepCandidateSteps = 0;
+		this.stats.wakeCount = this._wakeCount;
+		return this;
+
+	}
+
+	isSleeping() {
+
+		return this._sleeping;
 
 	}
 
@@ -305,6 +421,153 @@ export class PassiveTailPhysics {
 		this.positions[ second ] += secondWeight * nx * deltaLambda;
 		this.positions[ second + 1 ] += secondWeight * ny * deltaLambda;
 		this.positions[ second + 2 ] += secondWeight * nz * deltaLambda;
+
+	}
+
+	_solveBaseCone() {
+
+		if ( ! this.baseConeEnabled ) return;
+		let dx = this.positions[ 3 ] - this.positions[ 0 ];
+		let dy = this.positions[ 4 ] - this.positions[ 1 ];
+		let dz = this.positions[ 5 ] - this.positions[ 2 ];
+		let length = Math.hypot( dx, dy, dz );
+		if ( length <= EPSILON ) length = this.segmentLengths[ 0 ];
+		else {
+
+			dx /= length;
+			dy /= length;
+			dz /= length;
+
+		}
+		const axisX = this.baseDirectionX;
+		const axisY = this.baseDirectionY;
+		const axisZ = this.baseDirectionZ;
+		const cosine = Math.max( -1, Math.min( 1, dx * axisX + dy * axisY + dz * axisZ ) );
+		if ( cosine >= this.baseConeCos - 1e-7 ) return;
+
+		let perpendicularX = dx - axisX * cosine;
+		let perpendicularY = dy - axisY * cosine;
+		let perpendicularZ = dz - axisZ * cosine;
+		let perpendicularLength = Math.hypot(
+			perpendicularX, perpendicularY, perpendicularZ,
+		);
+		if ( perpendicularLength <= EPSILON ) {
+
+			// An antiparallel segment has infinitely many equally close cone
+			// boundaries. Select one deterministically from the least-aligned axis.
+			const absoluteX = Math.abs( axisX );
+			const absoluteY = Math.abs( axisY );
+			const absoluteZ = Math.abs( axisZ );
+			let basisX = 0;
+			let basisY = 0;
+			let basisZ = 0;
+			if ( absoluteX <= absoluteY && absoluteX <= absoluteZ ) basisX = 1;
+			else if ( absoluteY <= absoluteZ ) basisY = 1;
+			else basisZ = 1;
+			const projection = basisX * axisX + basisY * axisY + basisZ * axisZ;
+			perpendicularX = basisX - axisX * projection;
+			perpendicularY = basisY - axisY * projection;
+			perpendicularZ = basisZ - axisZ * projection;
+			perpendicularLength = Math.hypot(
+				perpendicularX, perpendicularY, perpendicularZ,
+			);
+
+		}
+		const inversePerpendicularLength = 1 / Math.max( perpendicularLength, EPSILON );
+		const radialScale = this.baseConeSin * inversePerpendicularLength;
+		const targetX = axisX * this.baseConeCos + perpendicularX * radialScale;
+		const targetY = axisY * this.baseConeCos + perpendicularY * radialScale;
+		const targetZ = axisZ * this.baseConeCos + perpendicularZ * radialScale;
+
+		// Rotate the complete passive shape about its attachment instead of only
+		// snapping node one. The rigid correction preserves every segment and bend
+		// length exactly; subsequent iterations remain free to deform the rod.
+		let rotationX = dy * targetZ - dz * targetY;
+		let rotationY = dz * targetX - dx * targetZ;
+		let rotationZ = dx * targetY - dy * targetX;
+		let rotationSine = Math.hypot( rotationX, rotationY, rotationZ );
+		let rotationAxisLength = rotationSine;
+		const rotationCosine = Math.max(
+			-1, Math.min( 1, dx * targetX + dy * targetY + dz * targetZ ),
+		);
+		if ( rotationAxisLength <= EPSILON ) {
+
+			if ( rotationCosine > 0 ) return;
+			// Exact 180-degree case: choose a deterministic axis perpendicular to
+			// the current base direction.
+			const absoluteX = Math.abs( dx );
+			const absoluteY = Math.abs( dy );
+			const absoluteZ = Math.abs( dz );
+			let basisX = 0;
+			let basisY = 0;
+			let basisZ = 0;
+			if ( absoluteX <= absoluteY && absoluteX <= absoluteZ ) basisX = 1;
+			else if ( absoluteY <= absoluteZ ) basisY = 1;
+			else basisZ = 1;
+			rotationX = dy * basisZ - dz * basisY;
+			rotationY = dz * basisX - dx * basisZ;
+			rotationZ = dx * basisY - dy * basisX;
+			rotationAxisLength = Math.hypot( rotationX, rotationY, rotationZ );
+			rotationSine = 0;
+
+		}
+		const inverseRotationAxisLength = 1 / Math.max( rotationAxisLength, EPSILON );
+		rotationX *= inverseRotationAxisLength;
+		rotationY *= inverseRotationAxisLength;
+		rotationZ *= inverseRotationAxisLength;
+		const oneMinusCosine = 1 - rotationCosine;
+		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			for ( let state = 0; state < 2; state ++ ) {
+
+				const buffer = state === 0 ? this.positions : this.previousPositions;
+				const relativeX = buffer[ offset ] - this.positions[ 0 ];
+				const relativeY = buffer[ offset + 1 ] - this.positions[ 1 ];
+				const relativeZ = buffer[ offset + 2 ] - this.positions[ 2 ];
+				const crossX = rotationY * relativeZ - rotationZ * relativeY;
+				const crossY = rotationZ * relativeX - rotationX * relativeZ;
+				const crossZ = rotationX * relativeY - rotationY * relativeX;
+				const projection = rotationX * relativeX
+					+ rotationY * relativeY + rotationZ * relativeZ;
+				buffer[ offset ] = this.positions[ 0 ] + relativeX * rotationCosine
+					+ crossX * rotationSine + rotationX * projection * oneMinusCosine;
+				buffer[ offset + 1 ] = this.positions[ 1 ] + relativeY * rotationCosine
+					+ crossY * rotationSine + rotationY * projection * oneMinusCosine;
+				buffer[ offset + 2 ] = this.positions[ 2 ] + relativeZ * rotationCosine
+					+ crossZ * rotationSine + rotationZ * projection * oneMinusCosine;
+
+			}
+
+		}
+
+	}
+
+	_solveBaseChainLengths() {
+
+		if ( ! this.baseConeEnabled ) return;
+		for ( let segment = 0; segment < PASSIVE_TAIL_SEGMENT_COUNT; segment ++ ) {
+
+			const first = segment * 3;
+			const second = first + 3;
+			let dx = this.positions[ second ] - this.positions[ first ];
+			let dy = this.positions[ second + 1 ] - this.positions[ first + 1 ];
+			let dz = this.positions[ second + 2 ] - this.positions[ first + 2 ];
+			let length = Math.hypot( dx, dy, dz );
+			if ( length <= EPSILON ) {
+
+				dx = this.restOffsets[ second ] - this.restOffsets[ first ];
+				dy = this.restOffsets[ second + 1 ] - this.restOffsets[ first + 1 ];
+				dz = this.restOffsets[ second + 2 ] - this.restOffsets[ first + 2 ];
+				length = Math.hypot( dx, dy, dz );
+
+			}
+			const scale = this.segmentLengths[ segment ] / Math.max( length, EPSILON );
+			this.positions[ second ] = this.positions[ first ] + dx * scale;
+			this.positions[ second + 1 ] = this.positions[ first + 1 ] + dy * scale;
+			this.positions[ second + 2 ] = this.positions[ first + 2 ] + dz * scale;
+
+		}
 
 	}
 
@@ -408,12 +671,78 @@ export class PassiveTailPhysics {
 
 	}
 
+	_updateSleepState() {
+
+		if ( ! this.sleepEnabled ) {
+
+			this._sleepCandidateSteps = 0;
+			this.stats.sleepCandidateSteps = 0;
+			return;
+
+		}
+		let maximumSpeed = 0;
+		let maximumDisplacement = 0;
+		const inverseDt = 1 / this.fixedDt;
+		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			maximumSpeed = Math.max( maximumSpeed, Math.hypot(
+				this.positions[ offset ] - this.renderPreviousPositions[ offset ],
+				this.positions[ offset + 1 ] - this.renderPreviousPositions[ offset + 1 ],
+				this.positions[ offset + 2 ] - this.renderPreviousPositions[ offset + 2 ],
+			) * inverseDt );
+			maximumDisplacement = Math.max( maximumDisplacement, Math.hypot(
+				this.positions[ offset ] - this.renderPreviousPositions[ offset ],
+				this.positions[ offset + 1 ] - this.renderPreviousPositions[ offset + 1 ],
+				this.positions[ offset + 2 ] - this.renderPreviousPositions[ offset + 2 ],
+			) );
+
+		}
+		if ( maximumSpeed <= this.sleepSpeedThreshold
+			&& maximumDisplacement <= this.sleepDisplacementThreshold ) {
+
+			this._sleepCandidateSteps ++;
+			if ( this._sleepCandidateSteps >= this.sleepSteps ) {
+
+				this._sleeping = true;
+				this._sleepCandidateSteps = this.sleepSteps;
+				this._sleepCount ++;
+				this._sleepRootX = this.rootX;
+				this._sleepRootY = this.rootY;
+				this._sleepRootZ = this.rootZ;
+				this._sleepDirectionX = this.baseDirectionX;
+				this._sleepDirectionY = this.baseDirectionY;
+				this._sleepDirectionZ = this.baseDirectionZ;
+				this._sleepMaxAngle = this.baseConeMaxAngle;
+				this.previousPositions.set( this.positions );
+				this.renderPreviousPositions.set( this.positions );
+				this.interpolatedPositions.set( this.positions );
+
+			}
+
+		} else this._sleepCandidateSteps = 0;
+		this.stats.sleeping = this._sleeping;
+		this.stats.sleepCandidateSteps = this._sleepCandidateSteps;
+		this.stats.sleepCount = this._sleepCount;
+		this.stats.wakeCount = this._wakeCount;
+
+	}
+
 	stepFixed( rootPosition = null, projectPoint = this.projectPoint ) {
 
 		if ( rootPosition !== null ) this.setRoot( rootPosition );
 		if ( projectPoint !== null && typeof projectPoint !== 'function' )
 			throw new TypeError( 'projectPoint must be a function or null' );
 		this.renderPreviousPositions.set( this.positions );
+		if ( this._sleeping ) {
+
+			this._pinRoot();
+			this.previousPositions.set( this.positions );
+			this._totalSteps ++;
+			this.stats.totalSteps = this._totalSteps;
+			return this.view;
+
+		}
 		const velocityRetention = Math.exp( -this.damping * this.fixedDt );
 		const gravityScale = this.fixedDt * this.fixedDt;
 		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
@@ -468,11 +797,16 @@ export class PassiveTailPhysics {
 
 			}
 			this._pinRoot();
+			this._solveBaseCone();
 			this._projectCollisions( projectPoint );
+			this._solveBaseCone();
 
 		}
 		this._pinRoot();
+		this._solveBaseCone();
+		this._solveBaseChainLengths();
 		this._limitVelocitiesAndRecover();
+		this._updateSleepState();
 		this._totalSteps ++;
 		this.stats.totalSteps = this._totalSteps;
 		this.stats.invalidCorrections = this._invalidCorrections;
@@ -516,11 +850,15 @@ export class PassiveTailPhysics {
 		if ( ! Number.isInteger( nodeIndex ) || nodeIndex <= 0
 			|| nodeIndex >= PASSIVE_TAIL_NODE_COUNT )
 			throw new RangeError( 'nodeIndex must identify a passive node' );
+		const impulseX = vectorComponent( 'impulse', impulse, 'x' );
+		const impulseY = vectorComponent( 'impulse', impulse, 'y' );
+		const impulseZ = vectorComponent( 'impulse', impulse, 'z' );
+		this.wake();
 		const offset = nodeIndex * 3;
 		const scale = this.fixedDt * this.inverseMasses[ nodeIndex ];
-		this.previousPositions[ offset ] -= vectorComponent( 'impulse', impulse, 'x' ) * scale;
-		this.previousPositions[ offset + 1 ] -= vectorComponent( 'impulse', impulse, 'y' ) * scale;
-		this.previousPositions[ offset + 2 ] -= vectorComponent( 'impulse', impulse, 'z' ) * scale;
+		this.previousPositions[ offset ] -= impulseX * scale;
+		this.previousPositions[ offset + 1 ] -= impulseY * scale;
+		this.previousPositions[ offset + 2 ] -= impulseZ * scale;
 		return this;
 
 	}
@@ -564,6 +902,24 @@ export class PassiveTailPhysics {
 	maximumKineticEnergy() {
 
 		return 0.5 * ( PASSIVE_TAIL_NODE_COUNT - 1 ) * this.maxSpeed * this.maxSpeed;
+
+	}
+
+	maxNodeSpeed() {
+
+		const inverseDt = 1 / this.fixedDt;
+		let maximum = 0;
+		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			maximum = Math.max( maximum, Math.hypot(
+				this.positions[ offset ] - this.renderPreviousPositions[ offset ],
+				this.positions[ offset + 1 ] - this.renderPreviousPositions[ offset + 1 ],
+				this.positions[ offset + 2 ] - this.renderPreviousPositions[ offset + 2 ],
+			) * inverseDt );
+
+		}
+		return maximum;
 
 	}
 

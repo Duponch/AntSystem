@@ -123,3 +123,28 @@ test( 'CHAMELEON-LAB-GAIT-004 damping is allocation-free, finite and relaxes at 
 	assert.equal( model.interpolate( 0.35 ), view.render );
 
 } );
+
+test( 'CHAMELEON-LAB-GAIT-005 idle neck explores smoothly while the body only breathes', () => {
+
+	const first = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const later = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const repeated = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	writeWholeBodyTarget( {
+		gaitView: gaitView( -1, 0 ), speed: 0, attentionTime: 1.25, attentionSeed: 0.4,
+	}, first );
+	writeWholeBodyTarget( {
+		gaitView: gaitView( -1, 0 ), speed: 0, attentionTime: 8.75, attentionSeed: 0.4,
+	}, later );
+	writeWholeBodyTarget( {
+		gaitView: gaitView( -1, 0 ), speed: 0, attentionTime: 8.75, attentionSeed: 0.4,
+	}, repeated );
+	assert.ok( Math.abs( first[ WHOLE_BODY_POSE.NECK_YAW ] ) > 0.01 );
+	assert.ok( Math.abs(
+		later[ WHOLE_BODY_POSE.NECK_YAW ] - first[ WHOLE_BODY_POSE.NECK_YAW ],
+	) > 0.02 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.NECK_YAW ] ) < 0.15 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.HEAD_YAW ] ) < 0.06 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.CHEST_PITCH ] ) < 0.005 );
+	assert.deepEqual( later, repeated, 'idle attention must remain deterministic' );
+
+} );

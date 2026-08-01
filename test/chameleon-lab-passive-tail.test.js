@@ -62,6 +62,20 @@ function endpointDistance( positions ) {
 
 }
 
+function baseAngle( tail, direction ) {
+
+	const directionLength = Math.hypot( direction.x, direction.y, direction.z );
+	const segmentX = tail.positions[ 3 ] - tail.positions[ 0 ];
+	const segmentY = tail.positions[ 4 ] - tail.positions[ 1 ];
+	const segmentZ = tail.positions[ 5 ] - tail.positions[ 2 ];
+	const segmentLength = Math.hypot( segmentX, segmentY, segmentZ );
+	const cosine = (
+		segmentX * direction.x + segmentY * direction.y + segmentZ * direction.z
+	) / ( segmentLength * directionLength );
+	return Math.acos( Math.max( -1, Math.min( 1, cosine ) ) );
+
+}
+
 test( 'CHAMELEON-LAB-PASSIVE-TAIL-001 owns thirteen samples for twelve bones in stable preallocated buffers', () => {
 
 	const tail = createPassiveTailPhysics( {
@@ -128,7 +142,8 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-002 keeps its root attached and projects passi
 			tail.positions[ node * 3 + 1 ] >= tail.radii[ node ] - 2e-5,
 			'node ' + node + ' penetrated the plane',
 		);
-	assert.ok( callbackState.calls > 100_000 );
+	assert.ok( callbackState.calls > 1_000 );
+	assert.equal( tail.isSleeping(), true );
 	assert.equal( callbackState.stableScratch, true );
 	assert.ok( tail.maxSegmentError() < 0.002 );
 	assert.equal( tail.stats.invalidCorrections, 0 );
@@ -331,5 +346,260 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-008 encodes initial curvature as passive rest 
 	assert.ok( Math.abs( endpointDistance( tail.positions ) - restEndpointDistance ) < 1e-5 );
 	assert.ok( tail.maxSegmentError() < 1e-6 );
 	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-009 root cone prevents inversion under impulses and moving attachment', () => {
+
+	const maxAngle = 0.42;
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.7, z: 0 },
+		segmentLength: 0.06,
+		baseDirection: { x: 1, y: 0, z: 0 },
+		baseMaxAngle: maxAngle,
+		damping: 1.1,
+		solverIterations: 12,
+		maxSpeed: 10,
+	} );
+	// Force the singular antiparallel case once; the deterministic fallback
+	// must still choose a finite point on the cone boundary.
+	tail.positions[ 3 ] = tail.positions[ 0 ] - tail.segmentLengths[ 0 ];
+	tail.positions[ 4 ] = tail.positions[ 1 ];
+	tail.positions[ 5 ] = tail.positions[ 2 ];
+	tail.previousPositions.set( tail.positions );
+	tail.setBaseDirection( { x: 1, y: 0, z: 0 }, 0 );
+	tail.stepFixed( { x: 0, y: 0.7, z: 0 } );
+	const antiparallelAngle = baseAngle( tail, { x: 1, y: 0, z: 0 } );
+	assert.ok( antiparallelAngle <= 5e-4, 'angle was ' + antiparallelAngle );
+
+	let maximumLengthError = 0;
+	for ( let step = 0; step < 1_440; step ++ ) {
+
+		const time = step / 120;
+		const direction = {
+			x: Math.cos( time * 0.31 ),
+			y: Math.sin( time * 0.19 ) * 0.22,
+			z: Math.sin( time * 0.31 ),
+		};
+		const root = {
+			x: Math.sin( time * 0.47 ) * 0.18,
+			y: 0.7 + Math.sin( time * 0.23 ) * 0.06,
+			z: Math.cos( time * 0.29 ) * 0.12,
+		};
+		assert.equal( tail.setBaseDirection( direction, maxAngle ), tail );
+		if ( step % 97 === 0 ) tail.applyImpulse( 1, { x: -8, y: 5, z: -7 } );
+		tail.stepFixed( root );
+		assert.ok(
+			baseAngle( tail, direction ) <= maxAngle + 2e-5,
+			'base segment escaped its structural cone at step ' + step,
+		);
+		maximumLengthError = Math.max( maximumLengthError, tail.maxSegmentError() );
+		assertBuffersFinite( tail );
+
+	}
+	assert.ok(
+		maximumLengthError < 0.002,
+		'maximum segment error was ' + maximumLengthError,
+	);
+	assert.equal( tail.stats.invalidCorrections, 0 );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-010 root cone is deterministic, allocation-stable, and validates input', () => {
+
+	const create = () => createPassiveTailPhysics( {
+		gravity: { x: 0.3, y: -9.81, z: -0.2 },
+		segmentLength: 0.055,
+		damping: 1.4,
+		solverIterations: 10,
+	} );
+	const first = create();
+	const second = create();
+	const firstView = first.getView();
+	const firstPositions = first.positions;
+	for ( let step = 0; step < 960; step ++ ) {
+
+		const direction = {
+			x: 0.8 + Math.cos( step * 0.017 ) * 0.15,
+			y: Math.sin( step * 0.013 ) * 0.2,
+			z: Math.sin( step * 0.017 ) * 0.3,
+		};
+		const root = {
+			x: Math.sin( step * 0.009 ) * 0.1,
+			y: 0.65,
+			z: Math.cos( step * 0.007 ) * 0.08,
+		};
+		for ( const tail of [ first, second ] ) {
+
+			tail.setBaseDirection( direction, Math.PI / 5 );
+			if ( step === 80 || step === 410 )
+				tail.applyImpulse( PASSIVE_TAIL_NODE_COUNT - 1, { x: -2, y: 3, z: 4 } );
+			tail.stepFixed( root );
+
+		}
+
+	}
+	assert.equal( first.getView(), firstView );
+	assert.equal( first.positions, firstPositions );
+	assert.deepEqual( Array.from( first.positions ), Array.from( second.positions ) );
+	assert.deepEqual(
+		Array.from( first.previousPositions ),
+		Array.from( second.previousPositions ),
+	);
+	assert.equal( first.maxSegmentError(), second.maxSegmentError() );
+	assertBuffersFinite( first );
+	assertBuffersFinite( second );
+	assert.throws(
+		() => first.setBaseDirection( { x: 0, y: 0, z: 0 }, 0.5 ),
+		/baseDirection/u,
+	);
+	assert.throws(
+		() => first.setBaseDirection( { x: 1, y: 0, z: 0 }, -0.01 ),
+		/maxAngle/u,
+	);
+	assert.throws(
+		() => first.setBaseDirection( { x: 1, y: 0, z: 0 }, Math.PI + 0.01 ),
+		/maxAngle/u,
+	);
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-011 stable root enters deterministic sleep with zero residual jitter', () => {
+
+	const callbackState = { calls: 0, stableScratch: true };
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.6, z: 0 },
+		segmentLength: 0.075,
+		damping: 1.5,
+		projectPoint: planeProjector( callbackState ),
+	} );
+	let sleepStep = -1;
+	for ( let step = 0; step < 4_000; step ++ ) {
+
+		tail.stepFixed();
+		if ( tail.isSleeping() ) {
+
+			sleepStep = step;
+			break;
+
+		}
+
+	}
+	assert.ok( sleepStep >= tail.sleepSteps, 'tail slept before the stability window' );
+	assert.ok( sleepStep < 1_200, 'tail failed to settle promptly: step ' + sleepStep );
+	assert.equal( tail.stats.sleeping, true );
+	assert.equal( tail.stats.sleepCount, 1 );
+	assert.equal( tail.stats.sleepCandidateSteps, tail.sleepSteps );
+	assert.equal( tail.maxNodeSpeed(), 0 );
+	assert.equal( tail.kineticEnergy(), 0 );
+	const settled = tail.positions.slice();
+	const collisionCallsAtSleep = callbackState.calls;
+	let maximumSoakDisplacement = 0;
+	for ( let step = 0; step < 20_000; step ++ ) {
+
+		tail.stepFixed();
+		for ( let index = 0; index < settled.length; index ++ )
+			maximumSoakDisplacement = Math.max(
+				maximumSoakDisplacement,
+				Math.abs( tail.positions[ index ] - settled[ index ] ),
+			);
+
+	}
+	assert.equal( maximumSoakDisplacement, 0 );
+	assert.equal( tail.maxNodeSpeed(), 0 );
+	assert.equal( tail.kineticEnergy(), 0 );
+	assert.equal( callbackState.calls, collisionCallsAtSleep );
+	assert.equal( callbackState.stableScratch, true );
+	for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ )
+		assert.ok( tail.positions[ node * 3 + 1 ] >= tail.radii[ node ] - 2e-5 );
+	assert.ok( tail.maxSegmentError() < 0.002 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-012 impulses, root motion, and cone motion wake sleeping tail immediately', () => {
+
+	const root = { x: 0, y: 0.6, z: 0 };
+	const tail = createPassiveTailPhysics( {
+		rootPosition: root,
+		segmentLength: 0.07,
+		damping: 2.2,
+		projectPoint: planeProjector(),
+		baseDirection: { x: 1, y: 0, z: 0 },
+		baseMaxAngle: 0.48,
+	} );
+	for ( let step = 0; step < 4_000 && ! tail.isSleeping(); step ++ ) tail.stepFixed();
+	assert.equal( tail.isSleeping(), true );
+	const sleepingTip = tail.positions.slice( -3 );
+	tail.applyImpulse( PASSIVE_TAIL_NODE_COUNT - 1, { x: 0.4, y: 2.4, z: 1.1 } );
+	assert.equal( tail.isSleeping(), false );
+	assert.equal( tail.stats.wakeCount, 1 );
+	tail.stepFixed();
+	assert.ok( Math.hypot(
+		tail.positions.at( -3 ) - sleepingTip[ 0 ],
+		tail.positions.at( -2 ) - sleepingTip[ 1 ],
+		tail.positions.at( -1 ) - sleepingTip[ 2 ],
+	) > 1e-5 );
+	assert.ok( tail.maxNodeSpeed() > 0 );
+
+	for ( let step = 0; step < 8_000 && ! tail.isSleeping(); step ++ ) tail.stepFixed();
+	assert.equal( tail.isSleeping(), true );
+	const movedRoot = { x: 0.08, y: 0.63, z: -0.04 };
+	tail.stepFixed( movedRoot );
+	assert.equal( tail.isSleeping(), false );
+	assert.equal( tail.stats.wakeCount, 2 );
+	assert.ok( Math.abs( tail.positions[ 0 ] - movedRoot.x ) <= EPSILON );
+	assert.ok( Math.abs( tail.positions[ 1 ] - movedRoot.y ) <= EPSILON );
+	assert.ok( Math.abs( tail.positions[ 2 ] - movedRoot.z ) <= EPSILON );
+
+	for ( let step = 0; step < 8_000 && ! tail.isSleeping(); step ++ )
+		tail.stepFixed( movedRoot );
+	assert.equal( tail.isSleeping(), true );
+	const direction = { x: 0.2, y: 0.12, z: 1 };
+	tail.setBaseDirection( direction, 0.38 );
+	assert.equal( tail.isSleeping(), false );
+	assert.equal( tail.stats.wakeCount, 3 );
+	tail.stepFixed( movedRoot );
+	assert.ok( baseAngle( tail, direction ) <= 0.38 + 2e-5 );
+	assert.ok( tail.maxSegmentError() < 0.002 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-013 sleep and wake remain fixed-step invariant', () => {
+
+	const create = () => createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.55, z: 0 },
+		segmentLength: 0.065,
+		damping: 1.8,
+		projectPoint: planeProjector(),
+		baseDirection: { x: 1, y: 0, z: 0 },
+		baseMaxAngle: 0.5,
+	} );
+	const slow = create();
+	const fast = create();
+	for ( let frame = 0; frame < 720; frame ++ ) slow.advance( 1 / 60 );
+	for ( let frame = 0; frame < 2_880; frame ++ ) fast.advance( 1 / 240 );
+	assert.equal( slow.isSleeping(), true );
+	assert.equal( fast.isSleeping(), true );
+	assert.equal( slow.stats.totalSteps, fast.stats.totalSteps );
+	assert.equal( slow.stats.sleepCount, fast.stats.sleepCount );
+	assert.deepEqual( Array.from( slow.positions ), Array.from( fast.positions ) );
+
+	for ( const tail of [ slow, fast ] )
+		tail.applyImpulse( PASSIVE_TAIL_NODE_COUNT - 1, { x: -0.5, y: 1.7, z: 0.8 } );
+	for ( let frame = 0; frame < 300; frame ++ ) slow.advance( 1 / 60 );
+	for ( let frame = 0; frame < 1_200; frame ++ ) fast.advance( 1 / 240 );
+	assert.equal( slow.stats.totalSteps, fast.stats.totalSteps );
+	assert.equal( slow.stats.sleepCount, fast.stats.sleepCount );
+	assert.equal( slow.stats.wakeCount, fast.stats.wakeCount );
+	assert.equal( slow.isSleeping(), fast.isSleeping() );
+	assert.deepEqual( Array.from( slow.positions ), Array.from( fast.positions ) );
+	assert.deepEqual(
+		Array.from( slow.previousPositions ),
+		Array.from( fast.previousPositions ),
+	);
+	assertBuffersFinite( slow );
+	assertBuffersFinite( fast );
 
 } );

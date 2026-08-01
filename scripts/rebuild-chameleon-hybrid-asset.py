@@ -34,6 +34,19 @@ MAPPING_TOLERANCE = 1e-6
 TAIL_BONE_COUNT = 12
 TAIL_CENTERLINE_POINT_COUNT = TAIL_BONE_COUNT + 1
 TAIL_BONE_NAMES = tuple(f"tail_{index:02d}" for index in range(1, TAIL_BONE_COUNT + 1))
+TAIL_ROOT_BLEND_GEODESIC_FRACTION = 0.12
+TAIL_ROOT_BODY_BLEND_MAXIMUM = 0.72
+ANATOMY_CONTRACT_VERSION = "1.0.0"
+LIMB_ORDER = ("front.L", "front.R", "hind.L", "hind.R")
+LIMB_SURFACE_EXPANSION = {"front": 0.20, "hind": 0.22}
+LIMB_ENVELOPE_RADIUS = {
+    "girdle": 0.065,
+    "upper": 0.055,
+    "lower": 0.050,
+    "palm": 0.044,
+    "digits_inner": 0.026,
+    "digits_outer": 0.026,
+}
 EXPECTED_REST_MESH_SHA256 = "1732a987975806e9e34a48e529347dfca2291e02b8b9c967b3a7ae18f6f2287c"
 EXPECTED_TAIL_REST_SHA256 = "6b493bfe12b33cc1e7caba9884b4681ad9317f24ab4da3d14c12b8599a820bd1"
 
@@ -147,7 +160,7 @@ def tail_rest_sha256(mesh: bpy.types.Mesh, tail_indices: set[int]) -> str:
 def build_tail_geodesic_contract(
     mesh: bpy.types.Mesh,
     tail_indices: set[int],
-) -> tuple[list[float], list[Vector], float, list[float], int]:
+) -> tuple[list[float], list[int], list[Vector], float, list[float], set[int]]:
     """Parameterize the preserved tail without spatial shortcuts across its curl."""
     adjacency: list[list[tuple[int, float]]] = [[] for _ in mesh.vertices]
     interface_vertices: set[int] = set()
@@ -166,9 +179,11 @@ def build_tail_geodesic_contract(
     require(len(interface_vertices) >= 3,
             f"tail/body interface is undersampled: {len(interface_vertices)} vertices")
     distances = [math.inf] * len(mesh.vertices)
+    interface_owner = [-1] * len(mesh.vertices)
     pending: list[tuple[float, int]] = []
     for vertex_index in sorted(interface_vertices):
         distances[vertex_index] = 0.0
+        interface_owner[vertex_index] = vertex_index
         heapq.heappush(pending, (0.0, vertex_index))
 
     while pending:
@@ -179,10 +194,13 @@ def build_tail_geodesic_contract(
             candidate = distance + edge_length
             if candidate < distances[neighbour]:
                 distances[neighbour] = candidate
+                interface_owner[neighbour] = interface_owner[vertex_index]
                 heapq.heappush(pending, (candidate, neighbour))
 
     unreachable = [index for index in tail_indices if not math.isfinite(distances[index])]
     require(not unreachable, f"tail geodesic left {len(unreachable)} vertices unreachable")
+    ownerless = [index for index in tail_indices if interface_owner[index] not in interface_vertices]
+    require(not ownerless, f"tail geodesic left {len(ownerless)} vertices without an interface owner")
     maximum_distance = max(distances[index] for index in tail_indices)
     require(0.5 <= maximum_distance <= 3.0,
             f"tail surface geodesic length is implausible: {maximum_distance:.9g}")
@@ -243,7 +261,14 @@ def build_tail_geodesic_contract(
     require(0.45 <= rest_arc_length <= 2.5,
             f"tail rest centerline length is implausible: {rest_arc_length:.9g}")
 
-    return distances, centerline, maximum_distance, segment_lengths, len(interface_vertices)
+    return (
+        distances,
+        interface_owner,
+        centerline,
+        maximum_distance,
+        segment_lengths,
+        interface_vertices,
+    )
 
 
 def reposition_tail_rest_bones(
@@ -300,6 +325,207 @@ def reposition_tail_rest_bones(
                 f"tail rest tail {name} moved away from its centerline")
 
 
+def limb_bone_names(limb_key: str) -> tuple[str, ...]:
+    limb, side = limb_key.split(".")
+    return tuple(
+        f"{limb}_{role}.{side}"
+        for role in ("girdle", "upper", "lower", "palm", "digits_inner", "digits_outer")
+    )
+
+
+def fit_distal_limb_anatomy(
+    mesh: bpy.types.Mesh,
+    armature: bpy.types.Object,
+) -> dict[str, dict[str, list[float]]]:
+    """Fit palm forks and digit axes to the preserved zygodactyl geometry.
+
+    The legacy automatic rig aimed both digit bones beyond the mesh in almost
+    the same lateral direction.  The source feet actually expose two opposing
+    branches: a lower-X branch and the most lateral branch.  Their tips are
+    derived from deterministic extrema of the exact rest surface, while every
+    proximal joint remains untouched.
+    """
+    fits: dict[str, dict[str, object]] = {}
+    unchanged = {
+        bone.name: (bone.head_local.copy(), bone.tail_local.copy())
+        for bone in armature.data.bones
+        if "digits_" not in bone.name and "palm" not in bone.name
+    }
+
+    for limb_key in LIMB_ORDER:
+        limb, side = limb_key.split(".")
+        side_sign = 1.0 if side == "L" else -1.0
+        palm = armature.data.bones[f"{limb}_palm.{side}"]
+        original_root = palm.tail_local.copy()
+        region = [
+            vertex.co for vertex in mesh.vertices
+            if vertex.co.y * side_sign > 0.0
+            and vertex.co.z < 0.0
+            and (
+                vertex.co.x < -0.06
+                if limb == "front"
+                else -0.06 < vertex.co.x < 0.16
+            )
+        ]
+        require(len(region) >= 500, f"{limb_key} distal surface is undersampled")
+
+        if limb == "front":
+            root_reference = palm.head_local + Vector((0.0, side_sign * 0.03, -0.03))
+            root_candidates = [
+                point for point in region
+                if (point - root_reference).length <= 0.06
+            ]
+            require(len(root_candidates) >= 30,
+                    f"{limb_key} palm fork fit has too few candidates")
+            root = sum(root_candidates, Vector()) / len(root_candidates)
+        else:
+            # The hind palm fork is already embedded in the web of the exact
+            # mesh (surface error below 0.005), so retain that correct pivot.
+            root = original_root
+
+        digit_region = [
+            point for point in region
+            if point.y * side_sign >= abs(root.y) - 0.07
+            and point.z <= root.z + 0.04
+        ]
+        require(len(digit_region) >= 80, f"{limb_key} digit surface is undersampled")
+        minimum_x = min(point.x for point in digit_region)
+        maximum_lateral = max(point.y * side_sign for point in digit_region)
+        inner_shell = [point for point in digit_region if point.x <= minimum_x + 0.006]
+        outer_shell = [
+            point for point in digit_region
+            if point.y * side_sign >= maximum_lateral - 0.006
+        ]
+        require(len(inner_shell) >= 4, f"{limb_key} inner digit tip is undersampled")
+        require(len(outer_shell) >= 4, f"{limb_key} outer digit tip is undersampled")
+        inner_tip = sum(inner_shell, Vector()) / len(inner_shell)
+        outer_tip = sum(outer_shell, Vector()) / len(outer_shell)
+        require((inner_tip - root).length >= 0.035,
+                f"{limb_key} inner digit is anatomically degenerate")
+        require((outer_tip - root).length >= 0.018,
+                f"{limb_key} outer digit is anatomically degenerate")
+        divergence = (inner_tip - root).normalized().angle((outer_tip - root).normalized())
+        require(divergence >= math.radians(35.0),
+                f"{limb_key} digit fork angle is only {math.degrees(divergence):.3f} degrees")
+        fits[limb_key] = {
+            "root": root,
+            "inner_tip": inner_tip,
+            "outer_tip": outer_tip,
+            "region": region,
+            "inner_shell": inner_shell,
+            "outer_shell": outer_shell,
+        }
+
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for obj in bpy.context.scene.objects:
+        try:
+            obj.select_set(False)
+        except RuntimeError:
+            pass
+    armature.hide_viewport = False
+    armature.hide_render = False
+    try:
+        armature.hide_set(False)
+    except RuntimeError:
+        pass
+    armature.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    require(bpy.ops.object.mode_set(mode="EDIT") == {"FINISHED"},
+            "cannot enter edit mode for distal anatomy fit")
+    try:
+        for limb_key, fit in fits.items():
+            limb, side = limb_key.split(".")
+            palm = armature.data.edit_bones[f"{limb}_palm.{side}"]
+            inner = armature.data.edit_bones[f"{limb}_digits_inner.{side}"]
+            outer = armature.data.edit_bones[f"{limb}_digits_outer.{side}"]
+            palm.tail = fit["root"]
+            for bone, tip in ((inner, fit["inner_tip"]), (outer, fit["outer_tip"])):
+                bone.use_connect = False
+                bone.parent = palm
+                bone.head = fit["root"]
+                bone.tail = tip
+                direction = (bone.tail - bone.head).normalized()
+                roll_reference = Vector((0.0, 0.0, 1.0))
+                if abs(direction.dot(roll_reference)) > 0.94:
+                    roll_reference = Vector((1.0, 0.0, 0.0))
+                bone.align_roll(roll_reference)
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    for name, (head, tail) in unchanged.items():
+        bone = armature.data.bones[name]
+        require((bone.head_local - head).length <= 1e-7 and (bone.tail_local - tail).length <= 1e-7,
+                f"proximal anatomical pivot {name} moved during distal fit")
+
+    result: dict[str, dict[str, list[float]]] = {}
+    for limb_key, fit in fits.items():
+        limb, side = limb_key.split(".")
+        palm = armature.data.bones[f"{limb}_palm.{side}"]
+        inner = armature.data.bones[f"{limb}_digits_inner.{side}"]
+        outer = armature.data.bones[f"{limb}_digits_outer.{side}"]
+        require((palm.tail_local - inner.head_local).length <= 1e-7,
+                f"{limb_key} inner digit does not share the palm fork")
+        require((palm.tail_local - outer.head_local).length <= 1e-7,
+                f"{limb_key} outer digit does not share the palm fork")
+        first = fit["inner_tip"] - fit["root"]
+        second = fit["outer_tip"] - fit["root"]
+        sole_normal = first.cross(second)
+        require(sole_normal.length > 1e-6, f"{limb_key} contact patch is collinear")
+        sole_normal.normalize()
+        if sole_normal.dot(Vector((0.0, 0.0, -1.0))) < 0.0:
+            sole_normal.negate()
+        root_shell = [
+            point for point in fit["region"]
+            if (point - fit["root"]).length <= 0.045
+        ]
+        require(len(root_shell) >= 6, f"{limb_key} contact root shell is undersampled")
+        contact_root = max(root_shell, key=lambda point: (point - fit["root"]).dot(sole_normal))
+        contact_inner = max(
+            fit["inner_shell"],
+            key=lambda point: (point - fit["inner_tip"]).dot(sole_normal),
+        )
+        contact_outer = max(
+            fit["outer_shell"],
+            key=lambda point: (point - fit["outer_tip"]).dot(sole_normal),
+        )
+        surface_first = contact_inner - contact_root
+        surface_second = contact_outer - contact_root
+        surface_normal = surface_first.cross(surface_second)
+        require(surface_normal.length > 1e-6, f"{limb_key} surface contact patch is collinear")
+        surface_normal.normalize()
+        if surface_normal.dot(sole_normal) < 0.0:
+            surface_normal.negate()
+        patch_center = (
+            contact_root * 0.34
+            + contact_inner * 0.33
+            + contact_outer * 0.33
+        )
+        patch = [contact_root, contact_inner, contact_outer]
+        palm["anatomical_role"] = "wrist-to-zygodactyl-fork"
+        palm["contact_patch_points_rest"] = [coordinate for point in patch for coordinate in point]
+        palm["contact_patch_center_rest"] = list(patch_center)
+        palm["contact_patch_normal_rest"] = list(surface_normal)
+        palm["contact_patch_space"] = "blender-rig-local-z-up"
+        inner["anatomical_role"] = "opposed-digit-inner"
+        outer["anatomical_role"] = "opposed-digit-outer"
+        for digit in (inner, outer):
+            if "tip_surface_fitted" in digit:
+                del digit["tip_surface_fitted"]
+            digit["tip_medial_surface_fit"] = True
+        result[limb_key] = {
+            "root": list(fit["root"]),
+            "inner_tip": list(fit["inner_tip"]),
+            "outer_tip": list(fit["outer_tip"]),
+            "contact_root": list(contact_root),
+            "contact_inner": list(contact_inner),
+            "contact_outer": list(contact_outer),
+            "patch_center": list(patch_center),
+            "patch_normal": list(surface_normal),
+        }
+    return result
+
+
 def cubic_bspline_tail_weights(parameter: float) -> list[tuple[int, float]]:
     coordinate = max(0.0, min(1.0, parameter)) * (TAIL_BONE_COUNT - 1)
     base = math.floor(coordinate)
@@ -325,21 +551,90 @@ def bind_original_tail_smoothly(
     groups_by_name: dict[str, bpy.types.VertexGroup],
     tail_indices: set[int],
     distances: list[float],
+    interface_owner: list[int],
+    interface_vertices: set[int],
     maximum_distance: float,
-) -> None:
+) -> int:
+    """Bind the exact curled tail while keeping its body junction strain-safe.
+
+    A pure tail-chain assignment makes the first tail ring move almost wholly
+    with ``tail_01`` while the immediately adjacent body ring follows pelvis,
+    spine and hind-girdle bones.  Linear-blend skinning (the glTF/Three.js
+    runtime model) then stretches and can invert those junction triangles at
+    large tail angles.  Blender's preserve-volume preview cannot fix that in
+    glTF because dual-quaternion skinning is not exported.
+
+    The proximal geodesic band therefore inherits the nearest interface's
+    existing body profile and feathers it into the cubic tail B-spline.  Rest
+    positions, polygons and the original curled silhouette remain bit-exact;
+    only the deformation weights change, with the glTF four-influence budget
+    enforced after the merge.
+    """
     tail_groups = []
     for name in TAIL_BONE_NAMES:
         group = groups_by_name.get(name)
         require(group is not None, f"tail vertex group {name} is missing")
         tail_groups.append(group)
 
+    interface_profiles: dict[int, dict[str, float]] = {
+        vertex_index: {} for vertex_index in interface_vertices
+    }
+    for edge in exact_object.data.edges:
+        first, second = edge.vertices
+        if first in interface_vertices and second not in tail_indices:
+            tail_vertex, body_vertex = first, second
+        elif second in interface_vertices and first not in tail_indices:
+            tail_vertex, body_vertex = second, first
+        else:
+            continue
+        profile = interface_profiles[tail_vertex]
+        for membership in exact_object.data.vertices[body_vertex].groups:
+            if membership.weight <= 1e-9:
+                continue
+            name = exact_object.vertex_groups[membership.group].name
+            profile[name] = profile.get(name, 0.0) + membership.weight
+
+    for vertex_index, profile in interface_profiles.items():
+        total = sum(profile.values())
+        require(total > 1e-9, f"tail interface vertex {vertex_index} has no body profile")
+        for name in tuple(profile):
+            profile[name] /= total
+
+    blended_vertices = 0
     for vertex_index in sorted(tail_indices):
         parameter = distances[vertex_index] / maximum_distance
-        weights = cubic_bspline_tail_weights(parameter)
+        spline_weights = cubic_bspline_tail_weights(parameter)
+        fade_coordinate = max(
+            0.0,
+            min(1.0, 1.0 - parameter / TAIL_ROOT_BLEND_GEODESIC_FRACTION),
+        )
+        smooth_fade = fade_coordinate * fade_coordinate * (3.0 - 2.0 * fade_coordinate)
+        body_blend = TAIL_ROOT_BODY_BLEND_MAXIMUM * smooth_fade
+        contributions: dict[str, float] = {}
+        for bone_index, weight in spline_weights:
+            name = TAIL_BONE_NAMES[bone_index]
+            contributions[name] = contributions.get(name, 0.0) + weight * (1.0 - body_blend)
+        if body_blend > 1e-9:
+            blended_vertices += 1
+            profile = interface_profiles[interface_owner[vertex_index]]
+            for name, weight in profile.items():
+                contributions[name] = contributions.get(name, 0.0) + weight * body_blend
+
+        strongest = sorted(
+            contributions.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:4]
+        total = sum(weight for _, weight in strongest)
+        require(total > 1e-9, f"tail vertex {vertex_index} has no retained influence")
+        weights = [(name, weight / total) for name, weight in strongest if weight > 1e-9]
         require(1 <= len(weights) <= 4,
-                f"tail vertex {vertex_index} has {len(weights)} spline influences")
-        for bone_index, weight in weights:
-            tail_groups[bone_index].add([vertex_index], weight, "REPLACE")
+                f"tail vertex {vertex_index} has {len(weights)} retained influences")
+        require(any(name in TAIL_BONE_NAMES for name, _ in weights),
+                f"tail vertex {vertex_index} lost all tail-chain influence")
+        for name, weight in weights:
+            group = groups_by_name.get(name)
+            require(group is not None, f"tail blend references missing group {name}")
+            group.add([vertex_index], weight, "REPLACE")
 
     for vertex_index in tail_indices:
         vertex = exact_object.data.vertices[vertex_index]
@@ -349,10 +644,189 @@ def bind_original_tail_smoothly(
         ]
         require(1 <= len(memberships) <= 4,
                 f"tail vertex {vertex_index} has an invalid influence count")
-        require(all(name in TAIL_BONE_NAMES for name, _ in memberships),
-                f"tail vertex {vertex_index} leaked outside the visual tail chain")
+        require(any(name in TAIL_BONE_NAMES for name, _ in memberships),
+                f"tail vertex {vertex_index} lost the visual tail chain")
         require(abs(sum(weight for _, weight in memberships) - 1.0) <= 2e-4,
                 f"tail vertex {vertex_index} weights are not normalized")
+
+    require(blended_vertices >= len(interface_vertices),
+            "tail root blend must include every body-interface vertex")
+    return blended_vertices
+
+
+def point_segment_distance(point: Vector, start: Vector, end: Vector) -> float:
+    segment = end - start
+    squared_length = segment.length_squared
+    require(squared_length > 1e-10, "anatomical envelope contains a zero-length bone")
+    parameter = max(0.0, min(1.0, (point - start).dot(segment) / squared_length))
+    return (point - (start + segment * parameter)).length
+
+
+def rebind_limb_envelopes(
+    exact_object: bpy.types.Object,
+    armature: bpy.types.Object,
+    mapped_source_indices: set[int],
+    groups_by_name: dict[str, bpy.types.VertexGroup],
+) -> dict[str, int]:
+    """Replace diffuse automatic foot weights with local anatomical envelopes.
+
+    The exact rest mesh is one closed component, but cutting it at ``z < 0``
+    yields four unambiguous distal limb components.  Those are deterministic
+    geodesic seeds.  A bounded expansion reaches each shoulder/hip and fades
+    into the preserved torso weights; it never reaches the original tail.
+    """
+    mesh = exact_object.data
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in mesh.vertices]
+    for edge in mesh.edges:
+        first, second = edge.vertices
+        length = (mesh.vertices[first].co - mesh.vertices[second].co).length
+        require(length > 1e-9, f"limb envelope edge {edge.index} has zero length")
+        adjacency[first].append((second, length))
+        adjacency[second].append((first, length))
+
+    seed_components: dict[str, set[int]] = {}
+    for limb_key in LIMB_ORDER:
+        limb, side = limb_key.split(".")
+        side_sign = 1.0 if side == "L" else -1.0
+        palm_root = armature.data.bones[f"{limb}_palm.{side}"].tail_local
+        eligible = [
+            index for index in mapped_source_indices
+            if mesh.vertices[index].co.z < 0.0
+            and mesh.vertices[index].co.y * side_sign > 0.0
+            and (
+                mesh.vertices[index].co.x < -0.06
+                if limb == "front"
+                else -0.06 < mesh.vertices[index].co.x < 0.16
+            )
+        ]
+        require(eligible, f"{limb_key} has no distal seed candidate")
+        start = min(eligible, key=lambda index: (mesh.vertices[index].co - palm_root).length_squared)
+        component = {start}
+        pending = [start]
+        while pending:
+            current = pending.pop()
+            for neighbour, _ in adjacency[current]:
+                if neighbour in component or neighbour not in mapped_source_indices:
+                    continue
+                if mesh.vertices[neighbour].co.z >= 0.0:
+                    continue
+                component.add(neighbour)
+                pending.append(neighbour)
+        require(900 <= len(component) <= 1800,
+                f"{limb_key} distal component has implausible size {len(component)}")
+        seed_components[limb_key] = component
+
+    for first_index, first_key in enumerate(LIMB_ORDER):
+        for second_key in LIMB_ORDER[first_index + 1:]:
+            require(seed_components[first_key].isdisjoint(seed_components[second_key]),
+                    f"distal components {first_key} and {second_key} overlap")
+
+    distances_by_limb: dict[str, list[float]] = {}
+    for limb_key in LIMB_ORDER:
+        limb, _ = limb_key.split(".")
+        maximum = LIMB_SURFACE_EXPANSION[limb]
+        distances = [math.inf] * len(mesh.vertices)
+        pending: list[tuple[float, int]] = []
+        for index in seed_components[limb_key]:
+            distances[index] = 0.0
+            heapq.heappush(pending, (0.0, index))
+        while pending:
+            distance, current = heapq.heappop(pending)
+            if distance != distances[current] or distance >= maximum:
+                continue
+            for neighbour, edge_length in adjacency[current]:
+                if neighbour not in mapped_source_indices:
+                    continue
+                candidate = distance + edge_length
+                if candidate < distances[neighbour] and candidate <= maximum:
+                    distances[neighbour] = candidate
+                    heapq.heappush(pending, (candidate, neighbour))
+        distances_by_limb[limb_key] = distances
+
+    bone_segments: dict[str, list[tuple[str, Vector, Vector, float]]] = {}
+    for limb_key in LIMB_ORDER:
+        segments = []
+        for name in limb_bone_names(limb_key):
+            bone = armature.data.bones[name]
+            role = name.split("_", 1)[1].split(".", 1)[0]
+            segments.append((name, bone.head_local.copy(), bone.tail_local.copy(), LIMB_ENVELOPE_RADIUS[role]))
+        bone_segments[limb_key] = segments
+
+    reweighted_vertices = 0
+    distal_vertices = 0
+    for vertex_index in sorted(mapped_source_indices):
+        owner = None
+        normalized_distance = math.inf
+        distance = math.inf
+        for limb_key in LIMB_ORDER:
+            limb = limb_key.split(".")[0]
+            candidate = distances_by_limb[limb_key][vertex_index]
+            normalized = candidate / LIMB_SURFACE_EXPANSION[limb]
+            if normalized < normalized_distance:
+                owner = limb_key
+                normalized_distance = normalized
+                distance = candidate
+        if owner is None or not math.isfinite(distance) or normalized_distance > 1.0:
+            continue
+        fade = max(0.0, min(1.0, 1.0 - normalized_distance))
+        strength = fade * fade * (3.0 - 2.0 * fade)
+        if strength <= 1e-9:
+            continue
+
+        point = mesh.vertices[vertex_index].co
+        envelope: dict[str, float] = {}
+        for name, start, end, radius in bone_segments[owner]:
+            distance_to_bone = point_segment_distance(point, start, end)
+            envelope[name] = math.exp(-0.5 * (distance_to_bone / radius) ** 2)
+        envelope_total = sum(envelope.values())
+        require(envelope_total > 1e-12,
+                f"{owner} vertex {vertex_index} is outside every anatomical envelope")
+        for name in tuple(envelope):
+            envelope[name] /= envelope_total
+
+        vertex = mesh.vertices[vertex_index]
+        original = {
+            exact_object.vertex_groups[item.group].name: item.weight
+            for item in vertex.groups if item.weight > 1e-9
+        }
+        combined = {
+            name: weight * (1.0 - strength)
+            for name, weight in original.items()
+        }
+        for name, weight in envelope.items():
+            combined[name] = combined.get(name, 0.0) + weight * strength
+        strongest = sorted(combined.items(), key=lambda item: (-item[1], item[0]))[:4]
+        total = sum(weight for _, weight in strongest)
+        require(total > 1e-9, f"{owner} vertex {vertex_index} lost all skin influence")
+        strongest = [(name, weight / total) for name, weight in strongest if weight > 1e-9]
+
+        old_group_indices = [item.group for item in vertex.groups]
+        for group_index in old_group_indices:
+            exact_object.vertex_groups[group_index].remove([vertex_index])
+        for name, weight in strongest:
+            group = groups_by_name.get(name)
+            require(group is not None, f"limb envelope references missing group {name}")
+            group.add([vertex_index], weight, "REPLACE")
+        reweighted_vertices += 1
+
+        if distance <= 1e-12:
+            distal_vertices += 1
+            allowed = set(limb_bone_names(owner))
+            memberships = {
+                exact_object.vertex_groups[item.group].name
+                for item in mesh.vertices[vertex_index].groups if item.weight > 1e-9
+            }
+            require(memberships <= allowed,
+                    f"distal {owner} vertex {vertex_index} retained foreign bones {memberships - allowed}")
+
+    require(reweighted_vertices >= 6_000,
+            f"only {reweighted_vertices} limb vertices received anatomical envelopes")
+    require(distal_vertices == sum(len(component) for component in seed_components.values()),
+            "not every distal component vertex was rebound")
+    return {
+        "limb_reweighted_vertices": reweighted_vertices,
+        "limb_distal_vertices": distal_vertices,
+    }
 
 
 def archive_legacy_objects() -> tuple[bpy.types.Object, bpy.types.Object, bpy.types.Collection]:
@@ -443,12 +917,21 @@ def build_exact_source_mesh(
 
     material = next((slot.material for slot in body_template.material_slots if slot.material is not None), None)
     require(material is not None, "physics skin material is missing")
+    # Strong procedural poses can momentarily turn a low-poly triangle through
+    # its neighbours.  Keeping both sides visible prevents that transient LBS
+    # fold from reading as a literal hole.  The exported glTF material therefore
+    # has an explicit, reproducible ``doubleSided: true`` contract.
+    material.use_backface_culling = False
     exact_mesh.materials.clear()
     exact_mesh.materials.append(material)
 
     modifier = exact_object.modifiers.new("Chameleon_Physical_Armature", "ARMATURE")
     modifier.object = armature
-    modifier.use_deform_preserve_volume = True
+    # glTF/Three.js uses linear-blend skinning.  Do not show Blender's
+    # non-exported dual-quaternion preserve-volume preview as authoring truth.
+    modifier.use_deform_preserve_volume = False
+
+    anatomy_fits = fit_distal_limb_anatomy(exact_mesh, armature)
 
     groups_by_template_index: dict[int, bpy.types.VertexGroup] = {}
     groups_by_name: dict[str, bpy.types.VertexGroup] = {}
@@ -489,21 +972,37 @@ def build_exact_source_mesh(
     require(maximum_distance <= MAPPING_TOLERANCE,
             f"maximum body mapping distance is {maximum_distance:.9g}")
 
+    limb_stats = rebind_limb_envelopes(
+        exact_object,
+        armature,
+        mapped_source_indices,
+        groups_by_name,
+    )
+
     tail_indices = set(range(EXPECTED_SOURCE_VERTICES)) - mapped_source_indices
     require(len(tail_indices) == EXPECTED_TAIL_VERTICES,
             f"detected {len(tail_indices)} original tail vertices instead of {EXPECTED_TAIL_VERTICES}")
     tail_mesh_hash = tail_rest_sha256(exact_mesh, tail_indices)
     require(tail_mesh_hash == EXPECTED_TAIL_REST_SHA256,
             f"original tail rest fingerprint changed: {tail_mesh_hash}")
-    distances, centerline, surface_geodesic_length, segment_lengths, interface_count = (
+    (
+        distances,
+        interface_owner,
+        centerline,
+        surface_geodesic_length,
+        segment_lengths,
+        interface_vertices,
+    ) = (
         build_tail_geodesic_contract(exact_mesh, tail_indices)
     )
     reposition_tail_rest_bones(armature, centerline)
-    bind_original_tail_smoothly(
+    tail_body_blend_vertices = bind_original_tail_smoothly(
         exact_object,
         groups_by_name,
         tail_indices,
         distances,
+        interface_owner,
+        interface_vertices,
         surface_geodesic_length,
     )
 
@@ -517,7 +1016,7 @@ def build_exact_source_mesh(
     flattened_centerline = [coordinate for point in centerline for coordinate in point]
     rest_arc_length = sum(segment_lengths)
     exact_object["physics_ready"] = True
-    exact_object["mesh_contract_version"] = "3.1.0"
+    exact_object["mesh_contract_version"] = "3.3.0"
     exact_object["source_object"] = SOURCE_NAME
     exact_object["exact_source_geometry"] = True
     exact_object["source_vertex_count"] = EXPECTED_SOURCE_VERTICES
@@ -526,12 +1025,15 @@ def build_exact_source_mesh(
     exact_object["original_tail_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["original_tail_rest_position_sha256"] = tail_mesh_hash
     exact_object["tail_deformation_mode"] = "surface-geodesic-bspline-12"
-    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline"
+    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline+body-interface-feather"
     exact_object["tail_weighted_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["tail_weight_bones"] = TAIL_BONE_COUNT
     exact_object["tail_weight_max_influences"] = 4
     exact_object["tail_centerline_samples"] = TAIL_CENTERLINE_POINT_COUNT
-    exact_object["tail_interface_vertices"] = interface_count
+    exact_object["tail_interface_vertices"] = len(interface_vertices)
+    exact_object["tail_body_blend_vertices"] = tail_body_blend_vertices
+    exact_object["tail_body_blend_geodesic_fraction"] = TAIL_ROOT_BLEND_GEODESIC_FRACTION
+    exact_object["tail_body_blend_maximum"] = TAIL_ROOT_BODY_BLEND_MAXIMUM
     exact_object["tail_surface_geodesic_length"] = surface_geodesic_length
     exact_object["tail_rest_arc_length"] = rest_arc_length
     exact_object["tail_rest_centerline"] = flattened_centerline
@@ -539,6 +1041,23 @@ def build_exact_source_mesh(
     exact_object["tail_rest_coordinate_space"] = "blender-rig-local-z-up"
     exact_object["tail_roll_reference"] = [0.0, 1.0, 0.0]
     exact_object["tail_physics_dofs"] = 0
+    exact_object["skinning_model"] = "linear-blend-gltf"
+    exact_object["deformation_gap_guard"] = "closed-shared-topology+coincident-weight-lock+double-sided"
+    exact_object["anatomy_contract_version"] = ANATOMY_CONTRACT_VERSION
+    exact_object["distal_anatomy_fit"] = "exact-surface-zygodactyl-fork-v1"
+    exact_object["proximal_joint_fit"] = "preserved-source-medial-centers-v1"
+    exact_object["rest_deformation_contract"] = "inverse-bind-identity-lbs"
+    exact_object["limb_weighting"] = "geodesic-component-envelope-v1"
+    exact_object["limb_reweighted_vertices"] = limb_stats["limb_reweighted_vertices"]
+    exact_object["limb_distal_vertices"] = limb_stats["limb_distal_vertices"]
+    exact_object["foot_contact_patch_order"] = ",".join(LIMB_ORDER)
+    exact_object["foot_contact_patch_points_rest"] = [
+        coordinate
+        for limb_key in LIMB_ORDER
+        for key in ("contact_root", "contact_inner", "contact_outer")
+        for coordinate in anatomy_fits[limb_key][key]
+    ]
+    exact_object["foot_contact_patch_space"] = "blender-rig-local-z-up"
     exact_object["origin_normalized"] = True
     exact_object["origin_shift"] = list(body_template["origin_shift"])
 
@@ -549,7 +1068,7 @@ def update_armature_contract(
     armature: bpy.types.Object,
     exact_object: bpy.types.Object,
 ) -> None:
-    armature["rig_version"] = "3.1.0"
+    armature["rig_version"] = "3.3.0"
     armature["physics_proxy_bodies"] = 1
     armature["runtime_controller"] = "hybrid-root-ik"
     armature["visual_bones"] = len(armature.data.bones)
@@ -584,6 +1103,24 @@ def update_armature_contract(
         bone["rest_tail_local"] = list(bone.tail_local)
         bone["rest_length"] = bone.length
         bone["rest_axis"] = "local +Y"
+        if bone.name.startswith("front_girdle"):
+            bone["anatomical_role"] = "thorax-to-shoulder"
+        elif bone.name.startswith("front_upper"):
+            bone["anatomical_role"] = "shoulder-to-elbow"
+        elif bone.name.startswith("front_lower"):
+            bone["anatomical_role"] = "elbow-to-wrist"
+        elif bone.name.startswith("hind_girdle"):
+            bone["anatomical_role"] = "pelvis-to-hip"
+        elif bone.name.startswith("hind_upper"):
+            bone["anatomical_role"] = "hip-to-knee"
+        elif bone.name.startswith("hind_lower"):
+            bone["anatomical_role"] = "knee-to-ankle"
+        elif bone.name == "neck":
+            bone["anatomical_role"] = "thorax-to-neck"
+        elif bone.name == "head":
+            bone["anatomical_role"] = "neck-to-skull"
+        elif bone.name == "jaw":
+            bone["anatomical_role"] = "jaw-hinge-to-snout"
         if bone.name in TAIL_BONE_NAMES:
             bone["tail_rest_index"] = TAIL_BONE_NAMES.index(bone.name)
             bone["tail_deformation_only"] = True
@@ -599,6 +1136,9 @@ def update_armature_contract(
         "tail_weight_max_influences",
         "tail_centerline_samples",
         "tail_interface_vertices",
+        "tail_body_blend_vertices",
+        "tail_body_blend_geodesic_fraction",
+        "tail_body_blend_maximum",
         "tail_surface_geodesic_length",
         "tail_rest_arc_length",
         "tail_rest_centerline",
@@ -606,6 +1146,18 @@ def update_armature_contract(
         "tail_rest_coordinate_space",
         "tail_roll_reference",
         "tail_physics_dofs",
+        "skinning_model",
+        "deformation_gap_guard",
+        "anatomy_contract_version",
+        "distal_anatomy_fit",
+        "proximal_joint_fit",
+        "rest_deformation_contract",
+        "limb_weighting",
+        "limb_reweighted_vertices",
+        "limb_distal_vertices",
+        "foot_contact_patch_order",
+        "foot_contact_patch_points_rest",
+        "foot_contact_patch_space",
     ):
         value = exact_object[key]
         if not isinstance(value, (str, int, float, bool)):

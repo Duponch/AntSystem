@@ -323,3 +323,56 @@ test( 'CHAMELEON-GAIT-007 view and hot-path buffers keep stable identities witho
 	assert.doesNotMatch( hotPath, /\\bnew\\s+/u );
 
 } );
+
+test( 'CHAMELEON-GAIT-008 stopping settles an over-extended pair without stationary jitter', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.15,
+		minSwingDuration: 0.12,
+		maxSwingDuration: 0.22,
+	} );
+	const initial = flatContacts();
+	gait.reset( initial );
+	const displaced = flatContacts( 0.09 );
+	for ( let index = 0; index < 8; index ++ ) gait.update( 1 / 120, displaced );
+	displaced.speed = 0;
+	let observedCorrection = false;
+	for ( let index = 0; index < 120; index ++ ) {
+
+		gait.update( 1 / 120, displaced );
+		if ( gait.getView().activePair >= 0 ) observedCorrection = true;
+
+	}
+	assert.equal( observedCorrection, true );
+	for ( let foot = 0; foot < 4; foot ++ )
+		assertNear( gait.getView().footPositions[ foot * 3 ], displaced.contactPositions[ foot * 3 ] );
+	const settled = Float32Array.from( gait.getView().footPositions );
+	for ( let index = 0; index < 240; index ++ ) gait.update( 1 / 120, displaced );
+	assert.deepEqual( gait.getView().footPositions, settled );
+
+} );
+
+test( 'CHAMELEON-GAIT-009 an external landing can request the same smooth settlement', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.15,
+		minSwingDuration: 0.1,
+		maxSwingDuration: 0.18,
+	} );
+	const initial = flatContacts();
+	gait.reset( initial );
+	const landing = flatContacts( 0.11 );
+	landing.speed = 0;
+	assert.equal( gait.requestSettlement(), gait );
+	let swung = false;
+	for ( let index = 0; index < 120; index ++ ) {
+
+		gait.update( 1 / 120, landing );
+		if ( gait.getView().activePair >= 0 ) swung = true;
+
+	}
+	assert.equal( swung, true );
+	for ( let foot = 0; foot < 4; foot ++ )
+		assertNear( gait.getView().footPositions[ foot * 3 ], landing.contactPositions[ foot * 3 ] );
+
+} );

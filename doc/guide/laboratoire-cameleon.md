@@ -64,12 +64,20 @@ ou le genou et anime bassin, thorax, cou et tête ; une IK à angles limités fe
 ensuite précisément le contact du pied. Les appuis peuvent avoir des normales
 différentes, par exemple dans un angle entre le sol et un mur.
 
+Le talon, la paume et les deux groupes de doigts forment maintenant une seule
+semelle exportée avec le modèle. Une main ou un pied doit donc reposer à plat :
+le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la
+tête conservent de petits mouvements de regard au repos, sans provoquer de pas
+ni de vibration des appuis.
+
 ### Physique libre
 
 La touche `F` suspend la recherche d’appuis et la stabilisation du corps. Le
 corps unique tombe, glisse, rebondit et peut être lancé sous l’action de Rapier.
-Ce mode sert à vérifier la gravité et les collisions. Ce n’est pas un ragdoll
-articulé à 33 corps : les membres restent visuellement bornés et ne peuvent pas
+Les quatre membres perdent alors leur tonus et pendent comme des chaînes
+articulées, puis récupèrent progressivement leur pose lorsque la locomotion est
+réactivée. Ce mode sert à vérifier la gravité et les collisions. Ce n’est pas un
+ragdoll Rapier à 33 corps : le calcul passif local reste borné et ne peut pas
 s’enrouler librement autour du tronc.
 
 ## Exercices de validation
@@ -100,6 +108,11 @@ l’animal puis relâchez-le. Le modèle entier doit suivre le même corps Rapie
 sans séparation des membres ni explosion d’articulations. Réactivez ensuite la
 locomotion stabilisée : les appuis et l’orientation doivent revenir
 progressivement, sans téléportation.
+
+Lancez aussi l’animal contre un mur rugueux, un tronc ou un cylindre. S’il entre
+réellement en collision avec une surface autorisée, ses semelles doivent la
+reprendre et le corps doit pivoter vers elle. Le verre lisse reste volontairement
+impossible à agripper.
 
 ## Réglages
 
@@ -137,7 +150,9 @@ progressivement, sans téléportation.
 La racine de la queue suit le bassin ; ses douze segments restants sont passifs.
 Ils conservent leur longueur, répondent à l’inertie et sont projetés hors du sol,
 des murs, des rochers et des troncs. La queue n’est pas préhensile dans ce
-prototype.
+prototype. Quand elle est réellement au repos, elle passe en sommeil : sa pose
+reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un nouveau
+mouvement du corps ou une impulsion.
 
 ### Appuis
 

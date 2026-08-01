@@ -316,6 +316,7 @@ export class ChameleonProceduralGait {
 		this._swingDuration = this.minSwingDuration;
 		this._activePair = - 1;
 		this._nextPair = 0;
+		this._settlingAfterDrive = false;
 		this._initialized = false;
 
 		this._telemetry = Object.seal( {
@@ -376,6 +377,7 @@ export class ChameleonProceduralGait {
 		this._distanceSinceStep = 0;
 		this._activePair = - 1;
 		this._nextPair = 0;
+		this._settlingAfterDrive = false;
 		this._initialized = true;
 		this._telemetry.updateCalls = 0;
 		this._telemetry.integrationSteps = 0;
@@ -432,6 +434,13 @@ export class ChameleonProceduralGait {
 
 	}
 
+	requestSettlement() {
+
+		this._settlingAfterDrive = true;
+		return this;
+
+	}
+
 	getViews() {
 
 		return this._view;
@@ -457,17 +466,38 @@ export class ChameleonProceduralGait {
 
 		if ( moving ) {
 
+			this._settlingAfterDrive = true;
 			const drivenDistance = speed * dt;
 			this._distanceSinceStep += drivenDistance;
 			this._telemetry.distanceDriven += drivenDistance;
 
 		}
 
-		if ( this._activePair < 0 && moving &&
-			this._distanceSinceStep + EPSILON >= this.stepDistance &&
-			this._pairNeedsStep( this._nextPair, input ) ) {
+		if ( this._activePair < 0 ) {
 
-			this._startPair( this._nextPair, speed, input );
+			if ( moving && this._distanceSinceStep + EPSILON >= this.stepDistance
+				&& this._pairNeedsStep( this._nextPair, input ) ) {
+
+				this._startPair( this._nextPair, speed, input );
+
+			} else if ( this._settlingAfterDrive ) {
+
+				// A stop may occur while one diagonal pair is still far behind the
+				// body. Correct that over-extension with one slow, ordinary swing;
+				// otherwise the IK would have to stretch or the animal would freeze
+				// on tiptoe. The larger threshold prevents stationary micro-steps.
+				const settlingThreshold = Math.max(
+					this.minTargetError * 2,
+					this.stepDistance * 0.24,
+				);
+				let pair = this._nextPair;
+				if ( ! this._pairNeedsStepAtThreshold( pair, input, settlingThreshold ) )
+					pair = pair === 0 ? 1 : 0;
+				if ( this._pairNeedsStepAtThreshold( pair, input, settlingThreshold ) )
+					this._startPair( pair, this.stopSpeed + 1e-5, input );
+				else this._settlingAfterDrive = false;
+
+			}
 
 		}
 
@@ -491,11 +521,17 @@ export class ChameleonProceduralGait {
 
 	_pairNeedsStep( pair, input ) {
 
+		return this._pairNeedsStepAtThreshold( pair, input, this.minTargetError );
+
+	}
+
+	_pairNeedsStepAtThreshold( pair, input, threshold ) {
+
 		const positions = input?.contactPositions;
 		if ( ! positions ) return false;
 		const first = pair === 0 ? PAIR_A_0 : PAIR_B_0;
 		const second = pair === 0 ? PAIR_A_1 : PAIR_B_1;
-		const thresholdSquared = this.minTargetError * this.minTargetError;
+		const thresholdSquared = threshold * threshold;
 		return this._footErrorSquared( first, positions ) > thresholdSquared ||
 			this._footErrorSquared( second, positions ) > thresholdSquared;
 

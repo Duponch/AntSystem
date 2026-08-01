@@ -81,6 +81,8 @@ export function writeWholeBodyTarget( {
 	limbLift = 0.24,
 	jointFlex = 0.46,
 	bodyMotion = 1,
+	attentionTime = 0,
+	attentionSeed = 0.73,
 }, target ) {
 
 	if ( ! target || target.length < WHOLE_BODY_POSE_SIZE )
@@ -97,6 +99,22 @@ export function writeWholeBodyTarget( {
 	const lift = clamp( finiteOr( limbLift, 0.24 ), 0, 0.55 ) * moving;
 	const flex = clamp( finiteOr( jointFlex, 0.46 ), 0, 0.9 ) * moving;
 	const body = clamp( finiteOr( bodyMotion, 1 ), 0, 2 ) * moving;
+	const idle = 1 - moving;
+	const attention = finiteOr( attentionTime, 0 );
+	const seed = finiteOr( attentionSeed, 0.73 );
+	// Two deliberately incommensurate bands create slow observation arcs plus
+	// tiny corrective glances without random state or per-frame allocations.
+	const idleNeckYaw = idle * (
+		Math.sin( attention * 0.43 + seed * 2.1 ) * 0.105
+		+ Math.sin( attention * 0.91 + seed * 5.7 ) * 0.038
+	);
+	const idleNeckPitch = idle * (
+		Math.sin( attention * 0.31 + seed * 3.4 ) * 0.034
+		+ Math.sin( attention * 0.73 + seed ) * 0.012
+	);
+	const idleHeadYaw = idle * Math.sin( attention * 0.67 + seed * 7.3 ) * 0.055;
+	const idleHeadPitch = idle * Math.sin( attention * 0.53 + seed * 4.6 ) * 0.022;
+	const breathing = idle * Math.sin( attention * 1.37 + seed ) * 0.0045;
 
 	for ( let foot = 0; foot < 4; foot ++ ) {
 
@@ -116,16 +134,16 @@ export function writeWholeBodyTarget( {
 	// wave.  The head receives the inverse movement to keep the gaze stable.
 	target[ WHOLE_BODY_POSE.PELVIS_YAW ] = -diagonal * 0.13 * body;
 	target[ WHOLE_BODY_POSE.PELVIS_ROLL ] = diagonal * 0.052 * body;
-	target[ WHOLE_BODY_POSE.PELVIS_BOB ] = swingEnvelope * 0.014 * body;
+	target[ WHOLE_BODY_POSE.PELVIS_BOB ] = swingEnvelope * 0.014 * body + breathing * 0.35;
 	target[ WHOLE_BODY_POSE.CHEST_YAW ] = diagonal * 0.055 * body;
 	target[ WHOLE_BODY_POSE.CHEST_ROLL ] = -diagonal * 0.034 * body;
-	target[ WHOLE_BODY_POSE.CHEST_PITCH ] = -swingEnvelope * 0.028 * body;
-	target[ WHOLE_BODY_POSE.NECK_YAW ] = diagonal * 0.045 * body;
-	target[ WHOLE_BODY_POSE.NECK_PITCH ] = swingEnvelope * 0.018 * body;
-	target[ WHOLE_BODY_POSE.HEAD_YAW ] = diagonal * 0.025 * body;
-	target[ WHOLE_BODY_POSE.HEAD_PITCH ] = swingEnvelope * 0.012 * body;
+	target[ WHOLE_BODY_POSE.CHEST_PITCH ] = -swingEnvelope * 0.028 * body + breathing;
+	target[ WHOLE_BODY_POSE.NECK_YAW ] = diagonal * 0.045 * body + idleNeckYaw;
+	target[ WHOLE_BODY_POSE.NECK_PITCH ] = swingEnvelope * 0.018 * body + idleNeckPitch;
+	target[ WHOLE_BODY_POSE.HEAD_YAW ] = diagonal * 0.025 * body + idleHeadYaw;
+	target[ WHOLE_BODY_POSE.HEAD_PITCH ] = swingEnvelope * 0.012 * body + idleHeadPitch;
 	target[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] = -diagonal * 0.012 * body;
-	target[ WHOLE_BODY_POSE.MOTION_WEIGHT ] = moving;
+	target[ WHOLE_BODY_POSE.MOTION_WEIGHT ] = Math.max( moving, idle * 0.35 );
 	return target;
 
 }
