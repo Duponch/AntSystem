@@ -39,7 +39,7 @@ sans interface.
 
 - `ZQSD`, `WASD` ou les flèches : se déplacer par rapport à la caméra ;
 - `Shift` : accélérer ;
-- `Espace` : libérer brièvement les appuis et sauter ;
+- `Espace` : sauter ; maintenir donne un saut haut, relâcher tôt un saut court ;
 - clic droit maintenu : tourner la caméra ;
 - molette : rapprocher ou éloigner la caméra ;
 - clic gauche maintenu sur le caméléon : saisir son corps et le secouer ;
@@ -51,6 +51,11 @@ sans interface.
 
 Le déplacement suit le support courant. Sur un mur ou un plan incliné, avancer
 ne signifie donc pas revenir horizontalement vers le sol.
+
+Le saut suit lui aussi le support : depuis un mur ou un cylindre, il sépare
+d’abord le corps de la surface puis le projette vers le haut. Les anciennes
+prises sont oubliées au décollage. Une surface réellement touchée pendant la
+chute peut ensuite être reprise sans téléportation.
 
 ## Deux modes distincts
 
@@ -140,6 +145,19 @@ impossible à agripper.
 - **Mouvement du corps** dose les oscillations du bassin et du thorax ainsi que
   la compensation du cou et de la tête.
 
+### Suspension et saut
+
+- **Suspension anatomique** dose l’assiette et l’amorti transmis au tronc ;
+- **Hauteur de saut** règle la hauteur balistique visée ;
+- **Contrôle aérien** règle l’autorité latérale sans modifier directement la
+  vitesse verticale ;
+- **Tolérance au bord** autorise encore brièvement le saut après la perte d’un
+  rebord ;
+- **Mémoire du saut** conserve une pression effectuée juste avant l’atterrissage ;
+- **Gravité de chute** règle la vitesse de descente ;
+- **Frein au relâchement** détermine à quel point un relâchement précoce réduit
+  la hauteur.
+
 ### Queue passive
 
 - **Souplesse** règle la conservation de la courbure et l’ampleur du balancement ;
@@ -164,6 +182,8 @@ mouvement du corps ou une impulsion.
 ### Affichage et coût
 
 - **Proxies / contacts** révèle le corps Rapier unique et les quatre appuis ;
+- **Squelette à travers la peau** affiche dans un seul tracé les hanches,
+  épaules, coudes, genoux, paumes, doigts, cou, mâchoire et chaîne de queue ;
 - **Ombres** coupe ou active les ombres de la scène ;
 - **Gravité** permet de comparer apesanteur, gravité terrestre et surcharge.
 
@@ -173,7 +193,8 @@ mouvement du corps ou une impulsion.
 - **Sous-pas p95** : 95 % des sous-pas physiques récents ont coûté au plus
   cette durée ;
 - **Prises** : nombre d’appuis actifs parmi les quatre pieds ;
-- **Mode** : joueur, autonome ou libre ;
+- **Mode** : joueur, autonome ou libre, complété pendant un saut par impulsion,
+  montée, apogée, chute ou amorti ;
 - **Altitude** : hauteur du corps physique ;
 - **Intégrité** : `OK` tant qu’aucune pose non finie n’a été détectée.
 

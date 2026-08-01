@@ -733,3 +733,138 @@ test( 'CHAMELEON-LAB-RAGDOLL-013 a thrown body reacquires wall and cylinder supp
 	}
 
 } );
+
+test( 'CHAMELEON-LAB-RAGDOLL-014 jump release cannot reactivate stale ground claws in mid-air', async () => {
+
+	const fixture = await createGroundedHybrid();
+	runFrames( fixture, 120, 0.8 );
+	assert.ok( fixture.chameleon.contactCount >= 2 );
+	fixture.chameleon.setCommand( { release: true } );
+	let maximumReleasedContacts = 0;
+	runFrames( fixture, 120, 0.12, () => {
+
+		maximumReleasedContacts = Math.max(
+			maximumReleasedContacts, fixture.chameleon.contactCount,
+		);
+
+	} );
+	assert.equal( maximumReleasedContacts, 0, 'release retained active claw forces' );
+
+	// Model the airborne part of a jump independently of its take-off impulse.
+	// No eligible surface is within claw reach at this altitude, so restoring
+	// grip must not revive the pre-jump ground anchors.
+	const body = fixture.chameleon.pelvis.body;
+	body.setTranslation( { x: 0, y: 1.15, z: 0 }, true );
+	body.setLinvel( { x: 0.18, y: 0.7, z: -0.12 }, true );
+	fixture.physics.world.propagateModifiedBodyPositionsToColliders();
+	fixture.chameleon.setCommand( { release: false } );
+	let maximumAirborneContacts = 0;
+	runFrames( fixture, 120, 0.08, () => {
+
+		maximumAirborneContacts = Math.max(
+			maximumAirborneContacts, fixture.chameleon.contactCount,
+		);
+
+	} );
+	assert.equal(
+		maximumAirborneContacts,
+		0,
+		`stale ground contacts reactivated in air: ${ fixture.chameleon.feet.map(
+			( foot ) => `${ foot.state }/${ foot.surface?.kind ?? 'none' }`,
+		).join( ', ' ) }`,
+	);
+	assert.ok( body.translation().y > 0.75 );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-015 post-jump impact reacquires wall and cylinder without stale support', async () => {
+
+	for ( const surfaceCase of [ 'wall', 'cylinder' ] ) {
+
+		const fixture = await createGroundedHybrid();
+		const { RAPIER, world } = fixture.physics;
+		const obstacleBody = world.createRigidBody( RAPIER.RigidBodyDesc.fixed() );
+		let collider;
+		let launchPosition;
+		let launchVelocity;
+		let expectedNormal;
+		if ( surfaceCase === 'wall' ) {
+
+			obstacleBody.setTranslation( { x: 0, y: 1, z: -1.45 }, false );
+			collider = world.createCollider(
+				RAPIER.ColliderDesc.cuboid( 2, 1.2, 0.1 )
+					.setFriction( 0.95 )
+					.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+				obstacleBody,
+			);
+			launchPosition = { x: 0, y: 0.8, z: -0.82 };
+			launchVelocity = { x: 0, y: 0.45, z: -3.2 };
+			expectedNormal = new THREE.Vector3( 0, 0, 1 );
+
+		} else {
+
+			obstacleBody.setTranslation( { x: 1.45, y: 0.9, z: 0 }, false );
+			obstacleBody.setRotation( {
+				x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2,
+			}, false );
+			collider = world.createCollider(
+				RAPIER.ColliderDesc.cylinder( 1.4, 0.42 )
+					.setFriction( 0.95 )
+					.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+				obstacleBody,
+			);
+			launchPosition = { x: 0.7, y: 0.9, z: 0 };
+			launchVelocity = { x: 3.2, y: 0.35, z: 0 };
+			expectedNormal = new THREE.Vector3( -1, 0, 0 );
+
+		}
+		fixture.physics.surfaceByCollider.set( collider.handle, Object.freeze( {
+			kind: surfaceCase,
+			clawEligible: true,
+			gripStrengthScale: 1,
+		} ) );
+		fixture.chameleon.setCommand( { release: true } );
+		fixture.chameleon.pelvis.body.setTranslation( launchPosition, true );
+		fixture.chameleon.pelvis.body.setLinvel( launchVelocity, true );
+		fixture.chameleon.pelvis.body.setAngvel( { x: 0.22, y: -0.13, z: 0.18 }, true );
+		world.propagateModifiedBodyPositionsToColliders();
+		let releaseContacts = 0;
+		runFrames( fixture, 120, 0.12, () => {
+
+			releaseContacts = Math.max( releaseContacts, fixture.chameleon.contactCount );
+
+		} );
+		assert.equal( releaseContacts, 0, `${ surfaceCase } jump did not release claws` );
+		fixture.chameleon.setCommand( { release: false } );
+		let bestCandidateCount = 0;
+		let bestSupportAlignment = -1;
+		runFrames( fixture, 120, 2.5, () => {
+
+			bestCandidateCount = Math.max(
+				bestCandidateCount, fixture.chameleon.candidateContactCount,
+			);
+			if ( fixture.chameleon.contactCount >= 2 ) bestSupportAlignment = Math.max(
+				bestSupportAlignment,
+				fixture.chameleon.supportNormal.dot( expectedNormal ),
+			);
+
+		} );
+		const matchingContacts = fixture.chameleon.feet.filter(
+			( foot ) => foot.state === 'holding' && foot.surface?.kind === surfaceCase,
+		).length;
+		assert.ok(
+			matchingContacts >= 2,
+			`${ surfaceCase } impact acquired ${ matchingContacts } matching claws; candidates=${ bestCandidateCount }; contacts=${ fixture.chameleon.contactCount }; feet=${ fixture.chameleon.feet.map( ( foot ) => `${ foot.state }/${ foot.surface?.kind ?? 'none' }` ) }`,
+		);
+		assert.ok(
+			fixture.chameleon.supportNormal.dot( expectedNormal ) > 0.65,
+			`${ surfaceCase } support normal did not follow impact: ${ fixture.chameleon.supportNormal.toArray() }; best=${ bestSupportAlignment }`,
+		);
+		assertFiniteHybrid( fixture );
+		fixture.dispose();
+
+	}
+
+} );

@@ -18,7 +18,7 @@ function isEditableTarget( target ) {
 
 }
 
-export function movementAxesFromKeys( keys ) {
+export function movementAxesFromKeys( keys, target = { x: 0, y: 0 } ) {
 
 	const forward = Number( keys.has( 'KeyW' ) || keys.has( 'KeyZ' ) || keys.has( 'ArrowUp' ) );
 	const backward = Number( keys.has( 'KeyS' ) || keys.has( 'ArrowDown' ) );
@@ -27,7 +27,9 @@ export function movementAxesFromKeys( keys ) {
 	const x = right - left;
 	const y = forward - backward;
 	const length = Math.hypot( x, y );
-	return length > 1 ? { x: x / length, y: y / length } : { x, y };
+	target.x = length > 1 ? x / length : x;
+	target.y = length > 1 ? y / length : y;
+	return target;
 
 }
 
@@ -63,8 +65,18 @@ export class LabInputController {
 	constructor( element = window ) {
 
 		this.element = element;
+		this.blurElement = typeof window === 'undefined' ? element : window;
 		this.keys = new Set();
+		this.axesState = Object.seal( { x: 0, y: 0 } );
 		this.jumpQueued = false;
+		this.jumpPressed = false;
+		this.jumpHeld = false;
+		this.jumpReleased = false;
+		this.jumpState = Object.seal( {
+			jumpPressed: false,
+			jumpHeld: false,
+			jumpReleased: false,
+		} );
 		this.toggleAutoQueued = false;
 		this.toggleDebugQueued = false;
 		this.resetQueued = false;
@@ -73,9 +85,16 @@ export class LabInputController {
 
 			if ( isEditableTarget( event.target ) ) return;
 			if ( MOVEMENT_KEYS.has( event.code ) || event.code === 'Space' ) event.preventDefault();
+			const wasDown = this.keys.has( event.code );
 			this.keys.add( event.code );
-			if ( event.repeat ) return;
-			if ( event.code === 'Space' ) this.jumpQueued = true;
+			if ( event.code === 'Space' ) this.jumpHeld = true;
+			if ( event.repeat || wasDown ) return;
+			if ( event.code === 'Space' ) {
+
+				this.jumpQueued = true;
+				this.jumpPressed = true;
+
+			}
 			if ( event.code === 'KeyC' ) this.toggleAutoQueued = true;
 			if ( event.code === 'KeyH' ) this.toggleDebugQueued = true;
 			if ( event.code === 'KeyR' ) this.resetQueued = true;
@@ -84,19 +103,31 @@ export class LabInputController {
 		};
 		this._onKeyUp = ( event ) => {
 
+			if ( event.code === 'Space' && this.jumpHeld ) {
+
+				this.jumpHeld = false;
+				this.jumpReleased = true;
+
+			}
 			this.keys.delete( event.code );
 
 		};
-		this._onBlur = () => this.keys.clear();
+		this._onBlur = () => {
+
+			if ( this.jumpHeld ) this.jumpReleased = true;
+			this.jumpHeld = false;
+			this.keys.clear();
+
+		};
 		element.addEventListener( 'keydown', this._onKeyDown, { passive: false } );
 		element.addEventListener( 'keyup', this._onKeyUp );
-		window.addEventListener( 'blur', this._onBlur );
+		this.blurElement.addEventListener( 'blur', this._onBlur );
 
 	}
 
 	get axes() {
 
-		return movementAxesFromKeys( this.keys );
+		return movementAxesFromKeys( this.keys, this.axesState );
 
 	}
 
@@ -110,7 +141,29 @@ export class LabInputController {
 
 		const value = this[ property ];
 		this[ property ] = false;
+		// jumpQueued is the backwards-compatible name of the same physical edge.
+		// Whichever API consumes it first owns it; it must never fire twice.
+		if ( property === 'jumpQueued' ) this.jumpPressed = false;
+		if ( property === 'jumpPressed' ) this.jumpQueued = false;
 		return value;
+
+	}
+
+	/**
+	 * Consumes edge transitions exactly once while keeping the held level live.
+	 * The property names intentionally match PlatformerJumpModel.update().
+	 */
+	consumeJumpState( target = this.jumpState ) {
+
+		if ( ! target || typeof target !== 'object' )
+			throw new TypeError( 'jump state target must be an object' );
+		target.jumpPressed = this.jumpPressed;
+		target.jumpHeld = this.jumpHeld;
+		target.jumpReleased = this.jumpReleased;
+		this.jumpPressed = false;
+		this.jumpQueued = false;
+		this.jumpReleased = false;
+		return target;
 
 	}
 
@@ -118,7 +171,7 @@ export class LabInputController {
 
 		this.element.removeEventListener( 'keydown', this._onKeyDown );
 		this.element.removeEventListener( 'keyup', this._onKeyUp );
-		window.removeEventListener( 'blur', this._onBlur );
+		this.blurElement.removeEventListener( 'blur', this._onBlur );
 
 	}
 

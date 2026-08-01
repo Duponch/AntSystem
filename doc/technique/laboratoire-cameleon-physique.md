@@ -49,7 +49,7 @@ CPU, la mémoire et le temps de démarrage de la colonie.
 
 ## Chaîne d’exécution
 
-Le laboratoire associe sept couches :
+Le laboratoire associe onze couches :
 
 1. `environment.js` crée les meshes WebGPU et leurs colliders Rapier fixes ;
 2. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis
@@ -66,8 +66,14 @@ Le laboratoire associe sept couches :
    `passive-tail-visual-rig.js` la reporte sur les os du mesh original ;
 8. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
    l’interpolation visuelle ;
-9. `third-person-controller.js` et `grab-controller.js` transforment les
-   commandes du joueur en directions, forces et impulsions.
+9. `third-person-controller.js` et `platformer-control-model.js` transforment
+   AZERTY/QWERTY en intention troisième personne tangente au support, sans
+   dépendre de l’inclinaison de la caméra ;
+10. `platformer-jump-model.js` possède la machine d’états du saut, son impulsion
+    calculée depuis la hauteur, la tolérance au bord, le buffer, la coupure au
+    relâchement et l’amorti d’atterrissage ;
+11. `grab-controller.js` applique la saisie et le lancer, tandis que
+    `rig-debug-view.js` peut afficher le squelette complet à travers la peau.
 
 Le mouvement global ne réécrit jamais directement la position du modèle : la
 pose interpolée du corps Rapier pilote la racine visuelle. L’IK n’agit que sur
@@ -131,6 +137,33 @@ calcule un centroïde et une normale moyenne, puis applique :
 
 Une prise, un saut, un manque d’appuis ou le mode **Physique libre** désactive
 ce rappel. Rapier reste alors l’unique autorité du mouvement global.
+
+## Pilotage troisième personne et saut physique
+
+Le déplacement clavier est échantillonné dans le pas physique. La pente de la
+caméra est supprimée avant de construire les axes avant/droite ; l’intention est
+ensuite reprojetée dans le plan du support. Un même lacet de caméra produit donc
+la même direction sur un sol, et regarder presque verticalement ne peut ni
+inverser ni annuler la commande. Sur un mur, une commande face au mur devient
+une direction de montée. Les changements d’orientation et d’accélération sont
+bornés et tous les objets de sortie sont réutilisés.
+
+`Espace` ne déclenche plus une impulsion constante arbitraire. La vitesse de
+décollage est dérivée de la hauteur demandée et de la gravité courante. La
+normale du support sépare d’abord le corps du sol, du mur ou du cylindre, tandis
+qu’une composante monde verticale conserve un saut lisible. Maintenir la touche
+réduit la gravité de montée ; la relâcher tôt applique une coupure progressive.
+La descente, le contrôle aérien, la tolérance au bord et la mémorisation d’une
+pression juste avant l’atterrissage ont des bornes indépendantes.
+
+La transition de prise est explicite. Au décollage, les propriétaires des
+quatre anciens contacts sont supprimés : ils ne peuvent pas réapparaître dans
+le vide. Après l’impact, la paire de collision réelle ou des semelles assez
+proches amorcent un nouveau polygone de support. Une composante latérale rapide
+oriente la recherche dans le sens opposé à la vitesse, ce qui permet à un saut
+ou un lancer de reprendre un mur ou un cylindre sans reprendre par erreur le
+sol précédent. L’atterrissage publie enfin une enveloppe d’amorti visuelle qui
+comprime brièvement le bassin sans déplacer le corps physique.
 
 ## Quatre appuis et IK bornée
 
@@ -236,6 +269,13 @@ ou explicitement passé en physique libre. La stratégie LOD/VAT prévue pour un
 population est détaillée dans [Caméléon — intégrité de peau et stratégie de
 rendu](../chameleon-rendering-performance.md).
 
+Le contrôleur plateforme et la machine de saut ajoutent uniquement des
+opérations scalaires/vectorielles constantes par sous-pas, sans raycast ni
+allocation. L’overlay de rig est retiré de la scène lorsqu’il est masqué : son
+coût est alors nul. Lorsqu’il est visible, un unique `LineSegments` met à jour
+les 42 liaisons et les axes terminaux des doigts, de la mâchoire et de
+`tail_12`, soit un seul draw call et environ 1,25 Kio de données dynamiques.
+
 ## Décor de validation
 
 Le décor est volontairement synthétique et reproductible :
@@ -290,6 +330,17 @@ Les preuves automatiques actuelles sont :
   valeurs non finies ;
 - `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY, projection
   caméra-support, exploration autonome bornée et détection d’immobilité ;
+- `test/chameleon-lab-input.test.js`,
+  `test/chameleon-lab-platformer-control.test.js` et
+  `test/chameleon-lab-platformer-jump.test.js` protègent les transitions de
+  touche, le pilotage tangentiel, l’accélération bornée, les phases du saut,
+  coyote/buffer, hauteur variable, atterrissage et stabilité des allocations ;
+- `test/chameleon-lab-rig-debug-view.test.js` protège le buffer unique, le coût
+  nul lorsqu’il est masqué et la couverture des chaînes du cou, des quatre
+  membres, des doigts et de la queue ;
+- `test/chameleon-lab-platformer-integration.test.js` verrouille l’ordre causal
+  des forces : le contrôleur hybride remet ses forces à zéro avant que le saut
+  et le contrôle aérien n’appliquent les leurs ;
 - `test/chameleon-lab-whole-body-gait.test.js` protège les couples diagonaux,
   les excursions du bassin/thorax/tête, le lissage apériodique et l’absence
   d’allocation dans le modèle de pose ;
@@ -302,11 +353,12 @@ Les preuves automatiques actuelles sont :
 - `test/chameleon-lab-passive-limbs.test.js` protège le mode musculaire relâché,
   les ligaments, les contacts et la récupération ;
 - `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
-  `CHAMELEON-LAB-RAGDOLL-001` à `013` protègent le corps Rapier unique, les
+  `CHAMELEON-LAB-RAGDOLL-001` à `015` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
-  lancer sur mur ou cylindre ;
+  lancer sur mur ou cylindre, la suppression des prises périmées au décollage
+  et la reprise d’un support réel après impact ;
 - `test/chameleon-physical-asset.test.js` protège le mesh source exact, le skin,
   les 7 206 sommets originaux, la ligne centrale courbe, les douze os et leurs
   poids géodésiques bornés.

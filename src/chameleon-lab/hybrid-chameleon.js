@@ -377,7 +377,8 @@ class StableVisualRig {
 
 	}
 
-	applyWholeBodyPose( pose, weight = 1, suspensionPose = null, suspensionScale = 1 ) {
+	applyWholeBodyPose( pose, weight = 1, suspensionPose = null, suspensionScale = 1,
+		landingCompression = 0 ) {
 
 		if ( ! pose || pose.length <= WHOLE_BODY_POSE.MOTION_WEIGHT ) return;
 		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
@@ -385,6 +386,8 @@ class StableVisualRig {
 		if ( influence <= 0 ) return;
 		this.pelvis.position.copy( this._pelvisRestPosition );
 		this.pelvis.position.y += pose[ WHOLE_BODY_POSE.PELVIS_BOB ] * influence;
+		this.pelvis.position.y -= THREE.MathUtils.clamp( landingCompression, 0, 1 )
+			* 0.045 * influence;
 		this.pelvis.position.z += pose[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] * influence;
 		if ( suspensionPose && suspensionPose.length >= SUSPENSION_OUTPUT.SIZE ) {
 
@@ -642,7 +645,8 @@ class StableVisualRig {
 	}
 
 	solve( footTargets, footNormals, wholeBodyPose = null, weight = 1,
-		suspensionPose = null, renderDt = 1 / 120, suspensionScale = 1 ) {
+		suspensionPose = null, renderDt = 1 / 120, suspensionScale = 1,
+		landingCompression = 0 ) {
 
 		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
 		this._maximumFrameRotation = THREE.MathUtils.clamp( renderDt, 1 / 1000, 1 / 20 ) * 9.6;
@@ -652,7 +656,9 @@ class StableVisualRig {
 			return;
 
 		}
-		this.applyWholeBodyPose( wholeBodyPose, influence, suspensionPose, suspensionScale );
+		this.applyWholeBodyPose(
+			wholeBodyPose, influence, suspensionPose, suspensionScale, landingCompression,
+		);
 		this.model.getWorldQuaternion( this._modelWorldQuaternion );
 		this._bodyForward.copy( LOCAL_FORWARD ).applyQuaternion( this._modelWorldQuaternion ).normalize();
 		this._bodyUp.copy( LOCAL_UP ).applyQuaternion( this._modelWorldQuaternion ).normalize();
@@ -1204,8 +1210,52 @@ export async function createHybridChameleon( {
 	let reacquireSurface = null;
 	let reacquireCollider = null;
 	let elapsed = 0;
+	let landingCompression = 0;
+	let wasSupportReleased = false;
 
-	function selectReacquireSurface() {
+	function clearSupportLocks() {
+
+		contactCount = 0;
+		candidateContactCount = 0;
+		activeContacts.fill( 0 );
+		candidateActiveContacts.fill( 0 );
+		targetFootSurfaces.fill( null );
+		targetFootColliders.fill( null );
+		for ( const foot of feet ) {
+
+			foot._lockedSurface = null;
+			foot._lockedCollider = null;
+			foot._candidateSurface = null;
+			foot._candidateCollider = null;
+			foot.surface = null;
+			foot.collider = null;
+			foot.load = 0;
+			foot.state = 'released';
+
+		}
+
+	}
+
+	function armSupportReacquisition() {
+
+		reacquireSurface = null;
+		reacquireCollider = null;
+		readVector( body.linvel(), tempVelocity );
+		const supportSpeed = tempVelocity.dot( averageSupportNormal );
+		probeMovement.copy( tempVelocity )
+			.addScaledVector( averageSupportNormal, -supportSpeed );
+		const ballisticSideImpact = probeMovement.lengthSq()
+			> Math.max( 0.36, supportSpeed * supportSpeed * 0.55 );
+		if ( ballisticSideImpact ) reacquireNormal.copy( tempVelocity ).multiplyScalar( -1 );
+		else reacquireNormal.copy( averageSupportNormal );
+		if ( reacquireNormal.lengthSq() < 1e-8 ) reacquireNormal.copy( WORLD_UP );
+		else reacquireNormal.normalize();
+		supportReacquireSeconds = 2.5;
+		pendingSupportReset = true;
+
+	}
+
+	function selectReacquireSurface( allowNearbyFallback = true ) {
 
 		reacquireSurface = null;
 		reacquireCollider = null;
@@ -1244,6 +1294,7 @@ export async function createHybridChameleon( {
 			return;
 
 		}
+		if ( ! allowNearbyFallback ) return;
 		let bestScore = Infinity;
 		if ( ! physics.surfaceByCollider ) return;
 		for ( const [ handle, surface ] of physics.surfaceByCollider ) {
@@ -1603,6 +1654,9 @@ export async function createHybridChameleon( {
 			}
 			gait.requestSettlement();
 			pendingSupportReset = false;
+			supportReacquireSeconds = 0;
+			reacquireSurface = null;
+			reacquireCollider = null;
 
 		}
 		const preUpdateView = gait.getView();
@@ -2062,6 +2116,22 @@ export async function createHybridChameleon( {
 		elapsed += dt;
 		body.resetForces( false );
 		body.resetTorques( false );
+		if ( command.release && ! wasSupportReleased ) {
+
+			clearSupportLocks();
+			pendingSupportReset = false;
+			supportReacquireSeconds = 0;
+			reacquireSurface = null;
+			reacquireCollider = null;
+
+		} else if ( ! command.release && wasSupportReleased ) {
+
+			armSupportReacquisition();
+
+		}
+		wasSupportReleased = command.release;
+		if ( pendingSupportReset && ! reacquireCollider )
+			selectReacquireSurface( false );
 		previousPosition.copy( currentPosition );
 		previousQuaternion.copy( currentQuaternion );
 		updateBodyCollisionTransform();
@@ -2111,6 +2181,7 @@ export async function createHybridChameleon( {
 			suspension.interpolate( t ),
 			renderDt,
 			settings.suspension,
+			landingCompression,
 		);
 		if ( passiveLimbBlend > 0 ) rig.applyPassive(
 			passiveLimbPhysics.interpolate( t ),
@@ -2215,6 +2286,9 @@ export async function createHybridChameleon( {
 		dragging = false;
 		supportReacquireSeconds = 0;
 		pendingSupportReset = false;
+		landingCompression = 0;
+		wasSupportReleased = false;
+		command.release = false;
 		reacquireSurface = null;
 		reacquireCollider = null;
 		body.setTranslation( vectorRecord( nextSpawn ), true );
@@ -2365,6 +2439,13 @@ export async function createHybridChameleon( {
 
 			}
 			dragging = next;
+
+		},
+		setLandingCompression( value ) {
+
+			landingCompression = THREE.MathUtils.clamp(
+				Number.isFinite( value ) ? value : 0, 0, 1,
+			);
 
 		},
 		beforeStep,

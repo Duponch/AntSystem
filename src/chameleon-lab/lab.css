@@ -64,6 +64,13 @@ body.chameleon-lab {
 	text-transform: uppercase;
 }
 
+.chameleon-lab-field-help {
+	margin: 0 0 7px;
+	color: #91a091;
+	font-size: 9px;
+	line-height: 1.4;
+}
+
 .chameleon-lab-control {
 	display: grid;
 	grid-template-columns: minmax(105px, 1fr) 1.25fr 44px;
@@ -83,6 +90,15 @@ body.chameleon-lab {
 	color: #a8db66;
 	font-variant-numeric: tabular-nums;
 	text-align: right;
+}
+
+.chameleon-lab-control-help {
+	grid-column: 1 / -1;
+	margin: -2px 0 5px;
+	color: #8f9b8e;
+	font-size: 9px;
+	font-weight: 400;
+	line-height: 1.35;
 }
 
 .chameleon-lab-toggle {

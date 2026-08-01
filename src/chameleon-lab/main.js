@@ -6,12 +6,14 @@ import { createLabEnvironment } from './environment.js';
 import { createHybridChameleon } from './hybrid-chameleon.js';
 import {
 	AutonomousExplorer,
-	cameraRelativeMovement,
 	LabInputController,
 	ThirdPersonCamera,
 } from './third-person-controller.js';
 import { GrabController } from './grab-controller.js';
 import { createLabUI } from './lab-ui.js';
+import { PlatformerControlModel } from './platformer-control-model.js';
+import { PlatformerJumpModel } from './platformer-jump-model.js';
+import { createRigDebugView } from './rig-debug-view.js';
 
 function createLoadingScreen() {
 
@@ -88,6 +90,8 @@ async function main() {
 	renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 	await renderer.init();
 	app.append( renderer.domElement );
+	renderer.domElement.tabIndex = 0;
+	renderer.domElement.setAttribute( 'aria-label', 'Monde 3D du laboratoire physique' );
 
 	const scene = new THREE.Scene();
 	scene.background = new THREE.Color( 0x17271f );
@@ -111,6 +115,16 @@ async function main() {
 	const ragdoll = await createHybridChameleon( { scene, physics } );
 	const input = new LabInputController( window );
 	const explorer = new AutonomousExplorer();
+	const platformerControl = new PlatformerControlModel( {
+		moveSpeed: ragdoll.settings.moveSpeed,
+		sprintMultiplier: ragdoll.settings.sprintMultiplier,
+	} );
+	const platformerJump = new PlatformerJumpModel( { airAcceleration: 0 } );
+	const rigDebugView = createRigDebugView( {
+		scene,
+		root: ragdoll.model,
+		visible: false,
+	} );
 	const cameraRig = new ThirdPersonCamera( {
 		camera,
 		domElement: renderer.domElement,
@@ -130,6 +144,8 @@ async function main() {
 		debug: false,
 		shadows: true,
 		gravity: 9.81,
+		rigDebug: false,
+		jumpPhase: platformerJump.phase,
 	};
 	let grabbedBone = null;
 	const grab = new GrabController( {
@@ -148,17 +164,34 @@ async function main() {
 		grab.cancel();
 		ragdoll.reset();
 		explorer.resetProgress();
+		platformerControl.reset( undefined, ragdoll.supportNormal );
+		platformerJump.reset( true, ragdoll.supportNormal );
+		ragdoll.setLandingCompression( 0 );
+		input.consumeJumpState();
+		state.jumpPhase = platformerJump.phase;
 		cameraRig.snap();
 
 	};
-	const ui = createLabUI( { ragdoll, physics, state, renderer, onReset: reset } );
+	const ui = createLabUI( {
+		ragdoll,
+		physics,
+		state,
+		renderer,
+		onReset: reset,
+		rigDebugView,
+	} );
 	loading.done();
 
 	const move = new THREE.Vector3();
 	const cameraForward = new THREE.Vector3();
 	const creaturePosition = new THREE.Vector3();
+	const worldUp = Object.freeze( { x: 0, y: 1, z: 0 } );
+	const cameraForwardRecord = { x: 0, y: 0, z: -1 };
+	const velocityRecord = { x: 0, y: 0, z: 0 };
+	const appliedForce = { x: 0, y: 0, z: 0 };
+	const jumpInput = { jumpPressed: false, jumpHeld: false, jumpReleased: false };
+	const zeroAxes = Object.freeze( { x: 0, y: 0 } );
 	let previousTime = performance.now();
-	let releaseSeconds = 0;
 	let disposed = false;
 
 	function onResize() {
@@ -193,47 +226,103 @@ async function main() {
 
 		}
 		if ( input.consume( 'resetQueued' ) ) reset();
-		if ( input.consume( 'jumpQueued' ) ) {
-
-			releaseSeconds = 0.18;
-			const normal = ragdoll.supportNormal.clone().addScaledVector( new THREE.Vector3( 0, 1, 0 ), 0.35 ).normalize();
-			ragdoll.pelvis.body.applyImpulse(
-				{ x: normal.x * 0.42, y: normal.y * 0.42, z: normal.z * 0.42 },
-				true,
-			);
-
-		}
-
 		const pelvisTranslation = ragdoll.pelvis.body.translation();
 		creaturePosition.set( pelvisTranslation.x, pelvisTranslation.y, pelvisTranslation.z );
-		if ( ! state.autonomous ) {
-
-			cameraRig.getForward( cameraForward );
-			cameraRelativeMovement( input.axes, cameraForward, ragdoll.supportNormal, move );
-
-		}
-		if ( grabbedBone ) move.set( 0, 0, 0 );
+		cameraRig.getForward( cameraForward );
+		cameraForwardRecord.x = cameraForward.x;
+		cameraForwardRecord.y = cameraForward.y;
+		cameraForwardRecord.z = cameraForward.z;
 
 		const result = physics.step(
 			dt,
 			( fixedDt ) => {
 
-				releaseSeconds = Math.max( 0, releaseSeconds - fixedDt );
+				const rootBody = ragdoll.pelvis.body;
+				const velocity = rootBody.linvel();
+				velocityRecord.x = velocity.x;
+				velocityRecord.y = velocity.y;
+				velocityRecord.z = velocity.z;
+				const supported = ragdoll.contactCount >= 2
+					&& ! state.fullRagdoll && ! grabbedBone;
+				platformerControl.moveSpeed = ragdoll.settings.moveSpeed;
+				platformerControl.sprintMultiplier = ragdoll.settings.sprintMultiplier;
+				platformerControl.airAcceleration = 3.2 * state.airControl;
+				const platformerControlView = platformerControl.update( fixedDt, {
+					axes: state.autonomous || grabbedBone ? zeroAxes : input.axes,
+					cameraForward: cameraForwardRecord,
+					worldUp,
+					supportNormal: ragdoll.supportNormal,
+					velocity: velocityRecord,
+					supported,
+					sprint: input.sprint,
+				} );
 				if ( state.autonomous ) {
 
 					const position = ragdoll.pelvis.body.translation();
 					creaturePosition.set( position.x, position.y, position.z );
 					explorer.update( fixedDt, ragdoll.supportNormal, creaturePosition, move );
 
+				} else {
+
+					move.set(
+						platformerControlView.direction.x,
+						platformerControlView.direction.y,
+						platformerControlView.direction.z,
+					);
+
 				}
 				if ( grabbedBone ) move.set( 0, 0, 0 );
+
+				platformerJump.jumpHeight = state.jumpHeight;
+				platformerJump.coyoteTime = state.coyoteTime;
+				platformerJump.bufferTime = state.jumpBufferTime;
+				platformerJump.fallGravityScale = state.fallGravityScale;
+				platformerJump.cutGravityScale = state.jumpCutGravityScale;
+				input.consumeJumpState( jumpInput );
+				const platformerJumpView = platformerJump.update( fixedDt, {
+					supported,
+					supportNormal: ragdoll.supportNormal,
+					worldUp,
+					velocity: velocityRecord,
+					gravity: physics.world.gravity,
+					mass: rootBody.mass(),
+					jumpPressed: jumpInput.jumpPressed && ! grabbedBone && ! state.fullRagdoll,
+					jumpHeld: jumpInput.jumpHeld && ! grabbedBone && ! state.fullRagdoll,
+					jumpReleased: jumpInput.jumpReleased,
+					desiredDirection: move,
+				} );
+				state.jumpPhase = platformerJumpView.phase;
+				ragdoll.setLandingCompression( platformerJumpView.landingCompression );
 				ragdoll.setCommand( {
 					move,
 					sprint: input.sprint,
-					release: releaseSeconds > 0,
+					release: platformerJumpView.releaseSupport,
 					fullRagdoll: state.fullRagdoll,
 				} );
 				ragdoll.beforeStep( fixedDt );
+				if ( ! grabbedBone && ! state.fullRagdoll ) {
+
+					if ( platformerJumpView.jumped )
+						rootBody.applyImpulse( platformerJumpView.impulse, true );
+					const mass = Math.max( 0.1, rootBody.mass() );
+					const airControl = ! supported && ! state.autonomous ? 1 : 0;
+					appliedForce.x = mass * (
+						platformerJumpView.additionalGravity.x
+						+ platformerControlView.acceleration.x * airControl
+					);
+					appliedForce.y = mass * (
+						platformerJumpView.additionalGravity.y
+						+ platformerControlView.acceleration.y * airControl
+					);
+					appliedForce.z = mass * (
+						platformerJumpView.additionalGravity.z
+						+ platformerControlView.acceleration.z * airControl
+					);
+					if ( appliedForce.x * appliedForce.x + appliedForce.y * appliedForce.y
+						+ appliedForce.z * appliedForce.z > 1e-12 )
+						rootBody.addForce( appliedForce, true );
+
+				}
 				grab.beforeStep( fixedDt );
 
 			},
@@ -256,6 +345,7 @@ async function main() {
 		grab.dispose();
 		cameraRig.dispose();
 		ui.dispose();
+		rigDebugView.dispose();
 		ragdoll.dispose();
 		environment.dispose();
 		physics.dispose();
@@ -274,6 +364,9 @@ async function main() {
 		environment,
 		input,
 		cameraRig,
+		platformerControl,
+		platformerJump,
+		rigDebugView,
 		grab,
 		state,
 		reset,
