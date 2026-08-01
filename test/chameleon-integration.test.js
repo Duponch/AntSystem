@@ -207,3 +207,31 @@ test( 'CHAMELEON-SIM-020 runtime exposes independent visibility and shadow contr
 	assert.match( source, /getTelemetry:\s*\(\)\s*=>\s*simulation\.getTelemetry\(\)/u );
 
 } );
+
+test( 'CHAMELEON-SIM-038 hierarchical prey look drives neck and head before tongue rendering', async () => {
+
+	const source = await readSource( '../src/chameleons.js' );
+
+	assert.match( source, /new ChameleonHeadLookModel\s*\(/u );
+	assert.match( source, /function updateHeadLookSimulation\(\s*dt,\s*view\s*\)/u );
+	assert.match( source, /view\.targetIndex\s*>=\s*0/u );
+	assert.match( source, /const striking = attackState\(\s*view\.state\s*\)[\s\S]*?striking\s*\?\s*view\.strikeX\s*:\s*view\.aimX/u );
+	assert.match( source, /rotateLookBoneInModelSpace\(\s*rigBinding\.neck/u );
+	assert.match( source, /rotateLookBoneInModelSpace\(\s*rigBinding\.head/u );
+
+	const renderStart = source.indexOf( 'function renderFrame' );
+	assert.ok( renderStart >= 0, 'renderFrame is missing' );
+	const renderEnd = source.indexOf( 'function reset', renderStart );
+	assert.ok( renderEnd > renderStart, 'renderFrame boundary is missing' );
+	const render = source.slice( renderStart, renderEnd );
+	const contactIndex = render.indexOf( 'commitSafeContactPose' );
+	const lookIndex = render.indexOf( 'applyHeadLookPose' );
+	const tongueIndex = render.indexOf( 'updateTongue( view, true )' );
+	assert.ok( contactIndex >= 0 && contactIndex < lookIndex,
+		'look offsets must be layered over the validated contact pose' );
+	assert.ok( lookIndex < tongueIndex,
+		'the mouth matrices must inherit the final neck/head pose before tongue aiming' );
+	assert.doesNotMatch( render, /\.lookAt\s*\(/u,
+		'Object3D.lookAt would bypass anatomical neck/head limits' );
+
+} );

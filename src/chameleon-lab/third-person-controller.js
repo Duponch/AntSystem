@@ -1,5 +1,7 @@
 import * as THREE from 'three/webgpu';
 
+import { parallelTransportTangent } from './platformer-control-model.js';
+
 const MOVEMENT_KEYS = new Set( [
 	'KeyW', 'KeyZ', 'ArrowUp',
 	'KeyS', 'ArrowDown',
@@ -354,6 +356,17 @@ export class AutonomousExplorer {
 		this.hasProgressSample = false;
 		this.progressSeconds = 0;
 		this.progressDistance = 0;
+		this.output = new THREE.Vector3();
+		this._surfaceNormal = new THREE.Vector3( 0, 1, 0 );
+		this._previousSurfaceNormal = new THREE.Vector3( 0, 1, 0 );
+		this._surfaceHeading = new THREE.Vector3( -1, 0, 0 );
+		this._boundaryCorrection = new THREE.Vector3();
+		this._surfaceFrameValid = false;
+		this._transportScratch = {
+			axis: new THREE.Vector3(),
+			firstCross: new THREE.Vector3(),
+			secondCross: new THREE.Vector3(),
+		};
 
 	}
 
@@ -370,6 +383,71 @@ export class AutonomousExplorer {
 		if ( position ) this.lastPosition.copy( position );
 		this.progressSeconds = 0;
 		this.progressDistance = 0;
+		this._surfaceFrameValid = false;
+
+	}
+
+	_initializeSurfaceHeading() {
+
+		this._surfaceHeading.copy( this.heading ).projectOnPlane( this._surfaceNormal );
+		if ( this._surfaceHeading.lengthSq() < 1e-8 ) {
+
+			// A horizontal exploration heading can point straight into a wall. World
+			// up is useful only to choose that first tangent; it must not be added on
+			// every wall tick, otherwise the far side of an edge can never be descended.
+			this._surfaceHeading.set( 0, 1, 0 ).projectOnPlane( this._surfaceNormal );
+			if ( this._surfaceHeading.lengthSq() < 1e-8 )
+				this._surfaceHeading.set( 1, 0, 0 ).projectOnPlane( this._surfaceNormal );
+
+		}
+		this._surfaceHeading.normalize();
+		this.heading.copy( this._surfaceHeading );
+		this._previousSurfaceNormal.copy( this._surfaceNormal );
+		this._surfaceFrameValid = true;
+
+	}
+
+	_updateSurfaceFrame( supportNormal ) {
+
+		this._surfaceNormal.copy( supportNormal );
+		if ( this._surfaceNormal.lengthSq() < 1e-8 ) this._surfaceNormal.set( 0, 1, 0 );
+		else this._surfaceNormal.normalize();
+		if ( ! this._surfaceFrameValid ) {
+
+			this._initializeSurfaceHeading();
+			return;
+
+		}
+		parallelTransportTangent(
+			this._surfaceHeading,
+			this.heading,
+			this._previousSurfaceNormal,
+			this._surfaceNormal,
+			this._transportScratch,
+		);
+		this.heading.copy( this._surfaceHeading );
+		this._previousSurfaceNormal.copy( this._surfaceNormal );
+
+	}
+
+	_turnOnSurface( angle ) {
+
+		const heading = this.heading;
+		const normal = this._surfaceNormal;
+		const cosine = Math.cos( angle );
+		const sine = Math.sin( angle );
+		const dot = heading.dot( normal );
+		const x = heading.x * cosine
+			+ ( normal.y * heading.z - normal.z * heading.y ) * sine
+			+ normal.x * dot * ( 1 - cosine );
+		const y = heading.y * cosine
+			+ ( normal.z * heading.x - normal.x * heading.z ) * sine
+			+ normal.y * dot * ( 1 - cosine );
+		const z = heading.z * cosine
+			+ ( normal.x * heading.y - normal.y * heading.x ) * sine
+			+ normal.z * dot * ( 1 - cosine );
+		heading.set( x, y, z ).projectOnPlane( normal ).normalize();
+		this._surfaceHeading.copy( heading );
 
 	}
 
@@ -393,41 +471,34 @@ export class AutonomousExplorer {
 
 	}
 
-	update( dt, supportNormal, position, target = new THREE.Vector3() ) {
+	update( dt, supportNormal, position, target = null ) {
 
+		this._updateSurfaceFrame( supportNormal );
 		this.timeToChange -= dt;
 		this.phase += dt;
 		if ( this._trackProgress( dt, position ) ) {
 
 			const turnSign = this._random() < 0.5 ? -1 : 1;
-			const angle = Math.atan2( this.heading.z, this.heading.x )
-				+ turnSign * ( 0.9 + this._random() * 0.8 );
-			this.heading.set( Math.cos( angle ), 0, Math.sin( angle ) );
+			this._turnOnSurface( turnSign * ( 0.9 + this._random() * 0.8 ) );
 			this.timeToChange = 1.2 + this._random() * 1.6;
 
 		}
 		if ( this.timeToChange <= 0 ) {
 
-			const angle = this._random() * Math.PI * 2;
-			this.heading.set( Math.cos( angle ), 0, Math.sin( angle ) );
+			this._turnOnSurface( this._random() * Math.PI * 2 );
 			this.timeToChange = 3.5 + this._random() * 5.5;
 
 		}
-		if ( Math.abs( supportNormal.y ) < 0.72 ) {
-
-			const sideways = this.heading.clone().projectOnPlane( supportNormal );
-			const climb = new THREE.Vector3( 0, 1, 0 ).projectOnPlane( supportNormal );
-			target.copy( sideways ).multiplyScalar( 0.65 )
-				.addScaledVector( climb, 0.45 + Math.sin( this.phase * 0.47 ) * 0.22 );
-
-		} else {
-
-			target.copy( this.heading );
-
-		}
+		target ??= this.output;
+		target.copy( this.heading );
 		const edge = 9.5;
-		if ( Math.abs( position.x ) > edge ) target.x -= Math.sign( position.x ) * 1.5;
-		if ( Math.abs( position.z ) > edge ) target.z -= Math.sign( position.z ) * 1.5;
+		this._boundaryCorrection.set(
+			Math.abs( position.x ) > edge ? -Math.sign( position.x ) * 1.5 : 0,
+			0,
+			Math.abs( position.z ) > edge ? -Math.sign( position.z ) * 1.5 : 0,
+		).projectOnPlane( this._surfaceNormal );
+		target.add( this._boundaryCorrection );
+		if ( target.lengthSq() < 1e-8 ) target.copy( this.heading );
 		return target.normalize().multiplyScalar( 0.72 );
 
 	}

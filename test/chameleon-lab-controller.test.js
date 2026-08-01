@@ -281,3 +281,104 @@ test( 'CHAMELEON-LAB-CONTROLLER-008 pointer cancellation always releases camera 
 	assert.equal( canvas.listeners.size, 0 );
 
 } );
+
+test( 'CHAMELEON-LAB-CONTROLLER-009 autonomous heading crosses a convex edge geodesically', () => {
+
+	const explorer = new AutonomousExplorer( 0x62f3a9 );
+	const position = new THREE.Vector3();
+	const normal = new THREE.Vector3();
+	const expected = new THREE.Vector3();
+	const direction = new THREE.Vector3();
+	const previous = new THREE.Vector3();
+	explorer.heading.set( -1, 0, 0 );
+	explorer.timeToChange = 100;
+	explorer.resetProgress( position );
+	let hasPrevious = false;
+
+	const sample = ( degrees, secondEdge ) => {
+
+		const angle = degrees * Math.PI / 180;
+		if ( secondEdge ) {
+
+			// Top (+Y) towards the opposite wall (-X). The transported forward
+			// finishes downwards; a permanent world-up wall bias would reverse it.
+			normal.set( -Math.sin( angle ), Math.cos( angle ), 0 );
+			expected.set( -Math.cos( angle ), -Math.sin( angle ), 0 );
+
+		} else {
+
+			// Near wall (+X) towards the top (+Y).
+			normal.set( Math.cos( angle ), Math.sin( angle ), 0 );
+			expected.set( -Math.sin( angle ), Math.cos( angle ), 0 );
+
+		}
+		direction.copy( explorer.update( 1 / 120, normal, position ) ).normalize();
+		assert.ok( Math.abs( direction.dot( normal ) ) < 1e-9,
+			`heading left the support plane at ${ degrees } degrees` );
+		assert.ok( direction.dot( expected ) > 0.999999,
+			`heading diverged from its geodesic at ${ degrees } degrees: ${ direction.toArray() }` );
+		if ( hasPrevious ) assert.ok(
+			previous.dot( direction ) >= Math.cos( 5 * Math.PI / 180 ) - 1e-8,
+			`heading snapped at ${ degrees } degrees`,
+		);
+		previous.copy( direction );
+		hasPrevious = true;
+		position.addScaledVector( direction, 0.002 );
+
+	};
+
+	for ( let degrees = 0; degrees <= 90; degrees += 5 ) sample( degrees, false );
+	for ( let degrees = 5; degrees <= 90; degrees += 5 ) sample( degrees, true );
+	assert.ok( direction.dot( new THREE.Vector3( 0, -1, 0 ) ) > 0.999999,
+		`opposite wall heading did not descend: ${ direction.toArray() }` );
+	assert.ok( Math.abs( explorer.update( 1 / 120, normal, position ).length() - 0.72 ) <= EPSILON );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-010 autonomous geodesic update reuses every hot-path record', () => {
+
+	const explorer = new AutonomousExplorer( 0x4c2a91 );
+	const normal = new THREE.Vector3( 1, 0, 0 );
+	const position = new THREE.Vector3();
+	explorer.timeToChange = 100;
+	explorer.resetProgress( position );
+	const output = explorer.update( 1 / 120, normal, position );
+	const references = [
+		explorer.heading,
+		explorer.lastPosition,
+		explorer.output,
+		explorer._surfaceNormal,
+		explorer._previousSurfaceNormal,
+		explorer._surfaceHeading,
+		explorer._boundaryCorrection,
+		explorer._transportScratch,
+		explorer._transportScratch.axis,
+		explorer._transportScratch.firstCross,
+		explorer._transportScratch.secondCross,
+	];
+	assert.equal( output, explorer.output );
+	for ( let step = 1; step <= 4_096; step ++ ) {
+
+		const angle = step * 0.0005;
+		normal.set( Math.cos( angle ), Math.sin( angle ), 0 );
+		position.addScaledVector( output, 0.002 );
+		assert.equal( explorer.update( 1 / 120, normal, position ), output );
+
+	}
+	assert.deepEqual( [
+		explorer.heading,
+		explorer.lastPosition,
+		explorer.output,
+		explorer._surfaceNormal,
+		explorer._previousSurfaceNormal,
+		explorer._surfaceHeading,
+		explorer._boundaryCorrection,
+		explorer._transportScratch,
+		explorer._transportScratch.axis,
+		explorer._transportScratch.firstCross,
+		explorer._transportScratch.secondCross,
+	], references );
+	assert.ok( [ output.x, output.y, output.z ].every( Number.isFinite ) );
+	assert.ok( Math.abs( output.length() - 0.72 ) <= EPSILON );
+
+} );

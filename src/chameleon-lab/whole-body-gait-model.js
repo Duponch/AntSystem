@@ -150,6 +150,18 @@ export function writeWholeBodyTarget( {
 	const idleHeadYaw = idle * Math.sin( attention * 0.67 + seed * 7.3 ) * 0.055;
 	const idleHeadPitch = idle * Math.sin( attention * 0.53 + seed * 4.6 ) * 0.022;
 	const breathing = idle * Math.sin( attention * 1.37 + seed ) * 0.0045;
+	const idleBodyScale = idle * clamp( finiteOr( bodyMotion, 1 ), 0, 2 );
+	// Breathing is regular, but balance and observation are not. Two very slow
+	// incommensurate bands add a restrained weight transfer without moving the
+	// planted contact targets or turning the idle into a looping animation clip.
+	const idleBodyYaw = idleBodyScale * (
+		Math.sin( attention * 0.19 + seed * 4.1 ) * 0.010
+		+ Math.sin( attention * 0.47 + seed * 1.7 ) * 0.0035
+	);
+	const idleBodyRoll = idleBodyScale * (
+		Math.sin( attention * 0.23 + seed * 2.6 ) * 0.006
+		+ Math.sin( attention * 0.71 + seed * 5.2 ) * 0.002
+	);
 
 	for ( let foot = 0; foot < 4; foot ++ ) {
 
@@ -177,8 +189,8 @@ export function writeWholeBodyTarget( {
 	target[ WHOLE_BODY_POSE.PELVIS_YAW ] = -diagonal * 0.13 * body;
 	target[ WHOLE_BODY_POSE.PELVIS_ROLL ] = diagonal * 0.052 * body;
 	target[ WHOLE_BODY_POSE.PELVIS_BOB ] = strokePulse * 0.014 * body + breathing * 0.35;
-	target[ WHOLE_BODY_POSE.CHEST_YAW ] = diagonal * 0.055 * body;
-	target[ WHOLE_BODY_POSE.CHEST_ROLL ] = -diagonal * 0.034 * body;
+	target[ WHOLE_BODY_POSE.CHEST_YAW ] = diagonal * 0.055 * body - idleBodyYaw * 0.58;
+	target[ WHOLE_BODY_POSE.CHEST_ROLL ] = -diagonal * 0.034 * body - idleBodyRoll * 0.72;
 	target[ WHOLE_BODY_POSE.CHEST_PITCH ] = -strokePulse * 0.028 * body + breathing;
 	target[ WHOLE_BODY_POSE.NECK_YAW ] = diagonal * 0.045 * body + idleNeckYaw;
 	target[ WHOLE_BODY_POSE.NECK_PITCH ] = strokePulse * 0.018 * body + idleNeckPitch;

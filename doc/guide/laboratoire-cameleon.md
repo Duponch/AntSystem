@@ -39,7 +39,8 @@ sans interface.
 
 ## Commandes
 
-- `ZQSD`, `WASD` ou les flèches : se déplacer par rapport à la caméra ;
+- `ZQSD`, `WASD` ou les flèches : avancer, reculer ou tourner dans le repère
+  propre du caméléon ;
 - `Shift` : accélérer ;
 - `Espace` : sauter ; maintenir donne un saut haut, relâcher tôt un saut court ;
 - clic droit maintenu : tourner la caméra ;
@@ -51,10 +52,11 @@ sans interface.
 - `H` : afficher ou masquer le corps physique et les quatre appuis ;
 - `R` : remettre l’animal dans sa pose de départ.
 
-Le déplacement suit le support courant. Sur un mur ou un plan incliné, avancer
-ne signifie donc pas revenir horizontalement vers le sol. Le cap est transporté
-continûment le long des courbes : une branche cylindrique ou un raccord sol/mur
-ne peut plus transformer « avancer » en dérive latérale. Même si les appuis
+Le déplacement suit le support courant et l’avant réel du corps, indépendamment
+de l’angle de la caméra. Sur un mur ou un plan incliné, avancer ne signifie donc
+pas revenir horizontalement vers le sol. Le cap est transporté continûment le
+long des courbes : une branche cylindrique, un lancer ou un raccord sol/mur ne
+peut plus transformer « avancer » en dérive latérale. Même si les appuis
 découvrent le mur pendant le sous-pas courant, la commande déjà émise est
 transportée vers ce nouveau support au lieu d’être rabattue de côté.
 
@@ -82,9 +84,13 @@ sont aussi vérifiés à l’intérieur du volume fermé de la peau ; le tracé 
 montre ces mêmes axes, sans inventer de raccord entre deux articulations. Le
 talon, la paume et les deux groupes de doigts forment maintenant une seule
 semelle exportée avec le modèle. Une main ou un pied doit donc reposer à plat :
-le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la
-tête conservent de petits mouvements de regard au repos, sans provoquer de pas
-ni de vibration des appuis. Quand le bassin ou le thorax oscillent, le repère de
+le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la tête
+choisissent au repos des directions d’observation variées, gardent brièvement
+leur fixation puis effectuent de petites corrections. Ces mouvements ne sont
+pas une boucle sinusoïdale et restent présents, plus discrets, pendant la
+marche. Ils accompagnent une respiration et une oscillation très faible du
+thorax, sans provoquer de pas ni de vibration des appuis. Quand le bassin ou le
+thorax oscillent, le repère de
 marche reste celui du corps entier et non l’axe local incliné d’un os de colonne.
 La démarche corps entier et l’IK sont calculées au pas fixe de 120 Hz. Le rendu
 interpole seulement deux poses déjà résolues : changer la fréquence d’écran ou
@@ -142,7 +148,9 @@ impossible à agripper.
 ### Pilotage
 
 - **Exploration autonome** laisse le caméléon choisir périodiquement une
-  direction et changer de cap si aucune progression réelle n’est mesurée ;
+  direction et changer de cap si aucune progression réelle n’est mesurée. Son
+  cap suit les surfaces : il peut passer du mur au sommet puis redescendre de
+  l’autre côté sans toujours chercher le haut du monde ;
 - **Physique libre** suspend les appuis et la stabilisation ;
 - **Vitesse** règle la vitesse monde visée ;
 - **Animation** règle la fréquence visuelle du cycle des membres sans modifier
@@ -202,6 +210,7 @@ nouveau mouvement du corps ou une impulsion.
 - **Appuis pieds / griffes** active les quatre recherches de support ;
 - **Force de maintien** borne l’effort transmis au corps ;
 - **Rigidité d’appui** règle la rapidité du rappel ;
+- **Amortissement d’appui** dissipe la vitesse aux griffes et évite le rebond ;
 - **Portée capteurs** règle la distance maximale de recherche d’un support ;
 - **Réflexe de redressement** dose la rotation automatique vers les pattes ;
 - **Verrouillage de surface** règle la durée pendant laquelle un impact garde
@@ -237,8 +246,8 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 ## Ce qui est normal
 
 - un pied lâche, avance puis reprend un support pendant son pas ;
-- le corps amortit progressivement sa dérive lorsque deux appuis ou plus sont
-  disponibles ;
+- le corps amortit progressivement sa dérive ; une seule griffe peut préserver
+  brièvement son orientation pendant qu’une autre franchit une arête ;
 - l’animal glisse sur le verre ;
 - tout le modèle suit le corps unique pendant un lancer ;
 - la queue se déroule ou se replie passivement selon les contacts, traîne sur le

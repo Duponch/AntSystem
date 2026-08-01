@@ -494,6 +494,16 @@ export function createLabUI( {
 	} );
 	makeRange( {
 		parent: grip,
+		label: 'Amortissement d’appui',
+		object: ragdoll.settings,
+		property: 'gripDamping',
+		min: 1,
+		max: 24,
+		step: 0.5,
+		format: ( value ) => value.toFixed( 1 ),
+	} );
+	makeRange( {
+		parent: grip,
 		label: 'Portée capteurs',
 		object: ragdoll.settings,
 		property: 'gripReach',

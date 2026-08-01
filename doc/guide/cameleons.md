@@ -114,6 +114,11 @@ Un arrêt n’est pas forcément un blocage :
 - **camouflage** : il interrompt volontairement son déplacement pendant une
   durée comprise entre les bornes configurées.
 
+Pendant `REST_SCAN`, l’immobilité du trajet ne signifie pas que l’animal est
+figé : respiration discrète, cou et tête choisissent des points d’observation,
+les maintiennent puis font de petites corrections. En marche, ce regard autonome
+reste présent avec une amplitude réduite.
+
 Lorsque **Camouflage automatique** est actif, les pauses sont planifiées de
 façon déterministe. Un caméléon immobile et hors d’une phase révélatrice de
 l’attaque devient alors imperceptible pour les papillons.
@@ -148,13 +153,17 @@ vitesse configurée.
 1. Le caméléon ne considère que les papillons adultes, visibles et libres.
 2. Il approche continûment la proie sur son corridor de surface.
 3. Si elle entre dans la **Distance d’attaque**, il la suit encore pendant la
-   visée.
+   visée. Le cou et la tête s’orientent réellement vers elle ;
 4. Au départ de la langue, le point visé est figé : la trajectoire n’est pas
    corrigée artificiellement en plein vol.
 5. La capture exige un contact réel entre la langue et le papillon.
 6. En cas de contact, le papillon reste collé au bout de la langue pendant une
    rétraction continue.
 7. Le papillon ne disparaît que lorsqu’il entre effectivement dans la bouche.
+
+La bouche et la langue héritent de l’orientation finale du crâne. La langue ne
+part donc plus vers une cible latérale tandis que la tête regarde encore droit
+devant.
 
 Une langue qui rate sa cible revient donc normalement, sans téléporter ni
 supprimer le papillon.

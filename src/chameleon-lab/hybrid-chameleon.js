@@ -3,6 +3,10 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 import { ChameleonProceduralGait } from '../chameleon-procedural-gait.js';
 import {
+	CHAMELEON_HEAD_LOOK,
+	ChameleonHeadLookModel,
+} from '../chameleon-head-look-model.js';
+import {
 	chameleonCollisionGroups,
 	isExternalGripRayHit,
 } from './surface-contact-model.js';
@@ -530,6 +534,31 @@ class StableVisualRig {
 			this._rotateInModelSpace( leg.lower, LOCAL_FORWARD, flex * side * 0.76 );
 
 		}
+		this.model.updateMatrixWorld( true );
+
+	}
+
+	applyHeadLookPose( pose, weight = 1 ) {
+
+		if ( ! pose || pose.length <= CHAMELEON_HEAD_LOOK.HEAD_PITCH ) return;
+		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
+		if ( influence <= 0 ) return;
+		this._rotateInModelSpace(
+			this.neck, LOCAL_UP,
+			pose[ CHAMELEON_HEAD_LOOK.NECK_YAW ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.neck, LOCAL_SIDE,
+			-pose[ CHAMELEON_HEAD_LOOK.NECK_PITCH ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.head, LOCAL_UP,
+			pose[ CHAMELEON_HEAD_LOOK.HEAD_YAW ] * influence,
+		);
+		this._rotateInModelSpace(
+			this.head, LOCAL_SIDE,
+			-pose[ CHAMELEON_HEAD_LOOK.HEAD_PITCH ] * influence,
+		);
 		this.model.updateMatrixWorld( true );
 
 	}
@@ -1245,7 +1274,10 @@ export async function createHybridChameleon( {
 		RAPIER.RigidBodyDesc.dynamic()
 			.setTranslation( spawn.x, spawn.y, spawn.z )
 			.setLinearDamping( 0.7 )
-			.setAngularDamping( 1.35 )
+			// The torso is intentionally a single inexpensive proxy. A little more
+			// angular damping prevents the proxy from storing roll energy between two
+			// alternating claw supports without making the visual rig feel inert.
+			.setAngularDamping( 1.85 )
 			.setCanSleep( true )
 			.setCcdEnabled( true ),
 	);
@@ -1310,13 +1342,13 @@ export async function createHybridChameleon( {
 		moveSpeed: 0.68,
 		sprintMultiplier: 1.75,
 		moveForce: 13,
-		turnTorque: 0.9,
+		turnTorque: 1.05,
 		gripEnabled: true,
-		gripStrength: 28,
+		gripStrength: 32,
 		gripStiffness: 175,
 		gripDamping: 8,
 		gripReach: 0.42,
-		rightingStrength: 1,
+		rightingStrength: 1.15,
 		surfaceCommitTime: 0.85,
 		gaitFrequency: 0.92,
 		animationSpeed: 1,
@@ -1335,6 +1367,7 @@ export async function createHybridChameleon( {
 	};
 	const command = {
 		move: new THREE.Vector3(),
+		facing: new THREE.Vector3( -1, 0, 0 ),
 		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
 		sprint: false,
 		release: false,
@@ -1356,6 +1389,15 @@ export async function createHybridChameleon( {
 		responseFrequency: 8.5,
 		dampingRatio: 1.05,
 	} );
+	const headLook = new ChameleonHeadLookModel( {
+		seed: 0x7f4a7c15,
+		responseFrequency: 3.8,
+		weightResponseFrequency: 4.2,
+		neckYawSpeed: 0.62,
+		neckPitchSpeed: 0.52,
+		headYawSpeed: 0.80,
+		headPitchSpeed: 0.60,
+	} );
 	const suspension = new AnatomicalSuspensionModel( {
 		responseFrequency: 5.2,
 		dampingRatio: 1.05,
@@ -1372,6 +1414,14 @@ export async function createHybridChameleon( {
 		attentionTime: 0,
 		attentionSeed: 0.73,
 	} );
+	const headLookInput = Object.seal( {
+		targetYaw: 0,
+		targetPitch: 0,
+		targetWeight: 0,
+		idleWeight: 1,
+	} );
+	const lookTarget = new THREE.Vector3();
+	let lookTargetWeight = 0;
 	const candidatePositions = new Float32Array( 12 );
 	const candidateNormals = new Float32Array( 12 );
 	const previousFootPositions = new Float32Array( 12 );
@@ -1417,9 +1467,11 @@ export async function createHybridChameleon( {
 	const currentPosition = spawn.clone();
 	const previousQuaternion = new THREE.Quaternion();
 	const currentQuaternion = new THREE.Quaternion();
+	const bodyForward = new THREE.Vector3( -1, 0, 0 );
 	const renderPosition = new THREE.Vector3();
 	const renderQuaternion = new THREE.Quaternion();
 	const averageSupportNormal = new THREE.Vector3( 0, 1, 0 );
+	const targetSupportNormal = new THREE.Vector3( 0, 1, 0 );
 	const tempPosition = new THREE.Vector3();
 	const tempQuaternion = new THREE.Quaternion();
 	const tempInverseQuaternion = new THREE.Quaternion();
@@ -1448,9 +1500,14 @@ export async function createHybridChameleon( {
 	const rootReachVector = new THREE.Vector3();
 	const rootReachNormal = new THREE.Vector3();
 	const supportForce = new THREE.Vector3();
+	const clawForce = new THREE.Vector3();
+	const clawPoint = new THREE.Vector3();
+	const bodyCentreOfMass = new THREE.Vector3();
+	const clawLever = new THREE.Vector3();
 	const gravityVector = new THREE.Vector3();
 	const desiredMovement = new THREE.Vector3();
 	const transportedMovement = new THREE.Vector3();
+	const transportedFacing = new THREE.Vector3();
 	const surfaceTransportScratch = {
 		axis: new THREE.Vector3(),
 		firstCross: new THREE.Vector3(),
@@ -1461,6 +1518,13 @@ export async function createHybridChameleon( {
 	const torqueCurrent = new THREE.Quaternion();
 	const torqueError = new THREE.Quaternion();
 	const torqueVector = new THREE.Vector3();
+	const supportInducedTorque = new THREE.Vector3();
+	const supportMoment = new THREE.Vector3();
+	const currentForwardWorld = new THREE.Vector3();
+	const headLookOrigin = new THREE.Vector3();
+	const headLookDirection = new THREE.Vector3();
+	const headLookUp = new THREE.Vector3();
+	const headLookSide = new THREE.Vector3();
 	const angularVelocity = new THREE.Vector3();
 	const desiredUp = new THREE.Vector3();
 	const desiredForward = new THREE.Vector3();
@@ -1473,6 +1537,8 @@ export async function createHybridChameleon( {
 		normal: { x: 0, y: 1, z: 0 },
 	};
 	const supportForceRecord = { x: 0, y: 0, z: 0 };
+	const clawForceRecord = { x: 0, y: 0, z: 0 };
+	const clawPointRecord = { x: 0, y: 0, z: 0 };
 	const appliedForceRecord = { x: 0, y: 0, z: 0 };
 	const appliedTorqueRecord = { x: 0, y: 0, z: 0 };
 	const reacquireNormal = new THREE.Vector3( 0, 1, 0 );
@@ -2079,6 +2145,38 @@ export async function createHybridChameleon( {
 		wholeBodyInput.bodyMotion = settings.bodyMotion;
 		wholeBodyInput.attentionTime = elapsed;
 		wholeBodyGait.update( dt, wholeBodyInput );
+		currentForwardWorld.copy( forward ).normalize();
+		headLookUp.copy( LOCAL_UP ).applyQuaternion( currentRotation ).normalize();
+		headLookSide.crossVectors( headLookUp, currentForwardWorld ).normalize();
+		readVector( body.translation(), headLookOrigin )
+			.addScaledVector( currentForwardWorld, 0.34 )
+			.addScaledVector( headLookUp, 0.07 );
+		headLookInput.targetWeight = 0;
+		if ( lookTargetWeight > 0 ) {
+
+			headLookDirection.subVectors( lookTarget, headLookOrigin );
+			const distanceSquared = headLookDirection.lengthSq();
+			if ( distanceSquared > 1e-8 ) {
+
+				headLookDirection.multiplyScalar( 1 / Math.sqrt( distanceSquared ) );
+				const forwardAmount = headLookDirection.dot( currentForwardWorld );
+				const sideAmount = headLookDirection.dot( headLookSide );
+				const upAmount = headLookDirection.dot( headLookUp );
+				headLookInput.targetYaw = Math.atan2( sideAmount, forwardAmount );
+				headLookInput.targetPitch = Math.atan2(
+					upAmount, Math.max( 1e-6, Math.hypot( forwardAmount, sideAmount ) ),
+				);
+				headLookInput.targetWeight = lookTargetWeight;
+
+			}
+
+		}
+		// Even while walking the eyes and neck keep a restrained independent scan.
+		// At rest it expands into longer observation poses over a subtle breathing
+		// cycle; ragdoll/dragging releases the overlay cleanly to the passive pose.
+		headLookInput.idleWeight = command.fullRagdoll || command.release || dragging
+			? 0 : THREE.MathUtils.lerp( 1, 0.32, THREE.MathUtils.clamp( gaitInput.speed / 0.32, 0, 1 ) );
+		headLook.updateFixed( dt, headLookInput );
 		currentFootPositions.set( view.footPositions );
 		currentFootNormals.set( view.footNormals );
 		contactCount = 0;
@@ -2149,18 +2247,31 @@ export async function createHybridChameleon( {
 		const frame = supportFrameFromContacts(
 			currentFootPositions, currentFootNormals, activeContacts, supportFrame,
 		);
-		if ( frame.count >= 2 ) averageSupportNormal.set(
-			frame.normal.x, frame.normal.y, frame.normal.z,
-		).normalize();
+		if ( frame.count >= 1 ) {
+
+			targetSupportNormal.set( frame.normal.x, frame.normal.y, frame.normal.z ).normalize();
+			// Keep edge transitions monotone instead of switching the complete body
+			// frame whenever a single swing foot reaches the neighbouring face. A
+			// hard reacquisition may start almost orthogonal, in which case snapping
+			// once is safer than interpolating through an invalid diagonal support.
+			if ( averageSupportNormal.dot( targetSupportNormal ) < 0.12 )
+				averageSupportNormal.copy( targetSupportNormal );
+			else averageSupportNormal.lerp(
+				targetSupportNormal, 1 - Math.exp( -dt * ( frame.count >= 3 ? 24 : 16 ) ),
+			).normalize();
+
+		}
 
 	}
 
 	function applyRootController() {
 
-		if ( command.fullRagdoll || command.release || dragging || contactCount < 2 ) return;
+		if ( command.fullRagdoll || command.release || dragging || contactCount < 1 ) return;
 		const position = readVector( body.translation(), tempPosition );
+		readVector( body.worldCom(), bodyCentreOfMass );
 		const rotation = readQuaternion( body.rotation(), tempQuaternion );
 		const velocity = readVector( body.linvel(), tempVelocity );
+		readVector( body.angvel(), angularVelocity );
 		desiredRoot.set( 0, 0, 0 );
 		let suggestions = 0;
 		for ( let foot = 0; foot < 4; foot ++ ) {
@@ -2244,8 +2355,11 @@ export async function createHybridChameleon( {
 		const totalMass = Math.max( body.mass(), 0.1 );
 		rootError.subVectors( desiredRoot, position );
 		rootForceInput.mass = totalMass;
-		rootForceInput.frequency = 5.5 + settings.motorStrength * 2.5;
-		rootForceInput.dampingRatio = settings.motorDamping;
+		rootForceInput.frequency = ( 5.5 + settings.motorStrength * 2.5 ) * Math.sqrt(
+			Math.max( 0.05, settings.gripStiffness / 175 ),
+		);
+		rootForceInput.dampingRatio = settings.motorDamping
+			* THREE.MathUtils.clamp( settings.gripDamping / 8, 0.2, 2.5 );
 		rootForceInput.maximumAcceleration = Math.max( 8, settings.gripStrength / totalMass );
 		stableRootForce( rootForceInput, supportForceRecord );
 		supportForce.set( supportForceRecord.x, supportForceRecord.y, supportForceRecord.z );
@@ -2271,30 +2385,62 @@ export async function createHybridChameleon( {
 			);
 
 		}
-		clampVector(
-			supportForce,
-			Math.max( settings.gripStrength, totalMass * 10 ) + settings.moveForce * totalMass,
+		clampVector( supportForce, settings.moveForce * totalMass + totalMass * 10 );
+		// Distribute the exact, critically damped root resultant over the stance
+		// pads. Translation therefore preserves the proven stable controller while
+		// Rapier receives forces at the actual claws. The induced moment is measured
+		// below and compensated explicitly, leaving independent roll and yaw motors.
+		const inverseContacts = 1 / Math.max( 1, suggestions );
+		clawForce.copy( supportForce ).multiplyScalar( inverseContacts );
+		clawForceRecord.x = clawForce.x;
+		clawForceRecord.y = clawForce.y;
+		clawForceRecord.z = clawForce.z;
+		supportInducedTorque.set( 0, 0, 0 );
+		for ( let foot = 0; foot < 4; foot ++ ) {
+
+			if ( ! activeContacts[ foot ] ) continue;
+			const offset = foot * 3;
+			clawPoint.set(
+				currentFootPositions[ offset ],
+				currentFootPositions[ offset + 1 ],
+				currentFootPositions[ offset + 2 ],
+			);
+			clawLever.subVectors( clawPoint, bodyCentreOfMass );
+			clawPointRecord.x = clawPoint.x;
+			clawPointRecord.y = clawPoint.y;
+			clawPointRecord.z = clawPoint.z;
+			body.addForceAtPoint( clawForceRecord, clawPointRecord, true );
+			supportMoment.crossVectors( clawLever, clawForce );
+			supportInducedTorque.add( supportMoment );
+			feet[ foot ].load = inverseContacts;
+
+		}
+		// The control model publishes a rate-limited anatomical facing. Steering
+		// therefore cannot snap this attitude target even after the body has been
+		// thrown, while the stronger steep-surface gain preserves ventral adhesion.
+		const steepness = 1 - Math.abs( averageSupportNormal.dot( WORLD_UP ) );
+		transportedFacing.set( 0, 0, 0 );
+		if ( command.facing.lengthSq() > 1e-8 ) parallelTransportTangent(
+			transportedFacing, command.facing, command.sourceNormal,
+			averageSupportNormal, surfaceTransportScratch,
 		);
-		appliedForceRecord.x = supportForce.x;
-		appliedForceRecord.y = supportForce.y;
-		appliedForceRecord.z = supportForce.z;
-		body.addForce( appliedForceRecord, true );
+		else transportedFacing.copy( transportedMovement );
 		desiredBodyQuaternion(
-			rotation, averageSupportNormal, transportedMovement, desiredRotation,
+			rotation, averageSupportNormal, transportedFacing, desiredRotation,
 			desiredUp, desiredForward, desiredXAxis, desiredZAxis, desiredMatrix,
 		);
-		const steepness = 1 - Math.abs( averageSupportNormal.dot( WORLD_UP ) );
 		const torque = quaternionTorque(
 			body,
 			desiredRotation,
 			6.5 + settings.motorStrength * 2 + steepness * 3.5,
 			settings.motorDamping,
-			settings.turnTorque * ( 1 + steepness * 2.4 ),
+			settings.turnTorque * THREE.MathUtils.clamp( settings.rightingStrength, 0.2, 2 )
+				* ( 1 + steepness * 2.4 ),
 			torqueVector,
 			torqueCurrent,
 			torqueError,
 			angularVelocity,
-		);
+		).sub( supportInducedTorque );
 		appliedTorqueRecord.x = torque.x;
 		appliedTorqueRecord.y = torque.y;
 		appliedTorqueRecord.z = torque.z;
@@ -2611,6 +2757,11 @@ export async function createHybridChameleon( {
 			settings.suspension,
 			landingCompression,
 		);
+		rig.applyHeadLookPose(
+			headLook.getView().current,
+			settings.motorStrength > 0 && ! dragging
+				&& ! command.fullRagdoll && ! command.release ? 1 : 0,
+		);
 		activeRigPose.commitSolvedPose( dt, snap );
 
 	}
@@ -2743,6 +2894,7 @@ export async function createHybridChameleon( {
 
 		readVector( body.translation(), currentPosition );
 		readQuaternion( body.rotation(), currentQuaternion );
+		bodyForward.copy( LOCAL_FORWARD ).applyQuaternion( currentQuaternion ).normalize();
 
 	}
 
@@ -2818,6 +2970,8 @@ export async function createHybridChameleon( {
 		// would freeze the spawn height and force the limbs to stretch to the floor.
 		gait.reset( gaitInput );
 		wholeBodyGait.reset();
+		headLook.reset();
+		lookTargetWeight = 0;
 		suspension.reset();
 		tailRootAnchor.copy( tailRootBodyOffset ).add( nextSpawn );
 		tailPhysics.reset( tailRootAnchor );
@@ -2872,6 +3026,7 @@ export async function createHybridChameleon( {
 		landingCompression = 0;
 		wasSupportReleased = false;
 		command.release = false;
+		command.facing.copy( LOCAL_FORWARD );
 		command.sourceNormal.copy( WORLD_UP );
 		reacquireSurface = null;
 		reacquireCollider = null;
@@ -2890,6 +3045,7 @@ export async function createHybridChameleon( {
 		currentPosition.copy( nextSpawn );
 		previousQuaternion.identity();
 		currentQuaternion.identity();
+		bodyForward.copy( LOCAL_FORWARD );
 		initializeContacts( nextSpawn );
 		syncVisual( 1 );
 
@@ -2936,6 +3092,7 @@ export async function createHybridChameleon( {
 		visualRoot,
 		rig,
 		wholeBodyGait,
+		headLook,
 		suspension,
 		tailPhysics,
 		passiveLimbPhysics,
@@ -2952,6 +3109,11 @@ export async function createHybridChameleon( {
 		get supportNormal() {
 
 			return averageSupportNormal;
+
+		},
+		get forward() {
+
+			return bodyForward;
 
 		},
 		get contactCount() {
@@ -3002,6 +3164,15 @@ export async function createHybridChameleon( {
 		setCommand( next ) {
 
 			if ( next.move ) command.move.copy( next.move );
+			if ( next.move && ! next.facing && next.move.lengthSq() > 1e-8 )
+				command.facing.copy( next.move ).normalize();
+			if ( next.facing ) {
+
+				command.facing.copy( next.facing );
+				if ( command.facing.lengthSq() < 1e-8 ) command.facing.copy( bodyForward );
+				else command.facing.normalize();
+
+			}
 			if ( next.sourceNormal ) {
 
 				command.sourceNormal.copy( next.sourceNormal );
@@ -3012,6 +3183,22 @@ export async function createHybridChameleon( {
 			if ( next.sprint !== undefined ) command.sprint = !! next.sprint;
 			if ( next.release !== undefined ) command.release = !! next.release;
 			if ( next.fullRagdoll !== undefined ) command.fullRagdoll = !! next.fullRagdoll;
+
+		},
+		setLookTarget( target, weight = 1 ) {
+
+			if ( ! target || ! Number.isFinite( target.x )
+				|| ! Number.isFinite( target.y ) || ! Number.isFinite( target.z ) )
+				throw new TypeError( 'look target must contain finite x/y/z coordinates' );
+			lookTarget.copy( target );
+			lookTargetWeight = THREE.MathUtils.clamp(
+				Number.isFinite( weight ) ? weight : 1, 0, 1,
+			);
+
+		},
+		clearLookTarget() {
+
+			lookTargetWeight = 0;
 
 		},
 		setDragging( value ) {

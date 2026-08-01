@@ -147,27 +147,40 @@ solveur supplémentaires. Une capsule représente le tronc et une sphère la tê
 dans un collider composé. Tous les contacts du décor, les impulsions de saut et
 les forces de saisie s’appliquent à ce même corps.
 
-Le contrôleur n’écrit pas sa pose. À partir d’au moins deux appuis valides, il
-calcule un centroïde et une normale moyenne, puis applique :
+Le contrôleur n’écrit pas sa pose. Dès qu’au moins un appui valide subsiste, il
+conserve le repère anatomique ; avec plusieurs griffes, il calcule leur centroïde
+et une normale moyenne filtrée, puis applique :
 
 - une force PD amortie de façon critique vers une racine suggérée par les
-  appuis ;
-- la compensation bornée de la gravité le long de la normale ;
+  appuis, distribuée à coût constant sur les griffes en stance avec
+  `addForceAtPoint` ;
+- la compensation bornée du vecteur de gravité complet, y compris sur un mur
+  ou sous un support ;
 - une force tangentielle bornée vers la vitesse commandée ;
-- un couple borné alignant progressivement le corps avec le support.
+- un couple borné alignant progressivement le ventre avec le support et l’avant
+  avec le cap anatomique publié par le contrôleur.
+
+`Rigidité d’appui` et `Amortissement` pilotent réellement les gains de ce rappel.
+Le moment créé par la distribution des forces autour du centre de masse Rapier
+est mesuré puis compensé avant l’ajout du couple d’attitude. Un virage ne crée
+donc pas de roulis parasite sur une poutre, tandis qu’une seule griffe peut
+maintenir le repère pendant le passage d’une arête. Le nombre d’opérations reste
+strictement borné à quatre appuis par pas.
 
 Une prise, un saut, un manque d’appuis ou le mode **Physique libre** désactive
 ce rappel. Rapier reste alors l’unique autorité du mouvement global.
 
 ## Pilotage troisième personne et saut physique
 
-Le déplacement clavier est échantillonné dans le pas physique. Un repère tangent
-persistant est transporté par rotation minimale d’une normale de support à la
-suivante (repère de Bishop), puis reçoit seulement le changement de lacet de la
-caméra. Cette continuité supprime la singularité de l’ancienne double projection
-sur un mur et la dérive accumulée autour d’un cylindre. Regarder presque
-verticalement ne peut ni inverser ni annuler la commande : « avancer » reste
-avant dans le repère de la surface, même pendant une transition sol/mur/branche.
+Le déplacement clavier est échantillonné dans le pas physique. Son origine est
+l’avant anatomique `-X` transformé par le quaternion courant du corps Rapier,
+jamais le lacet de la caméra. Ce vecteur est projeté sur le support puis
+transporté par rotation minimale d’une normale à la suivante (repère de Bishop).
+Cette continuité supprime la singularité de l’ancienne double projection sur un
+mur et la dérive accumulée autour d’un cylindre. Tourner ou retourner la caméra,
+saisir puis lancer le corps ne peut ni inverser ni annuler la commande :
+« avancer » reste toujours l’avant réel du caméléon, y compris pendant une
+transition sol/mur/branche.
 La normale qui a servi à construire la commande accompagne celle-ci jusqu’au
 contrôleur physique. Si les contacts découvrent une nouvelle normale pendant le
 même sous-pas, l’intention est transportée vers ce nouveau plan au lieu d’être
@@ -175,6 +188,13 @@ simplement reprojetée : une couture abrupte ne peut donc pas créer une impulsi
 latérale d’une image.
 Les changements d’orientation et d’accélération sont bornés et tous les objets
 de sortie sont réutilisés.
+
+L’exploration autonome conserve elle aussi un cap tangent persistant. Quand la
+normale passe d’un mur au dessus puis à la face opposée, ce cap suit la rotation
+géodésique minimale au lieu de réinjecter artificiellement le haut du monde. Le
+caméléon peut ainsi franchir une arête puis redescendre ; les changements
+aléatoires, le watchdog d’immobilité et le rappel des limites tournent tous dans
+le plan local du support, sans allocation dans la boucle chaude.
 
 `Espace` ne déclenche plus une impulsion constante arbitraire. La vitesse de
 décollage est dérivée de la hauteur demandée et de la gravité courante. La
@@ -243,6 +263,27 @@ cadre agrégé, ce qui permet de tester un angle sol/mur ou un tronc sans impose
 que les quatre pieds soient coplanaires. Longueur et hauteur du pas, amplitude
 des épaules/hanches, levée des membres, flexion et mouvement du corps sont des
 paramètres indépendants exposés dans l’interface.
+
+## Regard hiérarchique et idle
+
+`chameleon-head-look-model.js` est un contrôleur cervical pur, déterministe et
+sans allocation. Il choisit au repos des fixations irrégulières maintenues entre
+deux micro-corrections, puis les suit avec un ressort critique. Une cible externe
+prend progressivement la priorité et sa disparition restitue l’observation idle
+sans saut.
+
+Le solveur calcule lacet et élévation dans le repère anatomique
+avant/haut/côté du corps. Il répartit environ 62 % du mouvement sur le cou et le
+reste sur le crâne, avec limites et vitesses distinctes. Le laboratoire expose
+`setLookTarget()` et `clearLookTarget()` comme un `LookAt` monde ; la pose est
+résolue au pas fixe avant la publication du buffer de rig. Au repos, respiration
+du thorax, transfert de poids très faible et observations tête/cou forment l’idle.
+Une marche réduit l’amplitude d’observation sans figer la tête.
+
+Le même modèle est utilisé dans la simulation principale. Une proie devient la
+cible du cou et du crâne pendant le suivi et l’attaque ; la matrice de la bouche
+est recalculée après cette pose, de sorte que la langue part de la bouche
+réellement orientée et non d’un crâne resté droit.
 
 ## Queue passive à géométrie originale
 
@@ -422,13 +463,17 @@ Les preuves automatiques actuelles sont :
 - `test/chameleon-lab-physics-world.test.js` : initialisation, pas fixe,
   invariance 60/240 Hz, plafond de rattrapage, interpolation, reset et rejet des
   valeurs non finies ;
-- `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY, projection
-  caméra-support, exploration autonome bornée et détection d’immobilité ;
+- `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY, exploration
+  autonome géodésique et allocation-free, limites monde et détection
+  d’immobilité ;
 - `test/chameleon-lab-input.test.js`,
   `test/chameleon-lab-platformer-control.test.js` et
   `test/chameleon-lab-platformer-jump.test.js` protègent les transitions de
   touche, le pilotage tangentiel, l’accélération bornée, les phases du saut,
   coyote/buffer, hauteur variable, atterrissage et stabilité des allocations ;
+- `test/chameleon-head-look-model.test.js` protège les fixations idle
+  déterministes, les limites cou/crâne, la priorité d’une cible, la continuité,
+  l’invariance temporelle et l’identité des buffers ;
 - `test/chameleon-lab-rig-debug-view.test.js` protège le buffer unique, le coût
   nul lorsqu’il est masqué et la couverture des chaînes du cou, des quatre
   membres, des doigts et de la queue ;

@@ -366,6 +366,15 @@ L’attaque anime le corps entier : pieds en prise, bassin, torse, queue, cou,
 tête, yeux, mâchoire et déglutition. Les repères `mouth_socket` et
 `capture_socket` documentent les deux extrémités fonctionnelles de la langue.
 
+Un contrôleur cervical déterministe se compose au-dessus des clips Blender.
+Dans `REST_SCAN`, il produit des fixations irrégulières et de petites corrections
+plutôt qu’une oscillation répétitive. Dès qu’une proie est suivie, le point
+`aim` puis le point `strike` prennent progressivement la priorité. Le lacet et
+l’élévation sont calculés dans le repère avant/haut/côté du corps, bornés, puis
+répartis entre `neck` et `head`. Le rendu met ensuite à jour uniquement cette
+sous-hiérarchie ; `mouth_socket`, la mâchoire et la langue héritent donc du vrai
+regard sans traversée complète supplémentaire du squelette.
+
 Le GLB a été exporté depuis la scène Blender de référence après ajout des os
 `jaw`, `tongue_base`, `tongue_mid`, `tongue_tip`, `mouth_socket` et
 `capture_socket`. Il conserve 42 os et deux clips contractuels :
@@ -512,6 +521,11 @@ pour toute la population.
 - `CHAMELEON-SIM-018` : un mixer et une langue procédurale de coût fixe ;
 - `CHAMELEON-SIM-019` : reconstruction du relief uniquement sur révision ;
 - `CHAMELEON-SIM-020` : visibilité et ombres indépendantes ;
+- `test/chameleon-head-look-model.test.js` : observation idle déterministe,
+  cible pondérée, limites cou/crâne, restitution sans saut, invariance du pas et
+  buffers stables ;
+- `CHAMELEON-SIM-038` : le regard de proie entraîne cou, crâne, bouche puis
+  langue dans cet ordre ;
 - `CHAMELEON-SIM-021` : capture SoA stable et gel de la proie ;
 - `CHAMELEON-SIM-022` : suivi continu de la langue et relâchement ;
 - `CHAMELEON-SIM-023` : consommation dans la bouche et retour au stade œuf ;

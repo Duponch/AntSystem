@@ -270,7 +270,16 @@ function applyHeadingDelta( target, previousCamera, currentCamera, supportNormal
 
 }
 
-/** Allocation-free fixed-step intent/orientation model. */
+/**
+ * Allocation-free fixed-step intent/orientation model.
+ *
+ * The locomotion frame belongs to the animal, not to the camera. `bodyForward`
+ * is the preferred input and represents the anatomical forward axis transformed
+ * by the current rigid-body attitude. The older `facing` input remains accepted
+ * for callers which already keep a tangent facing of their own. Camera data is
+ * deliberately ignored here; `cameraRelativePlatformerDirection()` remains
+ * exported for legacy consumers which explicitly want that policy.
+ */
 export class PlatformerControlModel {
 
 	constructor( {
@@ -353,10 +362,11 @@ export class PlatformerControlModel {
 
 	update( dt, {
 		axes,
-		cameraForward,
+		cameraForward: _cameraForward = null,
 		worldUp = DEFAULT_UP,
 		supportNormal = worldUp,
-		facing = this.facing,
+		bodyForward = null,
+		facing = null,
 		velocity = null,
 		supported = true,
 		sprint = false,
@@ -369,37 +379,25 @@ export class PlatformerControlModel {
 		);
 		setVector( this._normal, supported ? supportNormal : normalizedWorldUp, DEFAULT_UP );
 		normalize( this._normal, DEFAULT_UP );
-		parallelTransportTangent(
-			this._from, facing,
-			this._previousNormal, this._normal, this._transportScratch,
-		);
-		horizontalHeading(
-			this._cameraCandidate, cameraForward, normalizedWorldUp, this._cameraHeading,
-		);
-		if ( this._cameraHeadingValid ) {
+		const anatomicalForward = bodyForward ?? facing;
+		if ( anatomicalForward ) {
 
-			parallelTransportTangent(
-				this.surfaceForward, this.surfaceForward,
+			// A body-forward vector comes from the current physical attitude, so it
+			// is already expressed in the destination frame. Project it directly;
+			// near the singular case (nose into the support), preserve the previous
+			// tangent by minimal-rotation transport instead of choosing a new axis.
+			projectOnPlane( this.surfaceForward, anatomicalForward, this._normal );
+			if ( lengthSquared( this.surfaceForward ) <= 1e-7 ) parallelTransportTangent(
+				this.surfaceForward, this.facing,
 				this._previousNormal, this._normal, this._transportScratch,
 			);
-			applyHeadingDelta(
-				this.surfaceForward, this._cameraHeading, this._cameraCandidate,
-				this._normal, normalizedWorldUp, this._transportScratch,
-			);
+			else normalize( this.surfaceForward );
 
-		} else {
-
-			// Lift the initial camera yaw from the horizontal plane onto the
-			// support with the same minimal-rotation transport used afterwards.
-			// Unlike projection, this is continuous when the camera faces a wall.
-			parallelTransportTangent(
-				this.surfaceForward, this._cameraCandidate,
-				normalizedWorldUp, this._normal, this._transportScratch,
-			);
-
-		}
-		setVector( this._cameraHeading, this._cameraCandidate );
-		this._cameraHeadingValid = true;
+		} else parallelTransportTangent(
+			this.surfaceForward, this.facing,
+			this._previousNormal, this._normal, this._transportScratch,
+		);
+		setVector( this._from, this.surfaceForward );
 		setVector( this._previousNormal, this._normal );
 		cross( this._surfaceRight, this.surfaceForward, this._normal );
 		normalize( this._surfaceRight );

@@ -164,7 +164,7 @@ async function main() {
 		grab.cancel();
 		ragdoll.reset();
 		explorer.resetProgress();
-		platformerControl.reset( undefined, ragdoll.supportNormal );
+		platformerControl.reset( ragdoll.forward, ragdoll.supportNormal );
 		platformerJump.reset( true, ragdoll.supportNormal );
 		ragdoll.setLandingCompression( 0 );
 		input.consumeJumpState();
@@ -242,7 +242,9 @@ async function main() {
 				velocityRecord.x = velocity.x;
 				velocityRecord.y = velocity.y;
 				velocityRecord.z = velocity.z;
-				const supported = ragdoll.contactCount >= 2
+				// One planted zygodactyl foot is enough to preserve the anatomical
+				// control frame while the other feet cross an edge.
+				const supported = ragdoll.contactCount >= 1
 					&& ! state.fullRagdoll && ! grabbedBone;
 				platformerControl.moveSpeed = ragdoll.settings.moveSpeed;
 				platformerControl.sprintMultiplier = ragdoll.settings.sprintMultiplier;
@@ -252,6 +254,7 @@ async function main() {
 					cameraForward: cameraForwardRecord,
 					worldUp,
 					supportNormal: ragdoll.supportNormal,
+					bodyForward: ragdoll.forward,
 					velocity: velocityRecord,
 					supported,
 					sprint: input.sprint,
@@ -295,6 +298,7 @@ async function main() {
 				ragdoll.setLandingCompression( platformerJumpView.landingCompression );
 				ragdoll.setCommand( {
 					move,
+					facing: state.autonomous ? move : platformerControlView.facing,
 					sourceNormal: platformerControlView.supportNormal,
 					sprint: input.sprint,
 					release: platformerJumpView.releaseSupport,

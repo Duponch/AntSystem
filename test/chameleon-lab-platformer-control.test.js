@@ -240,28 +240,38 @@ test( 'PLATFORMER-CONTROL-008 long fixed-step runs preserve every hot-path recor
 
 } );
 
-test( 'PLATFORMER-CONTROL-009 initial wall heading changes continuously with camera yaw', () => {
+test( 'PLATFORMER-CONTROL-009 wall heading follows anatomical forward and ignores camera yaw', () => {
 
 	const normal = { x: 0, y: 0, z: 1 };
 	for ( const epsilon of [ -0.25, -0.205, -0.2, -0.02, 0, 0.02, 0.2, 0.205, 0.25 ] ) {
 
-		const model = new PlatformerControlModel();
-		model.reset( { x: 0, y: 1, z: 0 }, normal );
-		const view = model.update( 1 / 120, {
-			axes: { x: 0, y: 1 },
-			cameraForward: { x: epsilon, y: -0.25, z: -1 },
-			supportNormal: normal,
-			velocity: { x: 0, y: 0, z: 0 },
-			supported: true,
-		} );
+		const views = [];
+		for ( const cameraForward of [
+			{ x: epsilon, y: -0.25, z: -1 },
+			{ x: -epsilon, y: 0.7, z: 1 },
+		] ) {
+
+			const model = new PlatformerControlModel();
+			model.reset( { x: 0, y: 1, z: 0 }, normal );
+			views.push( { ...model.update( 1 / 120, {
+				axes: { x: 0, y: 1 },
+				cameraForward,
+				bodyForward: { x: epsilon, y: 1, z: 0 },
+				supportNormal: normal,
+				velocity: { x: 0, y: 0, z: 0 },
+				supported: true,
+			} ).direction } );
+
+		}
 		const inverseLength = 1 / Math.hypot( epsilon, 1 );
-		vectorClose( view.direction, {
+		vectorClose( views[ 0 ], {
 			x: epsilon * inverseLength,
 			y: inverseLength,
 			z: 0,
 		}, 2e-8 );
-		close( view.direction.x * normal.x + view.direction.y * normal.y
-			+ view.direction.z * normal.z, 0 );
+		vectorClose( views[ 1 ], views[ 0 ], 2e-8 );
+		close( views[ 0 ].x * normal.x + views[ 0 ].y * normal.y
+			+ views[ 0 ].z * normal.z, 0 );
 
 	}
 
@@ -303,15 +313,20 @@ test( 'PLATFORMER-CONTROL-010 transported forward follows a cylinder without lat
 
 } );
 
-test( 'PLATFORMER-CONTROL-011 first update anchors forward to the actual camera yaw', () => {
+test( 'PLATFORMER-CONTROL-011 first update anchors forward to the anatomical body axis', () => {
 
-	const model = new PlatformerControlModel();
-	model.reset();
-	for ( let tick = 0; tick < 2; tick ++ ) {
+	for ( const cameraForward of [
+		{ x: -1, y: -0.25, z: 0 },
+		{ x: 1, y: 0.8, z: 0 },
+		{ x: 0, y: -1, z: 0 },
+	] ) {
 
+		const model = new PlatformerControlModel();
+		model.reset();
 		const view = model.update( 1 / 120, {
 			axes: { x: 0, y: 1 },
-			cameraForward: { x: -1, y: -0.25, z: 0 },
+			cameraForward,
+			bodyForward: { x: -1, y: 0, z: 0 },
 			supportNormal: { x: 0, y: 1, z: 0 },
 			velocity: { x: 0, y: 0, z: 0 },
 			supported: true,
@@ -340,6 +355,7 @@ test( 'PLATFORMER-CONTROL-012 initial oblique heading keeps its axial component 
 		const view = model.update( 1 / 120, {
 			axes: { x: 0, y: 1 },
 			cameraForward: { x: 0.55, y: -0.2, z: -1 },
+			bodyForward: expected,
 			supportNormal: normal,
 			velocity: { x: 0, y: 0, z: 0 },
 			supported: true,
@@ -357,6 +373,105 @@ test( 'PLATFORMER-CONTROL-012 initial oblique heading keeps its axial component 
 		previous = { ...view.direction };
 
 	}
+
+} );
+
+test( 'PLATFORMER-CONTROL-014 arbitrary physical rotations immediately replace a stale control frame', () => {
+
+	const model = new PlatformerControlModel();
+	model.reset( { x: 0, y: 0, z: -1 } );
+	let view = model.update( 1 / 120, {
+		axes: { x: 0, y: 1 },
+		cameraForward: { x: 0, y: 0, z: -1 },
+		bodyForward: { x: 0, y: 0, z: -1 },
+		supportNormal: { x: 0, y: 1, z: 0 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	vectorClose( view.direction, { x: 0, y: 0, z: -1 } );
+
+	// Simulate a mouse throw followed by a wall reacquisition with the animal's
+	// anatomical nose now pointing along +Y. No reset and no camera movement is
+	// allowed to remain in the locomotion frame.
+	view = model.update( 1 / 120, {
+		axes: { x: 0, y: 1 },
+		cameraForward: { x: 0, y: 0, z: -1 },
+		bodyForward: { x: 0, y: 1, z: 0 },
+		supportNormal: { x: 0, y: 0, z: 1 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	vectorClose( view.direction, { x: 0, y: 1, z: 0 } );
+	view = model.update( 1 / 120, {
+		axes: { x: 0, y: 1 },
+		cameraForward: { x: 0, y: 1, z: 0 },
+		facing: { x: 1, y: 0, z: 0 },
+		supportNormal: { x: 0, y: 0, z: 1 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	vectorClose( view.direction, { x: 1, y: 0, z: 0 } );
+	const facingAlias = new PlatformerControlModel();
+	facingAlias.reset( { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 } );
+	view = facingAlias.update( 1 / 120, {
+		axes: { x: 0, y: 1 },
+		cameraForward: { x: 0, y: 0, z: -1 },
+		facing: { x: 0, y: 1, z: 0 },
+		supportNormal: { x: 0, y: 0, z: 1 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	vectorClose( view.direction, { x: 0, y: 1, z: 0 } );
+
+} );
+
+test( 'PLATFORMER-CONTROL-015 lateral and diagonal input use the body-local support basis', () => {
+
+	const model = new PlatformerControlModel();
+	const normal = { x: 0, y: Math.SQRT1_2, z: Math.SQRT1_2 };
+	const bodyForward = { x: -1, y: 0, z: 0 };
+	const right = { x: 0, y: Math.SQRT1_2, z: -Math.SQRT1_2 };
+	for ( const [ axes, expected ] of [
+		[ { x: 0, y: 1 }, bodyForward ],
+		[ { x: 1, y: 0 }, right ],
+		[ { x: Math.SQRT1_2, y: Math.SQRT1_2 }, {
+			x: -Math.SQRT1_2,
+			y: 0.5,
+			z: -0.5,
+		} ],
+	] ) {
+
+		const view = model.update( 1 / 120, {
+			axes,
+			cameraForward: { x: 0.2, y: -0.9, z: 0.7 },
+			bodyForward,
+			supportNormal: normal,
+			velocity: { x: 0, y: 0, z: 0 },
+			supported: true,
+		} );
+		vectorClose( view.direction, expected, 2e-8 );
+		close( view.direction.x * normal.x + view.direction.y * normal.y
+			+ view.direction.z * normal.z, 0, 2e-8 );
+
+	}
+
+} );
+
+test( 'PLATFORMER-CONTROL-016 a nose-normal singularity preserves tangent transport over an edge', () => {
+
+	const model = new PlatformerControlModel();
+	model.reset( { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 } );
+	const view = model.update( 1 / 120, {
+		axes: { x: 0, y: 1 },
+		cameraForward: { x: 1, y: 0, z: 0 },
+		// At the exact edge the rigid capsule may temporarily point into the new
+		// support. Its projection is undefined, so the old forward is transported.
+		bodyForward: { x: 0, y: 0, z: 1 },
+		supportNormal: { x: 0, y: 0, z: 1 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	vectorClose( view.direction, { x: 0, y: 1, z: 0 }, 2e-8 );
 
 } );
 

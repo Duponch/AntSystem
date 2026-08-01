@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const MAIN_URL = new URL( '../src/chameleon-lab/main.js', import.meta.url );
+const HYBRID_URL = new URL( '../src/chameleon-lab/hybrid-chameleon.js', import.meta.url );
+const UI_URL = new URL( '../src/chameleon-lab/lab-ui.js', import.meta.url );
 
 function extractBraceBlock( source, markerPattern, label ) {
 
@@ -212,5 +214,32 @@ test( 'CHAMELEON-LAB-PLATFORMER-INTEGRATION-005 UI tuning is copied into fixed-s
 			'u',
 		),
 	);
+
+} );
+
+test( 'CHAMELEON-LAB-PLATFORMER-INTEGRATION-006 body-relative steering and physical claw adhesion stay wired end to end', async () => {
+
+	const [ source, hybrid, ui ] = await Promise.all( [
+		readFile( MAIN_URL, 'utf8' ),
+		readFile( HYBRID_URL, 'utf8' ),
+		readFile( UI_URL, 'utf8' ),
+	] );
+	const fixed = fixedStepBlock( source );
+
+	assert.match( fixed, /supported\s*=\s*ragdoll\.contactCount\s*>=\s*1/u,
+		'an edge transition must remain supported while at least one claw is planted' );
+	assert.match( fixed, /bodyForward:\s*ragdoll\.forward/u,
+		'keyboard steering must use the anatomical forward axis, not camera yaw' );
+	assert.match( fixed, /facing:\s*state\.autonomous\s*\?\s*move\s*:\s*platformerControlView\.facing/u,
+		'the hybrid attitude controller must receive the same body-relative facing frame' );
+
+	assert.match( hybrid, /body\.worldCom\(\)/u,
+		'claw-force moments must be measured about the actual rigid-body centre of mass' );
+	assert.match( hybrid, /body\.addForceAtPoint\(/u,
+		'adhesion must be applied at planted claws instead of only at the root' );
+	assert.match( hybrid, /settings\.gripStiffness/u );
+	assert.match( hybrid, /settings\.gripDamping/u );
+	assert.match( ui, /property:\s*'gripDamping'/u,
+		'the support damping required to suppress roll must stay tunable' );
 
 } );

@@ -2,6 +2,10 @@ import * as THREE from 'three/webgpu';
 
 import { WORLD, gfx } from './config.js';
 import {
+	CHAMELEON_HEAD_LOOK,
+	ChameleonHeadLookModel,
+} from './chameleon-head-look-model.js';
+import {
 	advanceChameleonCamouflageDwell,
 	CHAMELEON_CAMOUFLAGE_SETTLE_SECONDS,
 	CHAMELEON_STATE,
@@ -40,6 +44,8 @@ export const CHAMELEON_WORLD_LENGTH = 3.1;
 
 const EMPTY_PREY = Object.freeze( { count: 0 } );
 const LOCAL_Y = new THREE.Vector3( 0, 1, 0 );
+const CHAMELEON_LOCAL_UP = new THREE.Vector3( 0, 1, 0 );
+const CHAMELEON_LOCAL_SIDE = new THREE.Vector3( 0, 0, 1 );
 
 const STATIONARY_EPSILON = 1e-5;
 const BODY_FRAME_EPSILON = 1e-8;
@@ -266,6 +272,17 @@ export async function createChameleons( {
 	walkAction.play();
 	attackAction.play();
 	const rigBinding = createChameleonRigBinding( instance.model );
+	const headLook = new ChameleonHeadLookModel( {
+		seed: 0x615f3a27,
+		responseFrequency: 5.1,
+		weightResponseFrequency: 4.8,
+	} );
+	const headLookInput = Object.seal( {
+		targetYaw: 0,
+		targetPitch: 0,
+		targetWeight: 0,
+		idleWeight: 1,
+	} );
 	const rigSolution = rigBinding.createSolution();
 	const safeLocalPose = new Float32Array( rigBinding.orderedJoints.length * 10 );
 	const safeTailLocalPose = new Float32Array( CHAMELEON_TAIL_JOINT_COUNT * 4 );
@@ -446,6 +463,16 @@ export async function createChameleons( {
 	const authoredMouth = new THREE.Vector3();
 	const visualTongueTip = new THREE.Vector3();
 	const mouthCorrection = new THREE.Vector3();
+	const lookDirection = new THREE.Vector3();
+	const lookForward = new THREE.Vector3();
+	const lookUp = new THREE.Vector3();
+	const lookSide = new THREE.Vector3();
+	const lookAxisWorld = new THREE.Vector3();
+	const lookModelWorldQuaternion = new THREE.Quaternion();
+	const lookBoneWorldQuaternion = new THREE.Quaternion();
+	const lookParentInverseQuaternion = new THREE.Quaternion();
+	const lookDeltaQuaternion = new THREE.Quaternion();
+	const lookCandidateQuaternion = new THREE.Quaternion();
 	const targetBodyQuaternion = new THREE.Quaternion();
 	const contactWorld = new THREE.Vector3();
 	const lastSafeBodyPosition = new THREE.Vector3();
@@ -1761,6 +1788,89 @@ export async function createChameleons( {
 
 	}
 
+	function updateHeadLookSimulation( dt, view ) {
+
+		lookForward.set( view.headingX, view.headingY, view.headingZ );
+		lookUp.set( view.upX, view.upY, view.upZ );
+		if ( lookUp.lengthSq() < BODY_FRAME_EPSILON ) lookUp.set( 0, 1, 0 );
+		else lookUp.normalize();
+		projectChameleonBodyForward( lookForward, lookUp, forward, 1 );
+		lookSide.crossVectors( lookUp, lookForward );
+		if ( lookSide.lengthSq() < BODY_FRAME_EPSILON ) lookSide.set( 0, 0, 1 );
+		else lookSide.normalize();
+		headLookInput.targetWeight = 0;
+		if ( view.targetIndex >= 0 || view.capturedIndex >= 0 ) {
+
+			const striking = attackState( view.state );
+			const targetX = striking ? view.strikeX : view.aimX;
+			const targetY = striking ? view.strikeY : view.aimY;
+			const targetZ = striking ? view.strikeZ : view.aimZ;
+			lookDirection.set(
+				targetX - view.mouthX,
+				targetY - view.mouthY,
+				targetZ - view.mouthZ,
+			);
+			const distanceSquared = lookDirection.lengthSq();
+			if ( distanceSquared > BODY_FRAME_EPSILON ) {
+
+				lookDirection.multiplyScalar( 1 / Math.sqrt( distanceSquared ) );
+				const forwardAmount = lookDirection.dot( lookForward );
+				const sideAmount = lookDirection.dot( lookSide );
+				const upAmount = lookDirection.dot( lookUp );
+				headLookInput.targetYaw = Math.atan2( sideAmount, forwardAmount );
+				headLookInput.targetPitch = Math.atan2(
+					upAmount, Math.max( 1e-6, Math.hypot( forwardAmount, sideAmount ) ),
+				);
+				headLookInput.targetWeight = striking ? 1 : 0.82;
+
+			}
+
+		}
+		const resting = view.state === CHAMELEON_STATE.REST_SCAN || camouflaged;
+		headLookInput.idleWeight = resting ? 1 : 0.38;
+		headLook.updateFixed( dt, headLookInput );
+
+	}
+
+	function rotateLookBoneInModelSpace( bone, modelAxis, angle ) {
+
+		if ( ! bone || Math.abs( angle ) < 1e-7 ) return;
+		bone.updateWorldMatrix( true, false );
+		instance.model.getWorldQuaternion( lookModelWorldQuaternion );
+		lookAxisWorld.copy( modelAxis ).applyQuaternion( lookModelWorldQuaternion ).normalize();
+		lookDeltaQuaternion.setFromAxisAngle( lookAxisWorld, angle );
+		bone.getWorldQuaternion( lookBoneWorldQuaternion );
+		lookCandidateQuaternion.copy( lookDeltaQuaternion ).multiply( lookBoneWorldQuaternion );
+		bone.parent.getWorldQuaternion( lookParentInverseQuaternion ).invert();
+		bone.quaternion.copy(
+			lookCandidateQuaternion.premultiply( lookParentInverseQuaternion ),
+		).normalize();
+		bone.updateWorldMatrix( false, true );
+
+	}
+
+	function applyHeadLookPose() {
+
+		const pose = headLook.getView().current;
+		rotateLookBoneInModelSpace(
+			rigBinding.neck, CHAMELEON_LOCAL_UP,
+			pose[ CHAMELEON_HEAD_LOOK.NECK_YAW ],
+		);
+		rotateLookBoneInModelSpace(
+			rigBinding.neck, CHAMELEON_LOCAL_SIDE,
+			-pose[ CHAMELEON_HEAD_LOOK.NECK_PITCH ],
+		);
+		rotateLookBoneInModelSpace(
+			rigBinding.head, CHAMELEON_LOCAL_UP,
+			pose[ CHAMELEON_HEAD_LOOK.HEAD_YAW ],
+		);
+		rotateLookBoneInModelSpace(
+			rigBinding.head, CHAMELEON_LOCAL_SIDE,
+			-pose[ CHAMELEON_HEAD_LOOK.HEAD_PITCH ],
+		);
+
+	}
+
 	function updateTongue( view, worldMatricesReady = false ) {
 
 		const visible = !! view.tongueVisible && surfaceVisible && group.visible;
@@ -2096,6 +2206,7 @@ export async function createChameleons( {
 			? getButterflyPredationContext() || EMPTY_PREY
 			: EMPTY_PREY;
 		const view = simulation.update( dt, prey );
+		updateHeadLookSimulation( dt, view );
 		syncDebugView( view, dt, true );
 		return view;
 
@@ -2140,7 +2251,8 @@ export async function createChameleons( {
 		const contactFailed = bodyContactFailed || ! tailSafe;
 		if ( contactFailed ) rollbackUnsafeContact( view );
 		else commitSafeContactPose( view );
-		updateTongue( view, rigWeight > 0 );
+		applyHeadLookPose();
+		updateTongue( view, true );
 		syncDebugView( view );
 		syncCamouflageVisual( renderDt );
 		return view;
@@ -2234,6 +2346,8 @@ export async function createChameleons( {
 		applyVisualScale( true );
 		rebuildTrack( true );
 		const view = simulation.update( 0, EMPTY_PREY );
+		headLook.reset();
+		updateHeadLookSimulation( 0, view );
 		if ( track ) orientBody( view );
 		if ( track ) updateProceduralContacts( 0, view );
 		updateAnimation( 0, view );
@@ -2250,7 +2364,8 @@ export async function createChameleons( {
 		const contactFailed = bodyContactFailed || ! tailSafe;
 		if ( contactFailed ) rollbackUnsafeContact( view );
 		else commitSafeContactPose( view );
-		updateTongue( view, rigWeight > 0 );
+		applyHeadLookPose();
+		updateTongue( view, true );
 		syncDebugView( view );
 		syncCamouflageVisual( 0, true );
 
@@ -2282,6 +2397,7 @@ export async function createChameleons( {
 	setSurfaceVisible( true );
 	scheduleNextCamouflage();
 	const initialView = simulation.update( 0, EMPTY_PREY );
+	updateHeadLookSimulation( 0, initialView );
 	if ( track ) orientBody( initialView );
 	if ( track ) updateProceduralContacts( 0, initialView );
 	updateAnimation( 0, initialView );
@@ -2298,7 +2414,8 @@ export async function createChameleons( {
 	const initialContactFailed = initialBodyContactFailed || ! initialTailSafe;
 	if ( initialContactFailed ) rollbackUnsafeContact( initialView );
 	else commitSafeContactPose( initialView );
-	updateTongue( initialView, initialRigWeight > 0 );
+	applyHeadLookPose();
+	updateTongue( initialView, true );
 	syncDebugView( initialView );
 	syncCamouflageVisual( 0, true );
 
