@@ -7,6 +7,8 @@ import { createHybridChameleon } from './hybrid-chameleon.js';
 import {
 	AutonomousExplorer,
 	LabInputController,
+	SurfaceDestinationPicker,
+	SurfaceRoutePlanner,
 	ThirdPersonCamera,
 } from './third-person-controller.js';
 import { GrabController } from './grab-controller.js';
@@ -113,13 +115,18 @@ async function main() {
 	physics.surfaceByCollider = new Map();
 	const environment = createLabEnvironment( { scene, physics } );
 	const ragdoll = await createHybridChameleon( { scene, physics } );
+	// A sprint must read immediately as a different locomotion mode rather than
+	// as a barely measurable acceleration variation.
+	ragdoll.settings.sprintMultiplier = Math.max( ragdoll.settings.sprintMultiplier, 2.3 );
 	const input = new LabInputController( window );
 	const explorer = new AutonomousExplorer();
+	const surfaceRoutePlanner = new SurfaceRoutePlanner( environment.navigation );
 	const platformerControl = new PlatformerControlModel( {
 		moveSpeed: ragdoll.settings.moveSpeed,
 		sprintMultiplier: ragdoll.settings.sprintMultiplier,
 	} );
 	const platformerJump = new PlatformerJumpModel( { airAcceleration: 0 } );
+	const cameraTarget = new THREE.Vector3();
 	const rigDebugView = createRigDebugView( {
 		scene,
 		root: ragdoll.model,
@@ -132,7 +139,7 @@ async function main() {
 		targetProvider: () => {
 
 			const position = ragdoll.pelvis.body.translation();
-			return new THREE.Vector3( position.x, position.y, position.z );
+			return cameraTarget.set( position.x, position.y, position.z );
 
 		},
 	} );
@@ -163,9 +170,11 @@ async function main() {
 
 		grab.cancel();
 		ragdoll.reset();
+		explorer.clearDestination();
 		explorer.resetProgress();
 		platformerControl.reset( ragdoll.forward, ragdoll.supportNormal );
 		platformerJump.reset( true, ragdoll.supportNormal );
+		ragdoll.setJumpPose( null );
 		ragdoll.setLandingCompression( 0 );
 		input.consumeJumpState();
 		state.jumpPhase = platformerJump.phase;
@@ -191,6 +200,81 @@ async function main() {
 	const appliedForce = { x: 0, y: 0, z: 0 };
 	const jumpInput = { jumpPressed: false, jumpHeld: false, jumpReleased: false };
 	const zeroAxes = Object.freeze( { x: 0, y: 0 } );
+	const platformerControlInput = Object.seal( {
+		axes: zeroAxes,
+		cameraForward: cameraForwardRecord,
+		worldUp,
+		supportNormal: ragdoll.supportNormal,
+		bodyForward: ragdoll.forward,
+		velocity: velocityRecord,
+		supported: false,
+		sprint: false,
+	} );
+	const platformerJumpInput = Object.seal( {
+		supported: false,
+		supportNormal: ragdoll.supportNormal,
+		worldUp,
+		velocity: velocityRecord,
+		gravity: physics.world.gravity,
+		mass: 0,
+		jumpPressed: false,
+		jumpHeld: false,
+		jumpReleased: false,
+		desiredDirection: move,
+		bodyForward: ragdoll.forward,
+		sprint: false,
+	} );
+	const ragdollCommand = Object.seal( {
+		move,
+		facing: ragdoll.forward,
+		turning: 0,
+		sourceNormal: ragdoll.supportNormal,
+		sprint: false,
+		release: false,
+		fullRagdoll: false,
+	} );
+	function currentSupportCollider() {
+
+		let selected = null;
+		let selectedCount = 0;
+		for ( let candidate = 0; candidate < ragdoll.feet.length; candidate ++ ) {
+
+			const collider = ragdoll.feet[ candidate ].collider;
+			if ( ! collider ) continue;
+			let count = 0;
+			for ( let other = 0; other < ragdoll.feet.length; other ++ )
+				if ( ragdoll.feet[ other ].collider?.handle === collider.handle ) count ++;
+			if ( count > selectedCount ) {
+
+				selected = collider;
+				selectedCount = count;
+
+			}
+
+		}
+		return selected;
+
+	}
+	const destinationPicker = new SurfaceDestinationPicker( {
+		camera,
+		domElement: renderer.domElement,
+		physics,
+		onDestination: ( destination, normal, collider ) => {
+
+			const position = ragdoll.pelvis.body.translation();
+			creaturePosition.set( position.x, position.y, position.z );
+			const route = surfaceRoutePlanner.plan(
+				creaturePosition,
+				currentSupportCollider(),
+				destination,
+				normal,
+				collider,
+			);
+			explorer.setDestination( destination, normal, creaturePosition, route );
+			state.autonomous = true;
+
+		},
+	} );
 	let previousTime = performance.now();
 	let disposed = false;
 
@@ -216,6 +300,7 @@ async function main() {
 
 			state.autonomous = ! state.autonomous;
 			if ( state.autonomous ) explorer.resetProgress();
+			else explorer.clearDestination();
 
 		}
 		if ( input.consume( 'toggleRagdollQueued' ) ) state.fullRagdoll = ! state.fullRagdoll;
@@ -238,6 +323,14 @@ async function main() {
 			( fixedDt ) => {
 
 				const rootBody = ragdoll.pelvis.body;
+				const manualAxes = input.axes;
+				if ( state.autonomous
+					&& ( Math.abs( manualAxes.x ) > 1e-5 || Math.abs( manualAxes.y ) > 1e-5 ) ) {
+
+					state.autonomous = false;
+					explorer.clearDestination();
+
+				}
 				const velocity = rootBody.linvel();
 				velocityRecord.x = velocity.x;
 				velocityRecord.y = velocity.y;
@@ -249,16 +342,14 @@ async function main() {
 				platformerControl.moveSpeed = ragdoll.settings.moveSpeed;
 				platformerControl.sprintMultiplier = ragdoll.settings.sprintMultiplier;
 				platformerControl.airAcceleration = 3.2 * state.airControl;
-				const platformerControlView = platformerControl.update( fixedDt, {
-					axes: state.autonomous || grabbedBone ? zeroAxes : input.axes,
-					cameraForward: cameraForwardRecord,
-					worldUp,
-					supportNormal: ragdoll.supportNormal,
-					bodyForward: ragdoll.forward,
-					velocity: velocityRecord,
-					supported,
-					sprint: input.sprint,
-				} );
+				platformerControlInput.axes = state.autonomous || grabbedBone ? zeroAxes : manualAxes;
+				platformerControlInput.supportNormal = ragdoll.supportNormal;
+				platformerControlInput.bodyForward = ragdoll.forward;
+				platformerControlInput.supported = supported;
+				platformerControlInput.sprint = input.sprint;
+				const platformerControlView = platformerControl.update(
+					fixedDt, platformerControlInput,
+				);
 				if ( state.autonomous ) {
 
 					const position = ragdoll.pelvis.body.translation();
@@ -282,28 +373,45 @@ async function main() {
 				platformerJump.fallGravityScale = state.fallGravityScale;
 				platformerJump.cutGravityScale = state.jumpCutGravityScale;
 				input.consumeJumpState( jumpInput );
-				const platformerJumpView = platformerJump.update( fixedDt, {
-					supported,
-					supportNormal: ragdoll.supportNormal,
-					worldUp,
-					velocity: velocityRecord,
-					gravity: physics.world.gravity,
-					mass: rootBody.mass(),
-					jumpPressed: jumpInput.jumpPressed && ! grabbedBone && ! state.fullRagdoll,
-					jumpHeld: jumpInput.jumpHeld && ! grabbedBone && ! state.fullRagdoll,
-					jumpReleased: jumpInput.jumpReleased,
-					desiredDirection: move,
-				} );
+				const jumpBlocked = Boolean( grabbedBone ) || state.fullRagdoll;
+				let platformerJumpView;
+				if ( jumpBlocked ) {
+
+					// A mouse-held or deliberately passive body has no platformer jump
+					// authority. The input edge was consumed above; resetting on every
+					// blocked fixed step also cancels a preload accepted just before the
+					// grab/toggle, so neither release nor coyote expiry can launch it later.
+					platformerJumpInput.jumpPressed = false;
+					platformerJumpInput.jumpHeld = false;
+					platformerJumpInput.jumpReleased = false;
+					platformerJumpView = platformerJump.reset( false, ragdoll.supportNormal );
+
+				} else {
+
+					platformerJumpInput.supported = supported;
+					platformerJumpInput.supportNormal = ragdoll.supportNormal;
+					platformerJumpInput.bodyForward = ragdoll.forward;
+					platformerJumpInput.mass = rootBody.mass();
+					platformerJumpInput.jumpPressed = jumpInput.jumpPressed;
+					platformerJumpInput.jumpHeld = jumpInput.jumpHeld;
+					platformerJumpInput.jumpReleased = jumpInput.jumpReleased;
+					platformerJumpInput.sprint = input.sprint;
+					platformerJumpView = platformerJump.update(
+						fixedDt, platformerJumpInput,
+					);
+
+				}
 				state.jumpPhase = platformerJumpView.phase;
+				ragdoll.setJumpPose( platformerJumpView );
 				ragdoll.setLandingCompression( platformerJumpView.landingCompression );
-				ragdoll.setCommand( {
-					move,
-					facing: state.autonomous ? move : platformerControlView.facing,
-					sourceNormal: platformerControlView.supportNormal,
-					sprint: input.sprint,
-					release: platformerJumpView.releaseSupport,
-					fullRagdoll: state.fullRagdoll,
-				} );
+				const steeringCommand = state.autonomous ? 0 : platformerControlView.steering;
+				ragdollCommand.facing = state.autonomous ? move : platformerControlView.facing;
+				ragdollCommand.turning = steeringCommand;
+				ragdollCommand.sourceNormal = platformerControlView.supportNormal;
+				ragdollCommand.sprint = input.sprint;
+				ragdollCommand.release = platformerJumpView.releaseSupport;
+				ragdollCommand.fullRagdoll = state.fullRagdoll;
+				ragdoll.setCommand( ragdollCommand );
 				ragdoll.beforeStep( fixedDt );
 				if ( ! grabbedBone && ! state.fullRagdoll ) {
 
@@ -348,6 +456,7 @@ async function main() {
 		window.removeEventListener( 'resize', onResize );
 		input.dispose();
 		grab.dispose();
+		destinationPicker.dispose();
 		cameraRig.dispose();
 		ui.dispose();
 		rigDebugView.dispose();
@@ -373,6 +482,8 @@ async function main() {
 		platformerJump,
 		rigDebugView,
 		grab,
+		destinationPicker,
+		surfaceRoutePlanner,
 		state,
 		reset,
 		get grabbedBone() {

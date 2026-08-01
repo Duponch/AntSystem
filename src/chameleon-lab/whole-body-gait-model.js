@@ -104,6 +104,7 @@ export function writeWholeBodyTarget( {
 	limbLift = 0.24,
 	jointFlex = 0.46,
 	bodyMotion = 1,
+	idleWeight = 1,
 	attentionTime = 0,
 	attentionSeed = 0.73,
 }, target ) {
@@ -134,7 +135,10 @@ export function writeWholeBodyTarget( {
 	const lift = clamp( finiteOr( limbLift, 0.24 ), 0, 0.75 ) * moving;
 	const flex = clamp( finiteOr( jointFlex, 0.46 ), 0, 1.15 ) * moving;
 	const body = clamp( finiteOr( bodyMotion, 1 ), 0, 2 ) * moving;
-	const idle = 1 - moving;
+	// Airborne/ragdoll poses use their own muscular envelope. A distinct weight
+	// prevents speed=0 from accidentally re-enabling the terrestrial breathing
+	// and balance cycle while the animal is detached from every support.
+	const idle = ( 1 - moving ) * clamp( finiteOr( idleWeight, 1 ), 0, 1 );
 	const attention = finiteOr( attentionTime, 0 );
 	const seed = finiteOr( attentionSeed, 0.73 );
 	// Two deliberately incommensurate bands create slow observation arcs plus
@@ -154,6 +158,9 @@ export function writeWholeBodyTarget( {
 	// Breathing is regular, but balance and observation are not. Two very slow
 	// incommensurate bands add a restrained weight transfer without moving the
 	// planted contact targets or turning the idle into a looping animation clip.
+	// The pelvis amplitudes stay below a degree and a few millimetres: enough for
+	// the rump and passive tail collar to remain alive, but too small to disturb
+	// the four authoritative contact targets.
 	const idleBodyYaw = idleBodyScale * (
 		Math.sin( attention * 0.19 + seed * 4.1 ) * 0.010
 		+ Math.sin( attention * 0.47 + seed * 1.7 ) * 0.0035
@@ -161,6 +168,18 @@ export function writeWholeBodyTarget( {
 	const idleBodyRoll = idleBodyScale * (
 		Math.sin( attention * 0.23 + seed * 2.6 ) * 0.006
 		+ Math.sin( attention * 0.71 + seed * 5.2 ) * 0.002
+	);
+	const idlePelvisYaw = idleBodyScale * (
+		Math.sin( attention * 0.17 + seed * 3.2 ) * 0.0052
+		+ Math.sin( attention * 0.41 + seed * 6.1 ) * 0.0016
+	);
+	const idlePelvisRoll = idleBodyScale * (
+		Math.sin( attention * 0.21 + seed * 1.3 ) * 0.0034
+		+ Math.sin( attention * 0.59 + seed * 4.8 ) * 0.0011
+	);
+	const idleSupportShift = idleBodyScale * (
+		Math.sin( attention * 0.16 + seed * 2.9 ) * 0.0014
+		+ Math.sin( attention * 0.53 + seed * 5.4 ) * 0.00045
 	);
 
 	for ( let foot = 0; foot < 4; foot ++ ) {
@@ -186,8 +205,8 @@ export function writeWholeBodyTarget( {
 
 	// Pelvis and thorax counter-rotate, creating a visible but restrained axial
 	// wave.  The head receives the inverse movement to keep the gaze stable.
-	target[ WHOLE_BODY_POSE.PELVIS_YAW ] = -diagonal * 0.13 * body;
-	target[ WHOLE_BODY_POSE.PELVIS_ROLL ] = diagonal * 0.052 * body;
+	target[ WHOLE_BODY_POSE.PELVIS_YAW ] = -diagonal * 0.13 * body + idlePelvisYaw;
+	target[ WHOLE_BODY_POSE.PELVIS_ROLL ] = diagonal * 0.052 * body + idlePelvisRoll;
 	target[ WHOLE_BODY_POSE.PELVIS_BOB ] = strokePulse * 0.014 * body + breathing * 0.35;
 	target[ WHOLE_BODY_POSE.CHEST_YAW ] = diagonal * 0.055 * body - idleBodyYaw * 0.58;
 	target[ WHOLE_BODY_POSE.CHEST_ROLL ] = -diagonal * 0.034 * body - idleBodyRoll * 0.72;
@@ -196,7 +215,8 @@ export function writeWholeBodyTarget( {
 	target[ WHOLE_BODY_POSE.NECK_PITCH ] = strokePulse * 0.018 * body + idleNeckPitch;
 	target[ WHOLE_BODY_POSE.HEAD_YAW ] = diagonal * 0.025 * body + idleHeadYaw;
 	target[ WHOLE_BODY_POSE.HEAD_PITCH ] = strokePulse * 0.012 * body + idleHeadPitch;
-	target[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] = -diagonal * 0.012 * body;
+	target[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] = -diagonal * 0.012 * body
+		+ idleSupportShift;
 	// Individual locomotor lanes are already attenuated by `moving`, while the
 	// idle neck/head lanes are deliberately subtle.  Keeping a second 0.35
 	// multiplier here made the cervical joints nearly static in the final rig.

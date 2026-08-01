@@ -132,13 +132,28 @@ test( 'CHAMELEON-LAB-INPUT-003 a complete tap between fixed steps preserves both
 	assert.equal( state.jumpReleased, true );
 
 	const jump = new PlatformerJumpModel();
-	const view = jump.update( 1 / 120, {
+	let view = jump.update( 1 / 120, {
 		supported: true,
 		supportNormal: { x: 0, y: 1, z: 0 },
 		velocity: { x: 0, y: 0, z: 0 },
 		gravity: { x: 0, y: -9.81, z: 0 },
 		mass: 1,
 		...state,
+	} );
+	assert.equal( view.jumped, false );
+	assert.equal( view.phase, 'preload',
+		'a tap keeps both edges but still honours the short anatomical crouch' );
+	for ( let tick = 0; tick < 8 && ! view.jumped; tick ++ ) view = jump.update( 1 / 120, {
+
+		supported: true,
+		supportNormal: { x: 0, y: 1, z: 0 },
+		velocity: { x: 0, y: 0, z: 0 },
+		gravity: { x: 0, y: -9.81, z: 0 },
+		mass: 1,
+		jumpPressed: false,
+		jumpHeld: false,
+		jumpReleased: false,
+
 	} );
 	assert.equal( view.jumped, true );
 	assert.ok( view.impulse.y > 0 );
@@ -204,6 +219,69 @@ test( 'CHAMELEON-LAB-INPUT-006 editable controls never steal Space or synthesize
 		jumpReleased: false,
 	} );
 	assert.equal( input.keys.has( 'Space' ), false );
+	input.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-INPUT-007 consuming Space during disabled jump authority cannot launch after release', () => {
+
+	const { target, input } = createInput();
+	const jump = new PlatformerJumpModel();
+	const supportNormal = { x: 0, y: 1, z: 0 };
+	const step = {
+		supported: true,
+		supportNormal,
+		velocity: { x: 0, y: 0, z: 0 },
+		gravity: { x: 0, y: -9.81, z: 0 },
+		mass: 1,
+		jumpPressed: false,
+		jumpHeld: false,
+		jumpReleased: false,
+	};
+	target.emit( 'keydown', { code: 'Space' } );
+	Object.assign( step, input.consumeJumpState() );
+	let view = jump.update( 1 / 120, step );
+	assert.equal( view.charging, true, 'precondition: Space began a preload' );
+
+	// This is the fixed-step disabled-authority contract used by main: consume
+	// every queued edge, then reset instead of updating the model. Repeating it
+	// covers a held key as well as the release edge generated during the grab.
+	input.consumeJumpState( step );
+	view = jump.reset( false, supportNormal );
+	assert.equal( view.charging, false );
+	assert.equal( view.jumped, false );
+	assert.equal( view.releaseSupport, false );
+	target.emit( 'keyup', { code: 'Space' } );
+	const disabledRelease = input.consumeJumpState( step );
+	assert.equal( disabledRelease.jumpReleased, true,
+		'precondition: the release edge existed while authority was disabled' );
+	view = jump.reset( false, supportNormal );
+
+	// Re-enabling on a planted support must not replay the consumed edge or the
+	// preload that existed before the grab/ragdoll transition.
+	Object.assign( step, input.consumeJumpState() );
+	step.supported = true;
+	view = jump.update( 1 / 120, step );
+	assert.equal( view.phase, 'landing',
+		're-enabling from the disabled airborne reset may enter the normal landing envelope' );
+	assert.equal( view.charging, false );
+	assert.equal( view.jumped, false );
+	assert.equal( view.releaseSupport, false );
+	assert.equal( view.impulse.x, 0 );
+	assert.equal( view.impulse.y, 0 );
+	assert.equal( view.impulse.z, 0 );
+	for ( let tick = 0; tick < 24; tick ++ ) {
+
+		view = jump.update( 1 / 120, step );
+		assert.equal( view.charging, false );
+		assert.equal( view.jumped, false );
+		assert.equal( view.releaseSupport, false );
+		assert.equal( view.impulse.x, 0 );
+		assert.equal( view.impulse.y, 0 );
+		assert.equal( view.impulse.z, 0 );
+
+	}
+	assert.equal( view.phase, 'grounded' );
 	input.dispose();
 
 } );

@@ -24,10 +24,12 @@ La suite couvre notamment :
   `original_tail_vertices = 7206`, aucun poids de queue sur le corps, collet
   rigide `tail_01`, dynamique à partir de `tail_02` avec feather géodésique
   `0,18`, axes proximaux contenus dans le volume fermé, corps dynamique Rapier
-  unique, collider composé, quatre appuis bornés, démarche et IK résolues à
-  `120 Hz` puis interpolées, membres passifs à faible tonus avec capsules corps
-  et auto-collision segmentaire, reset, plafond de rattrapage et rejet des
-  valeurs non finies ;
+  unique, collider composé, quatre appuis bornés, pilotage arcade sans crabe,
+  vitesse cible de sprint `≥ 2,3×`, destination cliquée routée par le graphe
+  d’accès statique du décor, saut dont hauteur et portée croissent avec la
+  charge, idle corps entier, verrou statique par sommeil, repère osseux de queue
+  à torsion minimale, démarche et IK résolues à `120 Hz`, membres passifs à
+  faible tonus, reset, plafond de rattrapage et valeurs finies ;
 - `UNDERGROUND-VISUAL` : palette volumique configurable, plongée bornée au bloc, excavation visuelle indépendante, pools périodiques déterministes, suppression de la poussière, chargement unique des GLB, masque SDF propre et budgets fixes ;
 - `OBS` : intentions, arrêts attendus, détection d’immobilité, pause à vitesse nulle, distances monde, reset temporel, sélection faune bornée, menace, support, camouflage et volumes du seul individu suivi ;
 - réseau de corridors : déterminisme, routage, budget résiduel multi-arêtes, invariance au découpage temporel, continuité, profondeur, limites, croissance append-only et complexité structurelle ;
@@ -113,19 +115,31 @@ La validation WebGPU ciblée doit encore confirmer visuellement la pose et l’a
 
 Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manuelle minimale vérifie :
 
-- pilotage AZERTY/QWERTY relatif à la caméra sur sol et plan incliné ;
+- pilotage arcade AZERTY/QWERTY dans le repère anatomique : `Q`/`A` et `D`
+  tournent sans déplacement en crabe, sur sol comme sur plan incliné, et le
+  réglage de sprint impose une vitesse cible au moins `2,3×` supérieure à celle
+  de marche ;
+- clic de destination limité aux surfaces grippables : parcours physique des
+  jalons du graphe d’accès statique livré, sans coupe aérienne ni téléportation
+  sur les raccords configurés, puis reprise immédiate par une entrée clavier ;
 - adaptation progressive des quatre appuis à deux normales dans un angle sol/mur ;
 - marche sur les troncs rugueux, puis glissement attendu sur le verre ;
 - passage locomotion stabilisée ↔ **Physique libre** sans téléportation, vrille ni articulation qui s’entortille ;
 - saisie, secousse, lancer du corps unique et récupération progressive ;
 - enjambées lisibles initiées aux épaules/hanches, flexion des coudes/genoux,
-  mouvement du bassin et du thorax, regard cou/tête vivant au repos, semelles
-  complètes à plat et absence de jitter distal ;
+  idle corps entier avec transfert de poids discret, regard cou/tête vivant,
+  légère vie secondaire de la queue, semelles complètes à plat et absence de
+  jitter distal ;
+- saut chargé : hauteur et portée croissantes, accroupissement avant départ,
+  extension, repli aérien et compliance musculaire lisibles ;
 - conservation exacte des 7 206 sommets de la queue originale, sans tube de
   remplacement, avec `tail_01` seul collet rigide, liberté graduelle à partir de
   `tail_02`, feather de skin géodésique `0,18`, raccord visuel continu au bassin,
-  inertie, amortissement, contacts continus sur le décor et sommeil sans
+  inertie, amortissement, contacts continus, repère osseux à torsion minimale
+  sans accumulation de roulis, silhouette sans tressage et sommeil sans
   micro-mouvement ;
+- verrou statique des griffes par sommeil Rapier après stabilisation, puis réveil
+  immédiat sur commande, impact ou saisie ;
 - membres souples mais conservant un faible tonus pendant la saisie ou le mode
   libre, sans pénétration du torse ni entrecroisement de segments, puis
   récupération bornée de la pose sans déchirure visuelle ;
@@ -138,16 +152,56 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
 Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
-`chameleon-lab-controller`, `chameleon-lab-whole-body-gait`,
+`chameleon-lab-controller`, `chameleon-lab-navigation-route`, `chameleon-lab-input`,
+`chameleon-lab-platformer-control`, `chameleon-lab-platformer-jump`,
+`chameleon-lab-platformer-integration`, `chameleon-lab-whole-body-gait`,
 `chameleon-lab-anatomical-limb`, `chameleon-lab-passive-limbs`,
-`chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll`,
+`chameleon-lab-passive-tail`, `chameleon-lab-passive-tail-visual-rig`,
+`chameleon-lab-active-ragdoll`,
 `chameleon-lab-hybrid-controller-allocation` et
 `chameleon-physical-asset` protègent la structure, les commandes et les bornes.
-Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `020` sont l’autorité de
+`CHAMELEON-LAB-CONTROLLER-011` à `013` protègent la priorité d’une destination,
+la continuité du cap et l’unique raycast d’un clic valide avec rejet du verre.
+`CHAMELEON-LAB-NAVIGATION-001` à `005` protègent les chaînes statiques des
+perchoirs et du rocher incliné ainsi que leur stockage fixe, mais pas la
+traversée physique de bout en bout. `PLATFORMER-CONTROL-015` interdit la
+translation en crabe, `PLATFORMER-CONTROL-017` fixe le ratio de vitesse cible
+du sprint, `PLATFORMER-CONTROL-018/019` maintiennent un cap de virage franc
+pendant un appui continu comme après une impulsion brève, jusqu’à l’alignement
+  du corps, et `PLATFORMER-CONTROL-020` borne l’avance de cette cible à `25,2°`
+  sans réduire l’autorité du virage. `CHAMELEON-LAB-INPUT-007` empêche de rejouer une pression saut
+consommée pendant une saisie ou le mode libre. `PLATFORMER-JUMP-001` à `021`
+couvrent l’impulsion, la croissance monotone de la hauteur et de la portée,
+coyote/buffer, la séparation d’un plafond, la précharge minimale visible, la
+conservation d’un saut accepté et l’amorti fondé sur la descente maximale.
+`CHAMELEON-LAB-PLATFORMER-INTEGRATION-007` et `008` protègent le clic
+événementiel, la priorité du clavier et la réutilisation des enregistrements de
+commande ;
+`CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` annule atomiquement l’autorité du saut
+pendant une saisie ou en mode libre. `CHAMELEON-LAB-GAIT-005` protège l’idle
+corps entier sans déplacer les pieds et `CHAMELEON-LAB-GAIT-009` supprime cette
+enveloppe terrestre lorsque le corps est détaché.
+
+Les identifiants `CHAMELEON-LAB-RAGDOLL-001` à `028` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
 corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
-endormable, récupération d’impact et valeurs finies. Les preuves spécialisées
-des membres verrouillent le faible tonus configurable, les capsules du corps,
+endormable, récupération d’impact et valeurs finies.
+`CHAMELEON-LAB-RAGDOLL-021` couvre le verrou statique endormi et son réveil sur
+intention ; le réveil par impact ou saisie d’un verrou déjà endormi reste dans la
+campagne runtime ci-dessus. `CHAMELEON-LAB-RAGDOLL-022` couvre la pose du saut
+chargé, `CHAMELEON-LAB-RAGDOLL-023` le transfert de griffes et la montée d’un
+obstacle simple, `CHAMELEON-LAB-RAGDOLL-024` l’arrêt des canaux de marche et
+d’idle terrestre après libération des appuis, `CHAMELEON-LAB-RAGDOLL-025` la
+conservation physique de l’amplitude d’une commande inférieure à un, et
+`CHAMELEON-LAB-RAGDOLL-026` un virage physique ample qui converge sans crabe ni
+toupie, `CHAMELEON-LAB-RAGDOLL-027` sa réponse mesurée à `0,10`, `0,25` et
+`0,50 s`, le quasi demi-tour physique à une demi-seconde et la dérive latérale
+bornée sans perte d’appui, ainsi qu’un dépassement après relâchement inférieur à
+`12°`. `CHAMELEON-LAB-RAGDOLL-028` impose les mêmes garanties sur une pente de
+`18°`, puis `CHAMELEON-LAB-RAGDOLL-029` couvre `avant + virage` en marche et
+sprint, sur plat et pente, avec un ratio latéral inférieur à `0,30`. Les preuves
+spécialisées des membres verrouillent le faible tonus configurable, les capsules
+du corps,
 l’auto-collision segmentaire et une seule projection de scène par nœud libre et
 par pas, indépendamment du nombre d’itérations XPBD. `RAGDOLL-020` verrouille
 l’amplitude de la brasse avant, la continuité de vitesse et d’accélération
@@ -157,11 +211,16 @@ fixe de 120 Hz. Les preuves d’asset verrouillent les contrats `3.6.0`/`2.2.0`,
 mesh source exact, `original_tail_vertices = 7206`, l’absence de poids `tail_*`
 sur le corps, le collet cutané `tail_01`, la racine physique `tail_02`, le feather
 géodésique `0,18`, l’application directe de la courbe collisionnée et les axes de
-membres contenus dans le volume fermé. `PASSIVE-TAIL-021/022` empêchent qu’un
+membres contenus dans le volume fermé. `CHAMELEON-LAB-TAIL-VISUAL-001` à `003`
+verrouillent le transport parallèle sans accumulation de roulis, les repères
+finis et le scratch fixe du rig visuel ; la silhouette de peau n’est pas un
+oracle pixel. `CHAMELEON-LAB-PASSIVE-TAIL-021` et
+`CHAMELEON-LAB-PASSIVE-TAIL-022` empêchent qu’un
 plan de contact périmé freine la queue hors d’un support fini et qu’une correction
 de milieu de segment laisse une extrémité dans un collider voisin. Les transitions
-multi-surfaces complexes, la saisie visuelle, la silhouette cutanée de la queue
-et la sensation du pilotage exigent encore l’inspection runtime.
+multi-surfaces complexes et les destinations cliquées de bout en bout, la saisie
+visuelle, la silhouette cutanée de la queue et la sensation du pilotage exigent
+encore l’inspection runtime.
 
 ## Garde documentaire
 

@@ -124,7 +124,7 @@ test( 'CHAMELEON-LAB-GAIT-004 damping is allocation-free, finite and relaxes at 
 
 } );
 
-test( 'CHAMELEON-LAB-GAIT-005 idle neck explores smoothly while the body only breathes', () => {
+test( 'CHAMELEON-LAB-GAIT-005 idle observation includes subtle whole-body weight transfer', () => {
 
 	const first = new Float32Array( WHOLE_BODY_POSE_SIZE );
 	const later = new Float32Array( WHOLE_BODY_POSE_SIZE );
@@ -145,6 +145,22 @@ test( 'CHAMELEON-LAB-GAIT-005 idle neck explores smoothly while the body only br
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.NECK_YAW ] ) < 0.15 );
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.HEAD_YAW ] ) < 0.06 );
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.CHEST_PITCH ] ) < 0.005 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.PELVIS_YAW ] ) > 0.001 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.PELVIS_YAW ] ) < 0.007 );
+	assert.ok( Math.abs(
+		later[ WHOLE_BODY_POSE.PELVIS_YAW ] - first[ WHOLE_BODY_POSE.PELVIS_YAW ],
+	) > 0.002 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.PELVIS_ROLL ] ) > 0.0005 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.PELVIS_ROLL ] ) < 0.005 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] ) > 0.0001 );
+	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] ) < 0.002 );
+	for ( let foot = 0; foot < 4; foot ++ ) {
+
+		assert.equal( Math.abs( later[ WHOLE_BODY_POSE.STRIDE_0 + foot ] ), 0 );
+		assert.equal( Math.abs( later[ WHOLE_BODY_POSE.LIFT_0 + foot ] ), 0 );
+		assert.equal( Math.abs( later[ WHOLE_BODY_POSE.FLEX_0 + foot ] ), 0 );
+
+	}
 	assert.equal( later[ WHOLE_BODY_POSE.MOTION_WEIGHT ], 1 );
 	assert.deepEqual( later, repeated, 'idle attention must remain deterministic' );
 
@@ -234,5 +250,23 @@ test( 'CHAMELEON-LAB-GAIT-008 exact damped response is smooth and fixed-time inv
 		) < 2e-6, `dt partition drift in lane ${ index }` );
 	assert.ok( maximumAccelerationDelta < 0.07,
 		`damped pose contains a visible impulse (${ maximumAccelerationDelta })` );
+
+} );
+
+test( 'CHAMELEON-LAB-GAIT-009 detached bodies suppress the terrestrial idle envelope', () => {
+
+	const target = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	writeWholeBodyTarget( {
+		gaitView: gaitView( -1, 0 ),
+		speed: 0,
+		idleWeight: 0,
+		attentionTime: 9.75,
+		attentionSeed: 0.41,
+	}, target );
+	for ( let index = WHOLE_BODY_POSE.PELVIS_YAW;
+		index <= WHOLE_BODY_POSE.SUPPORT_SHIFT; index ++ ) assert.equal(
+		target[ index ], 0, `detached whole-body lane ${ index } retained idle motion`,
+	);
+	assert.equal( target[ WHOLE_BODY_POSE.MOTION_WEIGHT ], 1 );
 
 } );

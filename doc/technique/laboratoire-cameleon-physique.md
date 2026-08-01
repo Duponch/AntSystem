@@ -67,11 +67,11 @@ Le laboratoire associe onze couches :
 8. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
    l’interpolation visuelle ;
 9. `third-person-controller.js` et `platformer-control-model.js` transforment
-   AZERTY/QWERTY en intention troisième personne tangente au support, sans
-   dépendre de l’inclinaison de la caméra ;
-10. `platformer-jump-model.js` possède la machine d’états du saut, son impulsion
-    calculée depuis la hauteur, la tolérance au bord, le buffer, la coupure au
-    relâchement et l’amorti d’atterrissage ;
+   AZERTY/QWERTY en accélérateur et direction arcade, sélectionnent au clic une
+   destination physique et transportent le cap tangent le long des supports ;
+10. `platformer-jump-model.js` possède la charge du saut, ses cibles de hauteur
+    et de portée, la tolérance au bord, le buffer et les enveloppes anatomiques
+    de décollage, vol et atterrissage ;
 11. `grab-controller.js` applique la saisie et le lancer, tandis que
     `rig-debug-view.js` peut afficher le squelette complet à travers la peau.
 
@@ -167,27 +167,83 @@ donc pas de roulis parasite sur une poutre, tandis qu’une seule griffe peut
 maintenir le repère pendant le passage d’une arête. Le nombre d’opérations reste
 strictement borné à quatre appuis par pas.
 
+Après convergence au repos sur plusieurs griffes, le contrôleur annule forces et
+couples puis laisse Rapier endormir le corps. Les ancres restent alors
+bit-identiques sous un verrou de prise statique, sans rappel PD ni jitter caché.
+Toute intention de déplacement ou de rotation libère ce verrou ; un impact
+réveille Rapier et une saisie réveille explicitement le même corps. Le
+contrôleur borné reprend au pas fixe suivant.
+
 Une prise, un saut, un manque d’appuis ou le mode **Physique libre** désactive
 ce rappel. Rapier reste alors l’unique autorité du mouvement global.
 
 ## Pilotage troisième personne et saut physique
 
-Le déplacement clavier est échantillonné dans le pas physique. Son origine est
-l’avant anatomique `-X` transformé par le quaternion courant du corps Rapier,
-jamais le lacet de la caméra. Ce vecteur est projeté sur le support puis
-transporté par rotation minimale d’une normale à la suivante (repère de Bishop).
-Cette continuité supprime la singularité de l’ancienne double projection sur un
-mur et la dérive accumulée autour d’un cylindre. Tourner ou retourner la caméra,
-saisir puis lancer le corps ne peut ni inverser ni annuler la commande :
-« avancer » reste toujours l’avant réel du caméléon, y compris pendant une
-transition sol/mur/branche.
+Le déplacement clavier est échantillonné dans le pas physique. L’axe vertical
+`Z`/`W`–`S` est un accélérateur signé ; l’axe horizontal `Q`/`A`–`D` est une
+direction arcade. Ce dernier fait pivoter l’avant anatomique autour de la normale
+du support sans produire de translation latérale : un virage sur place ne peut
+donc pas devenir un déplacement en crabe. Les deux canaux restent indépendants
+en diagonale. `Shift` porte la vitesse cible à au moins `2,3×` la marche afin que
+le sprint soit immédiatement distinct.
+
+La commande de lacet vise `1,9π rad/s` même sans accélérateur et conserve un
+léger crawl avant de `0,22` : une demi-seconde réalise ainsi un quasi demi-tour
+physique sur un arc court, pas une rotation de toupie. La cible géométrique ne
+peut toutefois précéder l’avant réel que de `0,14π` (`25,2°`) : elle ne peut plus
+prendre une demi-rotation d’avance puis continuer à tirer le corps après le
+relâchement de la touche. La translation du crawl est construite depuis l’avant
+physique déjà atteint, et non depuis cette cible future.
+
+Quand l’accélérateur et le virage sont combinés, le suivi tangent augmente de
+manière bornée avec l’intensité du lacet. Il réoriente la vitesse existante dans
+le repère réellement atteint par le corps, sans ajouter de force centripète
+permanente ni de stockage au pas fixe. Le ratio de vitesse latérale reste ainsi
+inférieur à `0,30` en marche et en sprint, sur sol horizontal comme sur une
+pente de `18°`.
+
+Le moteur d’attitude est scindé en deux canaux. Le premier redresse le ventre
+vers le support sans composante autour de sa normale ; le second applique le
+lacet autour de cette normale avec anticipation de la vitesse commandée. Leur
+budget de couple n’est donc plus partagé : une correction de roulis ou de
+tangage sur un mur, un tronc ou un rocher ne rend pas le virage plus lourd. Le
+relâchement augmente uniquement l’amortissement du lacet et freine la vitesse
+tangentielle résiduelle : après un appui long, le dépassement angulaire reste
+inférieur à `12°`. L’inertie
+principale est mise en cache à la création et les vecteurs du solveur sont
+réutilisés au pas fixe : cette réactivité n’ajoute aucune allocation au chemin
+chaud.
+
+L’origine de la translation est l’avant anatomique `-X` transformé par le
+quaternion courant du corps Rapier, jamais le lacet de la caméra. Ce vecteur est
+projeté sur le support puis transporté par rotation minimale d’une normale à la
+suivante (repère de Bishop). Cette continuité supprime la singularité de
+l’ancienne double projection sur un mur et la dérive accumulée autour d’un
+cylindre. Tourner la caméra, saisir puis lancer le corps ne peut ni inverser ni
+annuler la commande : « avancer » reste toujours l’avant réel du caméléon.
 La normale qui a servi à construire la commande accompagne celle-ci jusqu’au
 contrôleur physique. Si les contacts découvrent une nouvelle normale pendant le
 même sous-pas, l’intention est transportée vers ce nouveau plan au lieu d’être
 simplement reprojetée : une couture abrupte ne peut donc pas créer une impulsion
 latérale d’une image.
 Les changements d’orientation et d’accélération sont bornés et tous les objets
-de sortie sont réutilisés.
+de sortie sont réutilisés. L’amplitude de la commande est conservée jusqu’au
+corps physique : une intention inférieure à un produit une progression mesurée
+plus lente au lieu d’être renormalisée à pleine vitesse.
+
+Un clic gauche terminé sans glissement du pointeur lance une unique requête
+Rapier depuis la caméra. Seul un collider `clawEligible` peut devenir
+destination. Le décor fournit un petit graphe d’accès statique : chaque collider
+connu possède une chaîne bornée de jalons allant du réseau de sol vers sa zone
+d’accès. Le planificateur inverse la chaîne source, ajoute la chaîne cible puis
+le point cliqué ; l’explorateur copie ce plan dans des tableaux fixes et
+transporte son cap entre leurs normales. Les perchoirs diagonal et horizontal et
+le rocher incliné possèdent des oracles automatiques dédiés. Ce mécanisme n’est
+ni un calcul général de connexité ni une preuve que le corps franchit tout le
+décor : l’absence de raccourci aérien et l’arrivée physique sur les parcours
+complexes restent à valider dans WebGPU. Une entrée clavier annule immédiatement
+cette destination et reprend la priorité. Une saisie du modèle reste distincte,
+car elle capture le pointeur avant que le clic de décor soit validé.
 
 L’exploration autonome conserve elle aussi un cap tangent persistant. Quand la
 normale passe d’un mur au dessus puis à la face opposée, ce cap suit la rotation
@@ -196,21 +252,38 @@ caméléon peut ainsi franchir une arête puis redescendre ; les changements
 aléatoires, le watchdog d’immobilité et le rappel des limites tournent tous dans
 le plan local du support, sans allocation dans la boucle chaude.
 
-`Espace` ne déclenche plus une impulsion constante arbitraire. La vitesse de
-décollage est dérivée de la hauteur demandée et de la gravité courante. La
-normale du support sépare d’abord le corps du sol, du mur ou du cylindre, tandis
-qu’une composante monde verticale conserve un saut lisible. Maintenir la touche
-réduit la gravité de montée ; la relâcher tôt applique une coupure progressive.
-La descente, le contrôle aérien, la tolérance au bord et la mémorisation d’une
-pression juste avant l’atterrissage ont des bornes indépendantes.
+`Espace` démarre une précharge tant qu’un support ou la tolérance au bord reste
+valide. Maintenir la touche augmente continûment deux cibles : hauteur
+balistique et vitesse vers l’avant anatomique. Le relâchement, ou l’atteinte de
+la charge maximale, déclenche le bond ; le sprint amplifie la portée sans changer
+la hauteur chargée. La vitesse verticale reste dérivée de la hauteur demandée et
+de la gravité courante. La normale du support sépare d’abord le corps du sol, du
+mur, du cylindre ou même d’un plafond, tandis qu’une composante monde verticale
+conserve un saut lisible hors du cas inversé. Même une frappe très brève conserve
+une précharge visible ; une pression acceptée pendant la tolérance au bord ne
+peut pas disparaître avant son unique départ. Descente, contrôle aérien,
+tolérance au bord et mémorisation d’une pression avant l’atterrissage ont des
+bornes indépendantes. Pendant une saisie ou en mode **Physique libre**, les
+arêtes `Espace` restent consommées mais l’autorité du saut est désactivée et son
+modèle réinitialisé ; la reprise ne peut donc pas rejouer une ancienne précharge.
+
+La même charge publie une pose anatomique : accroupissement progressif avec
+griffes plantées, extension au décollage, inclinaison avant, repli des membres en
+l’air et compliance musculaire accrue. Ces enveloppes modulent le rig et l’IK
+bornée sans ajouter de corps physique ni déplacer la racine. L’atterrissage
+conserve son amorti bref du bassin, calculé depuis la descente la plus rapide
+observée pendant le vol. Après libération des appuis, les canaux de pas
+`STRIDE`, `LIFT` et `FLEX` restent nuls jusqu’à la reprise d’un support.
 
 La transition de prise est explicite. Au décollage, les propriétaires des
 quatre anciens contacts sont supprimés : ils ne peuvent pas réapparaître dans
-le vide. Après l’impact, la paire de collision réelle ou des semelles assez
-proches amorcent un nouveau polygone de support. Une composante latérale rapide
-oriente la recherche dans le sens opposé à la vitesse, ce qui permet à un saut
-ou un lancer de reprendre un mur ou un cylindre sans reprendre par erreur le
-sol précédent. L’atterrissage publie enfin une enveloppe d’amorti visuelle qui
+le vide. Seul un manifold Rapier réel du torse ou de la tête peut d’abord choisir
+le collider propriétaire. Les semelles assez proches de ce collider déjà acquis
+amorcent ensuite le nouveau polygone de support ; leur simple proximité ne peut
+jamais capturer une surface distante. Une composante latérale rapide oriente la
+sélection du manifold dans le sens opposé à la vitesse, ce qui permet à un saut
+ou un lancer de reprendre un mur ou un cylindre sans reprendre par erreur le sol
+précédent. L’atterrissage publie enfin une enveloppe d’amorti visuelle qui
 comprime brièvement le bassin sans déplacer le corps physique.
 
 ## Quatre appuis et IK bornée
@@ -277,8 +350,11 @@ avant/haut/côté du corps. Il répartit environ 62 % du mouvement sur le cou et
 reste sur le crâne, avec limites et vitesses distinctes. Le laboratoire expose
 `setLookTarget()` et `clearLookTarget()` comme un `LookAt` monde ; la pose est
 résolue au pas fixe avant la publication du buffer de rig. Au repos, respiration
-du thorax, transfert de poids très faible et observations tête/cou forment l’idle.
-Une marche réduit l’amplitude d’observation sans figer la tête.
+du thorax, lacet/roulis très faibles du bassin, déplacement millimétrique de la
+croupe et observations tête/cou forment un idle corps entier. Les quatre cibles
+de pieds restent inchangées. Le collet cinématique transmet seulement une légère
+vie secondaire à la queue ; il ne s’agit pas d’un battement volontaire. Une
+marche réduit l’amplitude d’observation sans figer la tête.
 
 Le même modèle est utilisé dans la simulation principale. Une proie devient la
 cible du cou et du crâne pendant le suivi et l’attaque ; la matrice de la bouche
@@ -305,6 +381,15 @@ visuelle ne peut donc plus replacer la peau sous une surface après la résoluti
 des collisions. Les os sont publiés parent vers enfant en un parcours linéaire,
 puis la hiérarchie reçoit une unique propagation finale : le coût ne devient pas
 quadratique avec le nombre d’os de la queue.
+
+L’orientation de chaque os utilise un repère à torsion minimale reconstruit depuis
+la pose de repos. Une référence transverse est transportée par le plus court arc
+le long des tangentes successives, puis le roulis original de chaque anneau est
+réappliqué. Le report osseux conserve ainsi la spirale de l’asset sans intégrer
+de rotation longitudinale d’une image à l’autre : son repère ne peut pas
+accumuler une tresse au repos ou après une courbure prolongée. Le calcul réutilise
+un scratch fixe ; l’absence d’artefact sur la silhouette de peau reste une preuve
+visuelle runtime.
 
 Sept itérations résolvent les longueurs et la flexion à 120 Hz, puis une passe
 de collision bornée projette la courbe finale.
@@ -334,7 +419,8 @@ déplacement et de vitesse.
 Pendant ce sommeil, les buffers sont conservés bit pour bit et les contraintes
 ainsi que les collisions sont court-circuitées : une queue immobile ne produit
 plus aucun micro-mouvement. Une impulsion, un déplacement du bassin ou une
-modification du cône racine la réveille immédiatement.
+modification du cône racine la réveille immédiatement ; l’idle discret de la
+croupe peut donc lui redonner un mouvement secondaire très léger.
 
 Cette queue passive répond à une direction artistique précise. Une vraie queue
 de caméléon est musculaire et préhensile ; le laboratoire ne prétend pas
@@ -418,7 +504,8 @@ Le décor est volontairement synthétique et reproductible :
 - sol et murs rugueux ;
 - mur en verre lisse non préhensile ;
 - plan rocheux incliné et tablette ;
-- troncs horizontal, diagonal et vertical ;
+- troncs horizontal, diagonal et vertical, avec des raccords physiques et des
+  chaînes d’accès statiques configurées pour le décor livré ;
 - perchoir bas et rochers.
 
 Ces primitives couvrent les transitions sol/mur, les supports étroits, les
@@ -463,26 +550,55 @@ Les preuves automatiques actuelles sont :
 - `test/chameleon-lab-physics-world.test.js` : initialisation, pas fixe,
   invariance 60/240 Hz, plafond de rattrapage, interpolation, reset et rejet des
   valeurs non finies ;
-- `test/chameleon-lab-controller.test.js` : mappings AZERTY/QWERTY, exploration
-  autonome géodésique et allocation-free, limites monde et détection
-  d’immobilité ;
-- `test/chameleon-lab-input.test.js`,
-  `test/chameleon-lab-platformer-control.test.js` et
-  `test/chameleon-lab-platformer-jump.test.js` protègent les transitions de
-  touche, le pilotage tangentiel, l’accélération bornée, les phases du saut,
-  coyote/buffer, hauteur variable, atterrissage et stabilité des allocations ;
+- `test/chameleon-lab-controller.test.js`, de
+  `CHAMELEON-LAB-CONTROLLER-001` à `013`, protège les mappings AZERTY/QWERTY,
+  l’exploration autonome géodésique et allocation-free, les limites monde et la
+  détection d’immobilité. `CHAMELEON-LAB-CONTROLLER-011` à
+  `CHAMELEON-LAB-CONTROLLER-013` couvrent en particulier la priorité de la
+  destination, la continuité de son cap et l’unique raycast d’un clic valide
+  avec rejet du verre ;
+- `test/chameleon-lab-navigation-route.test.js`, de
+  `CHAMELEON-LAB-NAVIGATION-001` à `005`, protège les chaînes d’accès statiques
+  des perchoirs diagonal et horizontal, les trois portails du rocher incliné
+  dans les deux sens et la réutilisation du stockage de route. Il ne simule pas
+  la traversée physique complète déclenchée par un clic ;
+- `test/chameleon-lab-input.test.js`, de `CHAMELEON-LAB-INPUT-001` à `007`,
+  protège les transitions de touche ; `CHAMELEON-LAB-INPUT-007` interdit de
+  rejouer un saut consommé pendant une saisie ou le mode libre ;
+- `test/chameleon-lab-platformer-control.test.js`, de
+  `PLATFORMER-CONTROL-001` à `020`, protège la direction arcade,
+  l’accélération bornée et la stabilité des allocations ;
+  `PLATFORMER-CONTROL-015` interdit la translation en crabe,
+  `PLATFORMER-CONTROL-017` fixe une vitesse cible de sprint au moins `2,3×`
+  supérieure à celle de marche, `PLATFORMER-CONTROL-018/019` conservent la
+  cible de virage jusqu’à ce que le corps physique l’ait réellement rejointe,
+  et `PLATFORMER-CONTROL-020` borne l’avance de cible à `25,2°` tout en conservant
+  l’autorité de la commande ;
+- `test/chameleon-lab-platformer-jump.test.js`, de `PLATFORMER-JUMP-001` à
+  `021`, protège la croissance monotone de la hauteur et de la portée avec la
+  charge, coyote/buffer, les enveloppes de pose et la stabilité des allocations.
+  `PLATFORMER-JUMP-018` à `PLATFORMER-JUMP-021` couvrent la séparation d’un
+  plafond, la précharge visible d’une frappe brève, la conservation d’un saut
+  coyote accepté et l’amorti fondé sur la descente aérienne maximale ;
 - `test/chameleon-head-look-model.test.js` protège les fixations idle
   déterministes, les limites cou/crâne, la priorité d’une cible, la continuité,
   l’invariance temporelle et l’identité des buffers ;
 - `test/chameleon-lab-rig-debug-view.test.js` protège le buffer unique, le coût
   nul lorsqu’il est masqué et la couverture des chaînes du cou, des quatre
   membres, des doigts et de la queue ;
-- `test/chameleon-lab-platformer-integration.test.js` verrouille l’ordre causal
-  des forces : le contrôleur hybride remet ses forces à zéro avant que le saut
-  et le contrôle aérien n’appliquent les leurs ;
-- `test/chameleon-lab-whole-body-gait.test.js` protège les couples diagonaux,
-  les excursions du bassin/thorax/tête, le lissage apériodique et l’absence
-  d’allocation dans le modèle de pose ;
+- `test/chameleon-lab-platformer-integration.test.js`, de
+  `CHAMELEON-LAB-PLATFORMER-INTEGRATION-001` à `009`, verrouille l’ordre causal
+  des forces ; `CHAMELEON-LAB-PLATFORMER-INTEGRATION-007/008` couvrent le clic
+  événementiel, la priorité immédiate du pilotage manuel et les enregistrements
+  de commande scellés et réutilisés ;
+  `CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` impose l’annulation atomique de
+  l’autorité du saut pendant une saisie ou en mode libre ;
+- `test/chameleon-lab-whole-body-gait.test.js`, de `CHAMELEON-LAB-GAIT-001` à
+  `009`, protège les couples diagonaux, les excursions du bassin/thorax/tête, le
+  lissage apériodique et l’absence d’allocation ; `CHAMELEON-LAB-GAIT-005`
+  couvre précisément l’idle corps entier sans déplacement des pieds et
+  `CHAMELEON-LAB-GAIT-009` supprime cette enveloppe terrestre lorsque le corps
+  est détaché ;
 - `test/chameleon-lab-passive-tail.test.js` protège les treize nœuds fixes, le
   collet sacré à un segment, les ancres explicites, le gradient de compliance,
   les longueurs, la gravité, l’inertie, l’amortissement, les projections de
@@ -491,13 +607,16 @@ Les preuves automatiques actuelles sont :
   vitesse Verlet cachée au sol. Il interdit aussi la friction fantôme après la
   sortie coplanaire d’un support fini et la pénétration d’un collider adjacent
   créée par une correction de milieu de segment ;
+- `test/chameleon-lab-passive-tail-visual-rig.test.js`, de
+  `CHAMELEON-LAB-TAIL-VISUAL-001` à `003`, protège le repère à torsion minimale,
+  le roulis de repos, l’orthonormalité finie et le scratch fixe du report visuel ;
 - `test/chameleon-lab-anatomical-limb.test.js` protège longueurs exactes,
   ceinture mobile, flexions, paumes complètes, continuité du pôle et suspension ;
 - `test/chameleon-lab-passive-limbs.test.js` protège le faible tonus
   configurable, les ligaments, les capsules corps, l’auto-collision des
   segments, l’unique projection externe par nœud et par pas, et la récupération ;
-- `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
-  `CHAMELEON-LAB-RAGDOLL-001` à `020` protègent le corps Rapier unique, les
+- `test/chameleon-lab-active-ragdoll.test.js` : les identifiants
+  `CHAMELEON-LAB-RAGDOLL-001` à `028` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
@@ -505,10 +624,26 @@ Les preuves automatiques actuelles sont :
   et la reprise d’un support réel après impact, l’absence de capture à distance,
   le redressement ventral et le verrouillage d’un propriétaire dans un coin,
   ainsi que la flexion au repos, le repère anatomique du modèle et le mouvement
-  doux du cou et de la tête. `RAGDOLL-020` mesure en plus l’amplitude de la
-  brasse avant, borne les variations de vitesse angulaire, interdit tout
-  avancement pendant une synchronisation de rendu seule et compare les poses à
-  60/240 Hz ;
+  doux du cou et de la tête. `CHAMELEON-LAB-RAGDOLL-020` mesure en plus
+  l’amplitude de la brasse avant, borne les variations de vitesse angulaire,
+  interdit tout avancement pendant une synchronisation de rendu seule et compare
+  les poses à 60/240 Hz. `CHAMELEON-LAB-RAGDOLL-021` verrouille le sommeil
+  statique et son réveil sur intention ; le réveil d’un corps déjà endormi par
+  impact ou saisie reste un contrôle runtime. `CHAMELEON-LAB-RAGDOLL-022` relie
+  la charge à l’accroupissement, l’extension et la compliance de la pose aérienne ;
+  `CHAMELEON-LAB-RAGDOLL-023` prouve le transfert d’au moins deux griffes du sol
+  vers un obstacle simple et sa montée ; `CHAMELEON-LAB-RAGDOLL-024` interdit
+  aux canaux de marche et d’idle terrestre de continuer après la libération des
+  appuis ; `CHAMELEON-LAB-RAGDOLL-025` préserve dans le mouvement physique
+  l’amplitude d’une commande inférieure à un ; `CHAMELEON-LAB-RAGDOLL-026`
+  valide un arc de virage physique décisif, court et convergent ;
+  `CHAMELEON-LAB-RAGDOLL-027` mesure la réponse à `0,10`, `0,25` et `0,50 s`,
+  exige le quasi demi-tour physique à une demi-seconde et borne le glissement
+  latéral tout en conservant au moins deux appuis ;
+  `CHAMELEON-LAB-RAGDOLL-028` impose les mêmes propriétés sur une pente de `18°` ;
+  `CHAMELEON-LAB-RAGDOLL-029` combine avance et virage, en marche et en sprint,
+  sur sol et pente, avec au moins deux appuis et un ratio latéral inférieur à
+  `0,30` ;
 - `test/chameleon-physical-asset.test.js` protège les contrats de mesh/rig
   `3.6.0` et d’anatomie `2.2.0`, le mesh source exact, le skin, les 7 206 sommets
   originaux, l’absence de poids `tail_*` sur le corps, le collet `tail_01`, la
@@ -516,9 +651,10 @@ Les preuves automatiques actuelles sont :
   collision exportés et les axes de membres contenus dans le volume fermé.
 
 Le build WebGPU protège l’assemblage des modules. Une inspection dans un
-navigateur WebGPU reste indispensable pour les transitions multi-surfaces, la
-caméra, la saisie, le lancer, les ombres, la silhouette de la queue et le coût
-p95 réel.
+navigateur WebGPU reste indispensable pour l’exécution de bout en bout des
+destinations cliquées, les transitions multi-surfaces complexes du décor, le
+réveil sur impact ou saisie d’un verrou déjà endormi, la caméra, le lancer, les
+ombres, la silhouette de la queue et le coût p95 réel.
 
 Toute modification du laboratoire qui touche une commande, un appui, une
 limite IK, une borne temporelle, une ressource ou un budget doit mettre à jour

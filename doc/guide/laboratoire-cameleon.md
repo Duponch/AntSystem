@@ -39,10 +39,17 @@ sans interface.
 
 ## Commandes
 
-- `ZQSD`, `WASD` ou les flèches : avancer, reculer ou tourner dans le repère
-  propre du caméléon ;
-- `Shift` : accélérer ;
-- `Espace` : sauter ; maintenir donne un saut haut, relâcher tôt un saut court ;
+- `Z`/`W` ou flèche haut : avancer ; `S` ou flèche bas : reculer ;
+- `Q`/`A`, `D` ou les flèches gauche/droite : tourner. Ces commandes arcade ne
+  déplacent jamais le caméléon en crabe : le corps répond immédiatement et un
+  appui d’environ une demi-seconde réalise déjà un quasi demi-tour physique sur
+  un petit arc stable. En avançant simultanément, il décrit une courbe nette
+  dans le sens demandé, en marche comme en sprint, sans dérapage latéral ;
+- `Shift` : sprinter avec une vitesse cible au moins `2,3×` supérieure à celle
+  de la marche ;
+- `Espace` : charger le saut en s’accroupissant, puis relâcher pour bondir. La
+  charge augmente à la fois la hauteur et la portée ;
+- clic gauche bref sur une surface grippable : choisir une destination ;
 - clic droit maintenu : tourner la caméra ;
 - molette : rapprocher ou éloigner la caméra ;
 - clic gauche maintenu sur le caméléon : saisir son corps et le secouer ;
@@ -53,17 +60,30 @@ sans interface.
 - `R` : remettre l’animal dans sa pose de départ.
 
 Le déplacement suit le support courant et l’avant réel du corps, indépendamment
-de l’angle de la caméra. Sur un mur ou un plan incliné, avancer ne signifie donc
-pas revenir horizontalement vers le sol. Le cap est transporté continûment le
-long des courbes : une branche cylindrique, un lancer ou un raccord sol/mur ne
-peut plus transformer « avancer » en dérive latérale. Même si les appuis
-découvrent le mur pendant le sous-pas courant, la commande déjà émise est
-transportée vers ce nouveau support au lieu d’être rabattue de côté.
+de l’angle de la caméra. `Q`/`A` et `D` font pivoter cet avant avec un très léger
+pas vers l’avant pour garder un geste vivant, jamais vers le côté ; les commandes
+avant/arrière assurent la translation principale. Sur un mur ou un plan
+incliné, avancer ne signifie donc pas revenir horizontalement vers le sol. Le
+cap est transporté continûment le long des courbes : une branche cylindrique, un
+lancer ou un raccord sol/mur ne peut plus transformer « avancer » en dérive
+latérale.
 
-Le saut suit lui aussi le support : depuis un mur ou un cylindre, il sépare
-d’abord le corps de la surface puis le projette vers le haut. Les anciennes
-prises sont oubliées au décollage. Une surface réellement touchée pendant la
-chute peut ensuite être reprise sans téléportation.
+Un clic de destination active l’exploration dirigée. Le décor du laboratoire
+possède un petit graphe statique de jalons pour ses raccords connus :
+l’explorateur y transporte son cap selon les normales avant de viser le point
+cliqué. Ce routage ne prétend pas découvrir automatiquement une connexion entre
+deux supports arbitraires ; les traversées physiques du décor complet restent à
+observer dans WebGPU. Une commande clavier reprend immédiatement la priorité.
+Le verre lisse n’est pas une destination valide.
+
+Le saut suit lui aussi le support. La charge comprime le corps ; le décollage
+l’étend, sépare d’abord le corps de la surface puis fait croître la hauteur et la
+portée avec la charge. Les membres se replient ensuite en l’air avec une
+compliance musculaire légère, sans poursuivre un cycle de marche. Les anciennes
+prises sont oubliées au décollage ; seule une surface dont un impact Rapier a
+d’abord établi le contact peut être reprise sans capture à distance. Saisir le
+corps ou activer **Physique libre** annule une précharge en cours : relâcher
+ensuite `Espace` ne rejoue pas un ancien saut.
 
 ## Deux modes distincts
 
@@ -84,17 +104,21 @@ sont aussi vérifiés à l’intérieur du volume fermé de la peau ; le tracé 
 montre ces mêmes axes, sans inventer de raccord entre deux articulations. Le
 talon, la paume et les deux groupes de doigts forment maintenant une seule
 semelle exportée avec le modèle. Une main ou un pied doit donc reposer à plat :
-le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la tête
-choisissent au repos des directions d’observation variées, gardent brièvement
-leur fixation puis effectuent de petites corrections. Ces mouvements ne sont
-pas une boucle sinusoïdale et restent présents, plus discrets, pendant la
-marche. Ils accompagnent une respiration et une oscillation très faible du
-thorax, sans provoquer de pas ni de vibration des appuis. Quand le bassin ou le
-thorax oscillent, le repère de
-marche reste celui du corps entier et non l’axe local incliné d’un os de colonne.
+le runtime ne tire plus uniquement les orteils vers la surface. Au repos, cou,
+tête, thorax et bassin participent à un idle corps entier : respiration,
+fixations irrégulières et transfert de poids très faible restent visibles sans
+provoquer de pas ni de vibration des appuis. Ce mouvement discret de la croupe
+donne aussi un peu de vie à la queue passive. Le repère de marche reste celui du
+corps entier et non l’axe local incliné d’un os de colonne.
 La démarche corps entier et l’IK sont calculées au pas fixe de 120 Hz. Le rendu
 interpole seulement deux poses déjà résolues : changer la fréquence d’écran ou
 rendre plusieurs fois la même image ne modifie donc ni le cycle ni les os.
+
+Lorsque le caméléon est réellement immobile et posé sur plusieurs griffes, le
+corps Rapier passe en sommeil et les appuis entrent dans un verrou statique sans
+jitter. Une commande libère explicitement ce verrou ; un impact réveille Rapier
+et le début d’une saisie demande le même réveil. Ces deux interactions externes
+font aussi partie de la vérification manuelle du laboratoire.
 
 ### Physique libre
 
@@ -109,6 +133,16 @@ locomotion est réactivée. Ce mode sert à vérifier la gravité et les collisi
 Ce n’est pas un ragdoll Rapier à 33 corps : le calcul passif local reste borné.
 
 ## Exercices de validation
+
+### Pilotage, destination et saut
+
+Sur le sol puis sur un tronc, maintenez `Q`/`A` ou `D` sans avancer : le corps
+doit engager franchement son demi-tour, sans glisser de côté ni tourner comme
+une toupie. Comparez ensuite marche et sprint, puis cliquez
+sur une surface rugueuse reliée par les jalons statiques du décor : le caméléon
+doit parcourir physiquement ces raccords jusqu’à la cible, sans coupe aérienne.
+Enfin, chargez `Espace` brièvement puis à fond : le second saut doit être plus
+haut et plus long, avec accroupissement, extension et repli aérien visibles.
 
 ### Contact entre deux surfaces
 
@@ -177,15 +211,14 @@ impossible à agripper.
 ### Suspension et saut
 
 - **Suspension anatomique** dose l’assiette et l’amorti transmis au tronc ;
-- **Hauteur de saut** règle la hauteur balistique visée ;
+- **Hauteur de saut** règle le plafond balistique atteint à pleine charge ;
 - **Contrôle aérien** règle l’autorité latérale sans modifier directement la
   vitesse verticale ;
 - **Tolérance au bord** autorise encore brièvement le saut après la perte d’un
   rebord ;
 - **Mémoire du saut** conserve une pression effectuée juste avant l’atterrissage ;
 - **Gravité de chute** règle la vitesse de descente ;
-- **Frein au relâchement** détermine à quel point un relâchement précoce réduit
-  la hauteur.
+- **Frein au relâchement** borne la coupure d’une montée interrompue.
 
 ### Queue passive
 
@@ -200,10 +233,13 @@ progressivement sur 18 % de la distance géodésique : la jonction n’a donc pa
 charnière visible. Le garde de peau de la croupe reste protégé, puis les segments
 dynamiques conservent leur longueur, répondent à l’inertie et sont projetés hors
 du sol, des murs, des rochers et des troncs.
-Une friction statique empêche une queue posée de tournoyer. La queue n’est pas préhensile dans
-ce prototype. Quand elle est réellement au repos, elle passe en sommeil : sa
-pose reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un
-nouveau mouvement du corps ou une impulsion.
+Une friction statique empêche une queue posée de tournoyer. La queue n’est pas
+préhensile dans ce prototype. Quand elle est réellement au repos, elle passe en
+sommeil : sa pose reste alors parfaitement fixe, sans tremblement subpixel,
+jusqu’à un nouveau mouvement du corps ou une impulsion. Le repère de ses os
+conserve la torsion de repos par transport parallèle à rotation minimale et
+n’accumule pas de roulis longitudinal. Ce contrat porte sur le repère osseux ;
+la silhouette finale de la peau reste à contrôler visuellement dans WebGPU.
 
 ### Appuis
 
@@ -246,6 +282,10 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 ## Ce qui est normal
 
 - un pied lâche, avance puis reprend un support pendant son pas ;
+- une fois le verrou statique acquis, le corps physique et les ancres des
+  griffes restent exactement fixes tandis que l’idle du squelette anime très
+  légèrement le bassin et le thorax ; ce mouvement peut redonner une faible vie
+  secondaire à la queue ;
 - le corps amortit progressivement sa dérive ; une seule griffe peut préserver
   brièvement son orientation pendant qu’une autre franchit une arête ;
 - l’animal glisse sur le verre ;
@@ -260,7 +300,10 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 
 - une patte s’entortille, dépasse durablement ses angles anatomiques ou traverse
   le tronc, la tête ou un autre membre ;
+- `Q`/`A` ou `D` fait glisser le corps latéralement au lieu de le tourner ;
 - le corps change instantanément de position sans `R` ;
+- une destination sur le verre est acceptée ou un trajet coupe un vide entre
+  deux surfaces non connectées ;
 - un pied reste pris dans le vide ou sur le verre ;
 - le corps traverse durablement le sol, un mur, un rocher ou un tronc ;
 - la queue est remplacée par une forme tubulaire, s’allonge, se détache du

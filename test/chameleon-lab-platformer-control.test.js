@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
 	cameraRelativePlatformerDirection,
+	DEFAULT_ARCADE_TURN_LEAD,
 	parallelTransportTangent,
 	PlatformerControlModel,
 	platformerAxesFromKeys,
@@ -32,8 +33,7 @@ test( 'PLATFORMER-CONTROL-001 preserves QWERTY, AZERTY and arrow layouts', () =>
 	for ( const key of [ 'KeyA', 'KeyQ', 'ArrowLeft' ] )
 		assert.deepEqual( platformerAxesFromKeys( new Set( [ key ] ) ), { x: - 1, y: 0 } );
 	const diagonal = platformerAxesFromKeys( new Set( [ 'KeyZ', 'KeyD' ] ) );
-	close( diagonal.x, Math.SQRT1_2 );
-	close( diagonal.y, Math.SQRT1_2 );
+	assert.deepEqual( diagonal, { x: 1, y: 1 } );
 	assert.deepEqual( platformerAxesFromKeys( new Set( [ 'KeyW', 'KeyS' ] ) ), { x: 0, y: 0 } );
 
 } );
@@ -95,16 +95,20 @@ test( 'PLATFORMER-CONTROL-004 direct wall-facing input climbs instead of collaps
 
 } );
 
-test( 'PLATFORMER-CONTROL-005 facing turns at a bounded rate and does not follow an idle camera', () => {
+test( 'PLATFORMER-CONTROL-005 planted turning is bounded, stable and camera-independent', () => {
 
-	const model = new PlatformerControlModel( { turnRate: 2 } );
+	const model = new PlatformerControlModel( { turnRate: 2, turnCreep: 0,
+		stationaryTurnScale: 0.62 } );
 	model.reset( { x: 0, y: 0, z: - 1 } );
 	const first = model.update( 0.1, {
 		axes: { x: 1, y: 0 },
 		cameraForward: { x: 0, y: - 0.6, z: - 1 },
 		velocity: { x: 0, y: 0, z: 0 },
 	} );
-	close( first.turnDelta, - 0.2 );
+	close( first.turnDelta, - 0.124 );
+	vectorClose( first.direction, { x: 0, y: 0, z: 0 } );
+	assert.equal( first.steering, 1 );
+	assert.equal( first.throttle, 0 );
 	const facingAfterTurn = { ...first.facing };
 	const idle = model.update( 0.1, {
 		axes: { x: 0, y: 0 },
@@ -425,35 +429,121 @@ test( 'PLATFORMER-CONTROL-014 arbitrary physical rotations immediately replace a
 
 } );
 
-test( 'PLATFORMER-CONTROL-015 lateral and diagonal input use the body-local support basis', () => {
+test( 'PLATFORMER-CONTROL-015 steering rotates the animal and never produces crab translation', () => {
+
+	const model = new PlatformerControlModel( { turnRate: 2 } );
+	const normal = { x: 0, y: 1, z: 0 };
+	const bodyForward = { x: 0, y: 0, z: -1 };
+	const pivot = model.update( 0.1, {
+		axes: { x: 1, y: 0 },
+		bodyForward,
+		supportNormal: normal,
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	close( Math.hypot( pivot.direction.x, pivot.direction.y, pivot.direction.z ), 0.22 );
+	close( pivot.direction.x * bodyForward.z - pivot.direction.z * bodyForward.x, 0, 2e-8 );
+	assert.ok( pivot.facing.x > 0.12 && pivot.facing.z < -0.98 );
+
+	const drive = model.update( 0.1, {
+		axes: { x: 1, y: 1 },
+		bodyForward,
+		supportNormal: normal,
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	close( drive.direction.x, bodyForward.x, 2e-8 );
+	close( drive.direction.z, bodyForward.z, 2e-8 );
+	close( drive.direction.y, 0, 2e-8 );
+	assert.ok( drive.facing.x > 0.19,
+		'full diagonal steering must retain decisive turn authority' );
+	close( drive.direction.x * normal.x + drive.direction.y * normal.y
+		+ drive.direction.z * normal.z, 0, 2e-8 );
+
+} );
+
+test( 'PLATFORMER-CONTROL-018 held steering accumulates a decisive body-relative turn target', () => {
+
+	const model = new PlatformerControlModel( {
+		turnRate: Math.PI * 1.45,
+		stationaryTurnScale: 0.72,
+		turnCreep: 0.16,
+	} );
+	const bodyForward = { x: 0, y: 0, z: -1 };
+	let view;
+	for ( let step = 0; step < 30; step ++ ) view = model.update( 1 / 120, {
+		axes: { x: 1, y: 0 },
+		bodyForward,
+		supportNormal: { x: 0, y: 1, z: 0 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	} );
+	close( view.facing.x, Math.sin( DEFAULT_ARCADE_TURN_LEAD ), 2e-8 );
+	close( view.facing.z, -Math.cos( DEFAULT_ARCADE_TURN_LEAD ), 2e-8 );
+	close( view.direction.x, 0, 2e-8 );
+	assert.ok( view.direction.z < -0.15,
+		'turn crawl must remain on the physical anatomical forward axis' );
+	close( Math.hypot( view.direction.x, view.direction.y, view.direction.z ), 0.16 );
+
+} );
+
+test( 'PLATFORMER-CONTROL-019 a short steering tap remains authoritative until the body catches it', () => {
 
 	const model = new PlatformerControlModel();
-	const normal = { x: 0, y: Math.SQRT1_2, z: Math.SQRT1_2 };
-	const bodyForward = { x: -1, y: 0, z: 0 };
-	const right = { x: 0, y: Math.SQRT1_2, z: -Math.SQRT1_2 };
-	for ( const [ axes, expected ] of [
-		[ { x: 0, y: 1 }, bodyForward ],
-		[ { x: 1, y: 0 }, right ],
-		[ { x: Math.SQRT1_2, y: Math.SQRT1_2 }, {
-			x: -Math.SQRT1_2,
-			y: 0.5,
-			z: -0.5,
-		} ],
-	] ) {
+	const bodyForward = { x: 0, y: 0, z: -1 };
+	const tapped = model.update( 1 / 120, {
+		axes: { x: 1, y: 0 }, bodyForward,
+		supportNormal: { x: 0, y: 1, z: 0 }, supported: true,
+	} );
+	const intended = { ...tapped.facing };
+	const settling = model.update( 1 / 120, {
+		axes: { x: 0, y: 0 }, bodyForward,
+		supportNormal: { x: 0, y: 1, z: 0 }, supported: true,
+	} );
+	vectorClose( settling.facing, intended );
+	assert.equal( model._turnIntentActive, true );
 
-		const view = model.update( 1 / 120, {
-			axes,
-			cameraForward: { x: 0.2, y: -0.9, z: 0.7 },
-			bodyForward,
-			supportNormal: normal,
-			velocity: { x: 0, y: 0, z: 0 },
-			supported: true,
-		} );
-		vectorClose( view.direction, expected, 2e-8 );
-		close( view.direction.x * normal.x + view.direction.y * normal.y
-			+ view.direction.z * normal.z, 0, 2e-8 );
+} );
 
-	}
+test( 'PLATFORMER-CONTROL-020 target lead stays bounded while held steering remains authoritative', () => {
+
+	const model = new PlatformerControlModel();
+	const initial = { x: 0, y: 0, z: -1 };
+	model.reset( initial, { x: 0, y: 1, z: 0 } );
+	let view;
+	for ( let step = 0; step < 60; step ++ ) view = model.update( 1 / 120, {
+
+		axes: { x: 1, y: 0 },
+		bodyForward: initial,
+		supportNormal: { x: 0, y: 1, z: 0 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+
+	} );
+	const alignment = initial.x * view.facing.x
+		+ initial.y * view.facing.y + initial.z * view.facing.z;
+	close( alignment, Math.cos( DEFAULT_ARCADE_TURN_LEAD ), 2e-8 );
+	assert.ok( view.facing.x > 0.4,
+		`bounded target lost steering authority (${ view.facing.x })` );
+	assert.ok( view.magnitude >= 0.15 && view.magnitude <= 0.3,
+		`turning must retain a short planted arc rather than crab or spin (${ view.magnitude })` );
+
+} );
+
+test( 'PLATFORMER-CONTROL-017 sprint has a clearly distinct target velocity', () => {
+
+	const model = new PlatformerControlModel( { moveSpeed: 1, sprintMultiplier: 2.3 } );
+	const input = {
+		axes: { x: 0, y: 1 },
+		bodyForward: { x: 0, y: 0, z: -1 },
+		velocity: { x: 0, y: 0, z: 0 },
+		supported: true,
+	};
+	const walkSpeed = model.update( 1 / 120, input ).targetSpeed;
+	const sprintSpeed = model.update( 1 / 120, { ...input, sprint: true } ).targetSpeed;
+	close( walkSpeed, 1 );
+	close( sprintSpeed, 2.3 );
+	assert.ok( sprintSpeed >= walkSpeed * 2.25 );
 
 } );
 

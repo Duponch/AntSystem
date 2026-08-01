@@ -2,6 +2,9 @@ const DEFAULT_UP = Object.freeze( { x: 0, y: 1, z: 0 } );
 const DEFAULT_FORWARD = Object.freeze( { x: 0, y: 0, z: - 1 } );
 const EPSILON = 1e-10;
 
+export const DEFAULT_ARCADE_TURN_RATE = Math.PI * 1.9;
+export const DEFAULT_ARCADE_TURN_LEAD = Math.PI * 0.14;
+
 function finiteOr( value, fallback ) {
 
 	return Number.isFinite( value ) ? value : fallback;
@@ -93,6 +96,14 @@ function clampAxes( axes, target ) {
 
 }
 
+function clampArcadeAxes( axes, target ) {
+
+	target.x = Math.max( -1, Math.min( 1, finiteOr( axes?.x, 0 ) ) );
+	target.y = Math.max( -1, Math.min( 1, finiteOr( axes?.y, 0 ) ) );
+	return Math.max( Math.abs( target.x ), Math.abs( target.y ) );
+
+}
+
 /**
  * Physical KeyboardEvent.code mapping. It deliberately accepts both WASD and
  * ZQSD, so changing the browser/OS keyboard layout cannot alter locomotion.
@@ -103,23 +114,8 @@ export function platformerAxesFromKeys( keys, target = { x: 0, y: 0 } ) {
 	const backward = Number( keys?.has?.( 'KeyS' ) || keys?.has?.( 'ArrowDown' ) );
 	const left = Number( keys?.has?.( 'KeyA' ) || keys?.has?.( 'KeyQ' ) || keys?.has?.( 'ArrowLeft' ) );
 	const right = Number( keys?.has?.( 'KeyD' ) || keys?.has?.( 'ArrowRight' ) );
-	let x = right - left;
-	let y = forward - backward;
-	const magnitude = Math.hypot( x, y );
-	if ( magnitude > 1 ) {
-
-		x /= magnitude;
-		y /= magnitude;
-
-	}
-	target.x = x;
-	target.y = y;
-	if ( magnitude === 0 ) {
-
-		target.x = 0;
-		target.y = 0;
-
-	}
+	target.x = right - left;
+	target.y = forward - backward;
 	return target;
 
 }
@@ -285,7 +281,10 @@ export class PlatformerControlModel {
 	constructor( {
 		moveSpeed = 0.9,
 		sprintMultiplier = 1.55,
-		turnRate = Math.PI * 3.2,
+		turnRate = DEFAULT_ARCADE_TURN_RATE,
+		maximumTurnLead = DEFAULT_ARCADE_TURN_LEAD,
+		turnCreep = 0.22,
+		stationaryTurnScale = 1,
 		groundAcceleration = 11,
 		groundBraking = 15,
 		airAcceleration = 3.2,
@@ -295,6 +294,9 @@ export class PlatformerControlModel {
 		this.moveSpeed = moveSpeed;
 		this.sprintMultiplier = sprintMultiplier;
 		this.turnRate = turnRate;
+		this.maximumTurnLead = maximumTurnLead;
+		this.turnCreep = turnCreep;
+		this.stationaryTurnScale = stationaryTurnScale;
 		this.groundAcceleration = groundAcceleration;
 		this.groundBraking = groundBraking;
 		this.airAcceleration = airAcceleration;
@@ -311,6 +313,7 @@ export class PlatformerControlModel {
 		this._cameraHeading = { x: 0, y: 0, z: -1 };
 		this._cameraCandidate = { x: 0, y: 0, z: -1 };
 		this._cameraHeadingValid = false;
+		this._turnIntentActive = false;
 		this._from = { x: 0, y: 0, z: - 1 };
 		this._cross = { x: 0, y: 0, z: 0 };
 		this._surfaceRight = { x: 1, y: 0, z: 0 };
@@ -331,6 +334,8 @@ export class PlatformerControlModel {
 			magnitude: 0,
 			targetSpeed: 0,
 			turnDelta: 0,
+			throttle: 0,
+			steering: 0,
 			moving: false,
 		};
 
@@ -349,12 +354,15 @@ export class PlatformerControlModel {
 		if ( lengthSquared( this._cameraHeading ) <= EPSILON ) setVector( this._cameraHeading, DEFAULT_FORWARD );
 		else normalize( this._cameraHeading );
 		this._cameraHeadingValid = false;
+		this._turnIntentActive = false;
 		this.direction.x = this.direction.y = this.direction.z = 0;
 		this.desiredVelocity.x = this.desiredVelocity.y = this.desiredVelocity.z = 0;
 		this.acceleration.x = this.acceleration.y = this.acceleration.z = 0;
 		this.view.magnitude = 0;
 		this.view.targetSpeed = 0;
 		this.view.turnDelta = 0;
+		this.view.throttle = 0;
+		this.view.steering = 0;
 		this.view.moving = false;
 		return this.view;
 
@@ -373,7 +381,7 @@ export class PlatformerControlModel {
 	} ) {
 
 		dt = Math.max( 0, Math.min( 0.1, finiteOr( dt, 0 ) ) );
-		const magnitude = clampAxes( axes, this._axis );
+		clampArcadeAxes( axes, this._axis );
 		const normalizedWorldUp = normalize(
 			setVector( this._worldUp, worldUp, DEFAULT_UP ), DEFAULT_UP,
 		);
@@ -397,30 +405,78 @@ export class PlatformerControlModel {
 			this.surfaceForward, this.facing,
 			this._previousNormal, this._normal, this._transportScratch,
 		);
-		setVector( this._from, this.surfaceForward );
+		const steering = this._axis.x;
+		const throttle = this._axis.y;
+		// While steering, keep an accumulated anatomical target instead of rebuilding
+		// it one tiny tick ahead of the physical body. The old feedback loop produced
+		// almost no actual yaw: every frame erased the target before Rapier could catch
+		// it. Outside an intentional turn, the frame immediately rebases to the real
+		// body, so a throw or wall transition can never leave stale camera/world axes.
+		if ( this._turnIntentActive ) parallelTransportTangent(
+			this.facing, this.facing,
+			this._previousNormal, this._normal, this._transportScratch,
+		);
+		else setVector( this.facing, this.surfaceForward );
 		setVector( this._previousNormal, this._normal );
-		cross( this._surfaceRight, this.surfaceForward, this._normal );
+		cross( this._surfaceRight, this.facing, this._normal );
 		normalize( this._surfaceRight );
-		this.direction.x = this.surfaceForward.x * this._axis.y + this._surfaceRight.x * this._axis.x;
-		this.direction.y = this.surfaceForward.y * this._axis.y + this._surfaceRight.y * this._axis.x;
-		this.direction.z = this.surfaceForward.z * this._axis.y + this._surfaceRight.z * this._axis.x;
-		if ( magnitude > EPSILON ) normalize( this.direction );
-		this.direction.x *= magnitude;
-		this.direction.y *= magnitude;
-		this.direction.z *= magnitude;
-		let turnDelta = 0;
-		if ( magnitude > EPSILON ) {
+		const turnAuthority = this.stationaryTurnScale
+			+ ( 1 - this.stationaryTurnScale ) * Math.min( 1, Math.abs( throttle ) );
+		const turnDelta = - steering * this.turnRate * turnAuthority * dt;
+		if ( Math.abs( turnDelta ) > EPSILON ) {
 
-			const requestedTurn = signedAngle( this._from, this.direction, this._normal, this._cross );
-			turnDelta = Math.max( - this.turnRate * dt, Math.min( this.turnRate * dt, requestedTurn ) );
+			setVector( this._from, this.facing );
 			rotateAroundAxis( this.facing, this._from, this._normal, turnDelta );
+			// Keep only a short angular lead over the physical body. The root motor
+			// receives steering-rate feed-forward separately; allowing this target to
+			// run half a turn ahead creates a delayed catch-up after the key is released.
+			const maximumLead = Math.max( 0, Math.min(
+				Math.PI - 1e-4, finiteOr( this.maximumTurnLead, DEFAULT_ARCADE_TURN_LEAD ),
+			) );
+			const lead = signedAngle(
+				this.surfaceForward, this.facing, this._normal, this._cross,
+			);
+			if ( Math.abs( lead ) > maximumLead ) rotateAroundAxis(
+				this.facing,
+				this.surfaceForward,
+				this._normal,
+				Math.sign( lead ) * maximumLead,
+			);
+			this._turnIntentActive = true;
 
-		} else setVector( this.facing, this._from );
+		} else if ( this._turnIntentActive ) {
 
-		const targetSpeed = this.moveSpeed * ( sprint ? this.sprintMultiplier : 1 ) * magnitude;
-		this.desiredVelocity.x = this.direction.x * this.moveSpeed * ( sprint ? this.sprintMultiplier : 1 );
-		this.desiredVelocity.y = this.direction.y * this.moveSpeed * ( sprint ? this.sprintMultiplier : 1 );
-		this.desiredVelocity.z = this.direction.z * this.moveSpeed * ( sprint ? this.sprintMultiplier : 1 );
+			const bodyAlignment = this.facing.x * this.surfaceForward.x
+				+ this.facing.y * this.surfaceForward.y + this.facing.z * this.surfaceForward.z;
+			if ( bodyAlignment > 0.99995 ) {
+
+				setVector( this.facing, this.surfaceForward );
+				this._turnIntentActive = false;
+
+			}
+
+		}
+
+		// Arcade/tank steering: A/D change the anatomical heading; they never
+		// translate the animal sideways. An optional, deliberately tiny planted
+		// crawl can be enabled by a caller, but the lab defaults to a stable pivot.
+		const turnStep = Math.abs( steering ) * Math.max( 0, this.turnCreep );
+		const signedMovement = Math.abs( throttle ) > EPSILON
+			? throttle
+			: turnStep;
+		const magnitude = Math.min( 1, Math.abs( signedMovement ) );
+		// Translation always follows the anatomical axis that the rigid body has
+		// actually reached. `facing` is deliberately ahead while steering; using it
+		// here turns a nominal forward crawl into lateral sliding relative to the body.
+		this.direction.x = this.surfaceForward.x * signedMovement;
+		this.direction.y = this.surfaceForward.y * signedMovement;
+		this.direction.z = this.surfaceForward.z * signedMovement;
+
+		const sprintScale = sprint ? this.sprintMultiplier : 1;
+		const targetSpeed = this.moveSpeed * sprintScale * magnitude;
+		this.desiredVelocity.x = this.direction.x * this.moveSpeed * sprintScale;
+		this.desiredVelocity.y = this.direction.y * this.moveSpeed * sprintScale;
+		this.desiredVelocity.z = this.direction.z * this.moveSpeed * sprintScale;
 		this.acceleration.x = this.acceleration.y = this.acceleration.z = 0;
 		if ( velocity ) {
 
@@ -448,6 +504,8 @@ export class PlatformerControlModel {
 		this.view.magnitude = magnitude;
 		this.view.targetSpeed = targetSpeed;
 		this.view.turnDelta = turnDelta;
+		this.view.throttle = throttle;
+		this.view.steering = steering;
 		this.view.moving = magnitude > EPSILON;
 		return this.view;
 

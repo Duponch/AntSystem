@@ -109,6 +109,7 @@ export const CHAMELEON_LAB_DISPLAY_DEFAULTS = Object.freeze( {
 const JUMP_PHASE_LABELS = Object.freeze( {
 	grounded: 'au sol',
 	landing: 'amorti',
+	preload: 'charge',
 	takeoff: 'impulsion',
 	rising: 'montée',
 	apex: 'apogée',
@@ -593,7 +594,7 @@ export function createLabUI( {
 
 	const help = document.createElement( 'div' );
 	help.className = 'chameleon-lab-help';
-	help.innerHTML = '<kbd>Z</kbd><kbd>Q</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> déplacer · <kbd>Shift</kbd> accélérer · <kbd>Espace</kbd> sauter (maintenir : plus haut, relâcher : saut court) · clic gauche saisir, secouer et lancer · clic droit caméra · molette zoom · <kbd>C</kbd> autonome · <kbd>F</kbd> physique libre · <kbd>H</kbd> debug · <kbd>R</kbd> reset';
+	help.innerHTML = '<kbd>Z</kbd>/<kbd>W</kbd> avancer · <kbd>Q</kbd>/<kbd>A</kbd> et <kbd>D</kbd> tourner · <kbd>Shift</kbd> sprinter · <kbd>Espace</kbd> charger puis bondir · clic gauche décor : destination · clic maintenu sur le caméléon : saisir/lancer · clic droit caméra · molette zoom · <kbd>C</kbd> autonome · <kbd>F</kbd> physique libre · <kbd>H</kbd> debug · <kbd>R</kbd> reset';
 	shell.append( panel, status, help );
 	document.body.append( shell );
 
@@ -621,7 +622,8 @@ export function createLabUI( {
 		rigDebugToggle.checked = state.rigDebug;
 		fpsValue.textContent = `${ lastFps } fps`;
 		stepValue.textContent = `${ physics.stats.p95StepMs.toFixed( 2 ) } ms`;
-		contactsValue.textContent = `${ ragdoll.contactCount } / ${ ragdoll.maxContactCount ?? 4 }`;
+		contactsValue.textContent = `${ ragdoll.contactCount } / ${ ragdoll.maxContactCount ?? 4 }${
+			ragdoll.staticGripLocked ? ' · verrouillé' : '' }`;
 		const locomotionMode = state.fullRagdoll
 			? 'libre'
 			: state.autonomous ? 'autonome' : 'joueur';
@@ -633,9 +635,11 @@ export function createLabUI( {
 		heightValue.textContent = `${ position.y.toFixed( 2 ) } m`;
 		validityValue.textContent = physics.stats.invalidBodies === 0 ? 'OK' : `${ physics.stats.invalidBodies } NaN`;
 		shell.dataset.pelvis = `${ position.x },${ position.y },${ position.z }`;
+		shell.dataset.forward = `${ ragdoll.forward.x },${ ragdoll.forward.y },${ ragdoll.forward.z }`;
+		shell.dataset.supportNormal = `${ ragdoll.supportNormal.x },${ ragdoll.supportNormal.y },${ ragdoll.supportNormal.z }`;
 		shell.dataset.physicsSteps = String( physics.stats.totalSteps );
 		shell.dataset.contacts = ragdoll.feet
-			.map( ( contact ) => `${ contact.part.name }:${ contact.state }:${ contact.load.toFixed( 2 ) }:${ contact.anchor ? 1 : 0 }` )
+			.map( ( contact ) => `${ contact.part.name }:${ contact.state }:${ contact.load.toFixed( 2 ) }:${ contact.surface?.kind ?? 'none' }:${ contact._candidateSurface?.kind ?? 'none' }:${ contact.normal.x.toFixed( 2 ) },${ contact.normal.y.toFixed( 2 ) },${ contact.normal.z.toFixed( 2 ) }` )
 			.join( '|' );
 		const bounds = {
 			minX: Infinity, minY: Infinity, minZ: Infinity,

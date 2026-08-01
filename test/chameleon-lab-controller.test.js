@@ -7,6 +7,7 @@ import {
 	AutonomousExplorer,
 	cameraRelativeMovement,
 	movementAxesFromKeys,
+	SurfaceDestinationPicker,
 	ThirdPersonCamera,
 } from '../src/chameleon-lab/third-person-controller.js';
 
@@ -56,17 +57,13 @@ test( 'CHAMELEON-LAB-CONTROLLER-001 maps QWERTY, AZERTY and arrow movement consi
 
 } );
 
-test( 'CHAMELEON-LAB-CONTROLLER-002 normalizes diagonals without changing cardinal speed', () => {
+test( 'CHAMELEON-LAB-CONTROLLER-002 preserves full steering and throttle on diagonals', () => {
 
 	const diagonal = movementAxesFromKeys( new Set( [ 'KeyZ', 'KeyD' ] ) );
 	const inverse = movementAxesFromKeys( new Set( [ 'ArrowDown', 'ArrowLeft' ] ) );
 
-	assert.ok( Math.abs( Math.hypot( diagonal.x, diagonal.y ) - 1 ) <= EPSILON );
-	assert.ok( Math.abs( diagonal.x - Math.SQRT1_2 ) <= EPSILON );
-	assert.ok( Math.abs( diagonal.y - Math.SQRT1_2 ) <= EPSILON );
-	assert.ok( Math.abs( Math.hypot( inverse.x, inverse.y ) - 1 ) <= EPSILON );
-	assert.ok( Math.abs( inverse.x + Math.SQRT1_2 ) <= EPSILON );
-	assert.ok( Math.abs( inverse.y + Math.SQRT1_2 ) <= EPSILON );
+	assert.deepEqual( diagonal, { x: 1, y: 1 } );
+	assert.deepEqual( inverse, { x: -1, y: -1 } );
 
 } );
 
@@ -147,7 +144,7 @@ test( 'CHAMELEON-LAB-CONTROLLER-005 autonomous exploration is deterministic, fin
 		assert.ok( [ a.x, a.y, a.z ].every( Number.isFinite ) );
 		assert.ok( a.length() <= 0.72 + EPSILON );
 		assert.ok( a.length() >= 0.72 - EPSILON );
-		assert.ok( first.timeToChange > 0 && first.timeToChange <= 9 );
+		assert.ok( first.timeToChange > 0 && first.timeToChange <= 16 );
 		if ( a.distanceToSquared( c ) > 1e-8 ) divergedFromOtherSeed = true;
 
 	}
@@ -194,7 +191,7 @@ test( 'CHAMELEON-LAB-CONTROLLER-007 autonomous watchdog reroutes only after sust
 	for ( let step = 0; step < 211; step ++ )
 		stuck.update( 1 / 120, floor, staticPosition );
 	assert.ok( stuck.heading.distanceToSquared( new THREE.Vector3( 1, 0, 0 ) ) > 0.01 );
-	assert.ok( stuck.timeToChange < 3 );
+	assert.ok( stuck.timeToChange < 4.5 );
 
 	const moving = new AutonomousExplorer( 0x9a7f );
 	const movingPosition = new THREE.Vector3();
@@ -351,6 +348,12 @@ test( 'CHAMELEON-LAB-CONTROLLER-010 autonomous geodesic update reuses every hot-
 		explorer._previousSurfaceNormal,
 		explorer._surfaceHeading,
 		explorer._boundaryCorrection,
+		explorer.destination,
+		explorer.destinationNormal,
+		explorer._toDestination,
+		explorer._goalHeading,
+		explorer._recoveryHeading,
+		explorer._angleCross,
 		explorer._transportScratch,
 		explorer._transportScratch.axis,
 		explorer._transportScratch.firstCross,
@@ -373,6 +376,12 @@ test( 'CHAMELEON-LAB-CONTROLLER-010 autonomous geodesic update reuses every hot-
 		explorer._previousSurfaceNormal,
 		explorer._surfaceHeading,
 		explorer._boundaryCorrection,
+		explorer.destination,
+		explorer.destinationNormal,
+		explorer._toDestination,
+		explorer._goalHeading,
+		explorer._recoveryHeading,
+		explorer._angleCross,
 		explorer._transportScratch,
 		explorer._transportScratch.axis,
 		explorer._transportScratch.firstCross,
@@ -380,5 +389,172 @@ test( 'CHAMELEON-LAB-CONTROLLER-010 autonomous geodesic update reuses every hot-
 	], references );
 	assert.ok( [ output.x, output.y, output.z ].every( Number.isFinite ) );
 	assert.ok( Math.abs( output.length() - 0.72 ) <= EPSILON );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-011 a click destination suppresses random wandering until arrival', () => {
+
+	const explorer = new AutonomousExplorer( 0x6a31 );
+	const seed = explorer.seed;
+	const floor = new THREE.Vector3( 0, 1, 0 );
+	const position = new THREE.Vector3();
+	explorer.heading.set( 1, 0, 0 );
+	explorer.setDestination(
+		new THREE.Vector3( 3, 0, 0 ),
+		floor,
+		position,
+	);
+	let steps = 0;
+	while ( explorer.destinationActive && steps ++ < 2_000 ) {
+
+		const movement = explorer.update( 1 / 120, floor, position );
+		assert.ok( movement.x >= -EPSILON,
+			`destination steering reversed at step ${ steps }: ${ movement.toArray() }` );
+		assert.ok( movement.length() <= 1 + EPSILON );
+		position.addScaledVector( movement, 0.018 );
+
+	}
+	assert.equal( explorer.destinationActive, false );
+	assert.ok( position.distanceTo( new THREE.Vector3( 3, 0, 0 ) ) <= 0.49 );
+	assert.equal( explorer.seed, seed, 'goal navigation must not consume random state' );
+	assertVectorClose( explorer.update( 1 / 120, floor, position ), new THREE.Vector3() );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-012 a destination heading remains continuous across wall and top seams', () => {
+
+	const explorer = new AutonomousExplorer( 0x7219 );
+	const position = new THREE.Vector3( 2.5, 0, 0 );
+	const goal = new THREE.Vector3( -4, -0.3, 0 );
+	const normal = new THREE.Vector3();
+	const previous = new THREE.Vector3();
+	explorer.heading.set( -1, 0, 0 );
+	explorer.setDestination( goal, new THREE.Vector3( -1, 0, 0 ), position );
+	let hasPrevious = false;
+	const sample = ( degrees, secondEdge ) => {
+
+		const angle = degrees * Math.PI / 180;
+		if ( secondEdge ) normal.set( -Math.sin( angle ), Math.cos( angle ), 0 );
+		else normal.set( Math.cos( angle ), Math.sin( angle ), 0 );
+		const direction = explorer.update( 1 / 120, normal, position ).normalize();
+		assert.ok( Math.abs( direction.dot( normal ) ) < 1e-8 );
+		if ( hasPrevious ) assert.ok(
+			previous.dot( direction ) > 0.955,
+			`goal heading snapped at ${ degrees } degrees: ${ direction.toArray() }`,
+		);
+		previous.copy( direction );
+		hasPrevious = true;
+		position.addScaledVector( direction, 0.003 );
+
+	};
+	for ( let degrees = 0; degrees <= 90; degrees += 5 ) sample( degrees, false );
+	for ( let degrees = 5; degrees <= 90; degrees += 5 ) sample( degrees, true );
+	assert.equal( explorer.destinationActive, true );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-013 destination picking raycasts once per valid click only', () => {
+
+	class FakeCanvas {
+
+		constructor() {
+
+			this.listeners = new Map();
+
+		}
+
+		addEventListener( type, listener ) { this.listeners.set( type, listener ); }
+		removeEventListener( type, listener ) {
+
+			if ( this.listeners.get( type ) === listener ) this.listeners.delete( type );
+
+		}
+		getBoundingClientRect() {
+
+			return { left: 0, top: 0, width: 200, height: 100 };
+
+		}
+		emit( type, event ) { this.listeners.get( type )( event ); }
+
+	}
+	class FakeRay {
+
+		constructor( origin, dir ) {
+
+			this.origin = origin;
+			this.dir = dir;
+
+		}
+
+	}
+	const canvas = new FakeCanvas();
+	const collider = { handle: 17 };
+	let casts = 0;
+	const physics = {
+		RAPIER: { Ray: FakeRay },
+		surfaceByCollider: new Map( [
+			[ 17, { clawEligible: true } ],
+			[ 18, { clawEligible: false } ],
+		] ),
+		world: {
+			castRayAndGetNormal( ray, maximumDistance, solid, ...rest ) {
+
+				casts ++;
+				assert.equal( maximumDistance, 80 );
+				assert.equal( solid, true );
+				assert.equal( rest.at( -1 )( collider ), true );
+				assert.equal( rest.at( -1 )( { handle: 18 } ), false,
+					'a destination cannot target intentionally non-grippable glass' );
+				assert.ok( ray.dir.z < -0.999 );
+				return { collider, timeOfImpact: 5, normal: { x: 0, y: 0, z: 1 } };
+
+			},
+		},
+	};
+	const camera = new THREE.PerspectiveCamera( 50, 2, 0.1, 100 );
+	camera.updateMatrixWorld( true );
+	let callbacks = 0;
+	const destination = new THREE.Vector3();
+	const normal = new THREE.Vector3();
+	const picker = new SurfaceDestinationPicker( {
+		camera,
+		domElement: canvas,
+		physics,
+		onDestination( point, surfaceNormal ) {
+
+			callbacks ++;
+			destination.copy( point );
+			normal.copy( surfaceNormal );
+
+		},
+	} );
+	canvas.emit( 'pointerdown', {
+		button: 0, pointerId: 1, clientX: 100, clientY: 50, defaultPrevented: false,
+	} );
+	assert.equal( casts, 0, 'pointerdown must not query physics' );
+	canvas.emit( 'pointerup', {
+		button: 0, pointerId: 1, clientX: 100, clientY: 50, defaultPrevented: false,
+	} );
+	assert.equal( casts, 1 );
+	assert.equal( callbacks, 1 );
+	assertVectorClose( destination, new THREE.Vector3( 0, 0, -5 ), 1e-7 );
+	assertVectorClose( normal, new THREE.Vector3( 0, 0, 1 ) );
+
+	canvas.emit( 'pointerdown', {
+		button: 0, pointerId: 2, clientX: 100, clientY: 50, defaultPrevented: true,
+	} );
+	canvas.emit( 'pointerup', {
+		button: 0, pointerId: 2, clientX: 100, clientY: 50, defaultPrevented: false,
+	} );
+	canvas.emit( 'pointerdown', {
+		button: 0, pointerId: 3, clientX: 10, clientY: 10, defaultPrevented: false,
+	} );
+	canvas.emit( 'pointermove', { pointerId: 3, clientX: 40, clientY: 40 } );
+	canvas.emit( 'pointerup', {
+		button: 0, pointerId: 3, clientX: 40, clientY: 40, defaultPrevented: false,
+	} );
+	assert.equal( casts, 1, 'grabbed or dragged pointers must not create destinations' );
+	picker.dispose();
+	assert.equal( canvas.listeners.size, 0 );
 
 } );

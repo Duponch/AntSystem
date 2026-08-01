@@ -20,6 +20,8 @@ import {
 	supportFrameFromContacts,
 } from '../src/chameleon-lab/hybrid-controller-model.js';
 import { createPhysicsWorld } from '../src/chameleon-lab/physics-world.js';
+import { PlatformerControlModel } from '../src/chameleon-lab/platformer-control-model.js';
+import { WHOLE_BODY_POSE } from '../src/chameleon-lab/whole-body-gait-model.js';
 
 const ASSET_PATH = fileURLToPath(
 	new URL( '../public/assets/ChameleonPhysical.glb', import.meta.url ),
@@ -37,7 +39,7 @@ async function loadPhysicalScene() {
 
 }
 
-async function createGroundedHybrid() {
+async function createGroundedHybrid( { inclination = 0 } = {} ) {
 
 	const physics = await createPhysicsWorld( {
 		gravity: { x: 0, y: -9.81, z: 0 },
@@ -49,14 +51,18 @@ async function createGroundedHybrid() {
 	const groundBody = world.createRigidBody(
 		RAPIER.RigidBodyDesc.fixed().setTranslation( 0, -0.2, 0 ),
 	);
-	const groundCollider = world.createCollider(
-		RAPIER.ColliderDesc.cuboid( 6, 0.2, 6 )
-			.setFriction( 0.92 )
-			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
-		groundBody,
-	);
+	const groundColliderDescription = RAPIER.ColliderDesc.cuboid( 6, 0.2, 6 )
+		.setFriction( 0.92 )
+		.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff );
+	if ( Math.abs( inclination ) > 1e-8 ) groundColliderDescription.setRotation( {
+		x: 0,
+		y: 0,
+		z: Math.sin( inclination * 0.5 ),
+		w: Math.cos( inclination * 0.5 ),
+	} );
+	const groundCollider = world.createCollider( groundColliderDescription, groundBody );
 	physics.surfaceByCollider.set( groundCollider.handle, Object.freeze( {
-		kind: 'ground',
+		kind: Math.abs( inclination ) > 1e-8 ? 'incline' : 'ground',
 		clawEligible: true,
 		gripStrengthScale: 1,
 	} ) );
@@ -1158,6 +1164,11 @@ test( 'CHAMELEON-LAB-RAGDOLL-013 a thrown body reacquires wall and cylinder supp
 		);
 		assert.ok( bodyUp.dot( expectedNormal ) > 0.55,
 			`${ surfaceCase } body failed to orient onto its support (${ bodyUp.dot( expectedNormal ) })` );
+		runFrames( fixture, 120, 2.5 );
+		assert.equal( fixture.chameleon.staticGripLocked, true,
+			`${ surfaceCase } support never converged to a static claw lock` );
+		assert.equal( fixture.chameleon.pelvis.body.isSleeping(), true,
+			`${ surfaceCase } rigid body kept jittering after static lock` );
 		assertFiniteHybrid( fixture );
 		fixture.dispose();
 
@@ -1501,6 +1512,518 @@ test( 'CHAMELEON-LAB-RAGDOLL-016 idle limbs retain authored flexion while neck a
 		`head animation jumped by ${ maximumHeadFrameDelta } in one fixed step` );
 	assert.equal( chameleon.contactCount, HYBRID_FOOT_COUNT );
 	assertAnatomicalPose( chameleon );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-021 settled claws enter static grip sleep and wake on intent', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon } = fixture;
+	runFrames( fixture, 120, 4 );
+	assert.equal( chameleon.staticGripLocked, true );
+	assert.equal( chameleon.pelvis.body.isSleeping(), true );
+	const bodyBefore = bodyState( chameleon.pelvis.body );
+	const feetBefore = chameleon.feet.map( ( foot ) => foot.anchor.clone() );
+	let idleProbeRaycasts = 0;
+	const castRayAndGetNormal = fixture.physics.world.castRayAndGetNormal;
+	fixture.physics.world.castRayAndGetNormal = function ( ...args ) {
+
+		idleProbeRaycasts ++;
+		return castRayAndGetNormal.apply( this, args );
+
+	};
+	runFrames( fixture, 240, 2 );
+	fixture.physics.world.castRayAndGetNormal = castRayAndGetNormal;
+	assert.deepEqual( bodyState( chameleon.pelvis.body ), bodyBefore );
+	assert.equal( idleProbeRaycasts, 0,
+		'a sleeping static grip must not keep running the 44-ray claw probe fan' );
+	for ( let foot = 0; foot < 4; foot ++ ) assert.ok(
+		chameleon.feet[ foot ].anchor.distanceToSquared( feetBefore[ foot ] ) < 1e-16,
+		`static claw ${ foot } drifted while locked`,
+	);
+
+	chameleon.setDragging( true );
+	assert.equal( chameleon.staticGripLocked, false,
+		'a mouse grab must release static friction immediately' );
+	assert.equal( chameleon.pelvis.body.isSleeping(), false );
+	chameleon.setDragging( false );
+	runFrames( fixture, 120, 4 );
+	assert.equal( chameleon.staticGripLocked, true );
+
+	// Arcade steering can rotate with zero translation. It must wake the same
+	// static-friction lock immediately instead of being mistaken for idle.
+	chameleon.setCommand( {
+		move: new THREE.Vector3(),
+		facing: new THREE.Vector3( 0, 0, -1 ),
+	} );
+	assert.equal( chameleon.staticGripLocked, false );
+	assert.equal( chameleon.pelvis.body.isSleeping(), false );
+	runFrames( fixture, 120, 0.12 );
+	const turnVelocity = chameleon.pelvis.body.angvel();
+	assert.ok( Math.hypot( turnVelocity.x, turnVelocity.y, turnVelocity.z ) > 0.01 );
+	chameleon.setCommand( { move: new THREE.Vector3( -1, 0, 0 ) } );
+	runFrames( fixture, 120, 0.2 );
+	assert.ok( chameleon.pelvis.body.linvel().x < -0.02 );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-022 charged jump drives a crouch and compliant aerial pose', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon } = fixture;
+	runFrames( fixture, 120, 0.4 );
+	const pelvisBeforeChargeY = chameleon.rig.pelvis.position.y;
+	chameleon.setJumpPose( {
+		preloadCompression: 1,
+		forwardLean: 0.4,
+		muscleCompliance: 0.04,
+	} );
+	runFrames( fixture, 120, 0.2 );
+	assert.ok( chameleon.rig.pelvis.position.y < pelvisBeforeChargeY - 0.025,
+		`charged crouch did not lower the pelvis (${ chameleon.rig.pelvis.position.y } / before ${ pelvisBeforeChargeY })` );
+
+	chameleon.setJumpPose( {
+		takeoffExtension: 0.8,
+		airborneTuck: 0.58,
+		forwardLean: 0.25,
+		muscleCompliance: 0.48,
+	} );
+	chameleon.setCommand( { release: true } );
+	runFrames( fixture, 120, 0.08 );
+	assert.ok( Number.isFinite( chameleon.rig.pelvis.position.y ) );
+	for ( const bone of [ chameleon.rig.pelvis, chameleon.rig.spine01,
+		chameleon.rig.spine02, ...chameleon.rig.legs.flatMap( ( leg ) => [
+			leg.girdle, leg.upper, leg.lower, leg.palm,
+		] ) ] ) assert.ok(
+		bone.quaternion.toArray().every( Number.isFinite ),
+		`${ bone.name } received a non-finite airborne pose`,
+	);
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-023 forward locomotion transfers claws from ground to an obstacle and climbs it', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { RAPIER, world } = fixture.physics;
+	const obstacleBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( -1.9, 0.55, 0.75 ),
+	);
+	const obstacleCollider = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 1, 0.55, 1 )
+			.setFriction( 0.98 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		obstacleBody,
+	);
+	fixture.physics.surfaceByCollider.set( obstacleCollider.handle, Object.freeze( {
+		kind: 'climb-step',
+		clawEligible: true,
+		gripStrengthScale: 1,
+	} ) );
+	const direction = new THREE.Vector3( -1, 0, 0 );
+	fixture.chameleon.setCommand( {
+		move: direction,
+		facing: direction,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	let maximumHeight = fixture.chameleon.pelvis.body.translation().y;
+	let maximumObstacleClaws = 0;
+	let maximumObstacleCandidates = 0;
+	let maximumWallAlignment = 0;
+	runFrames( fixture, 120, 6, () => {
+
+		const position = fixture.chameleon.pelvis.body.translation();
+		maximumHeight = Math.max( maximumHeight, position.y );
+		maximumObstacleClaws = Math.max(
+			maximumObstacleClaws,
+			fixture.chameleon.feet.filter(
+				( foot ) => foot.collider?.handle === obstacleCollider.handle,
+			).length,
+		);
+		maximumObstacleCandidates = Math.max(
+			maximumObstacleCandidates,
+			fixture.chameleon.feet.filter(
+				( foot ) => foot._candidateCollider?.handle === obstacleCollider.handle,
+			).length,
+		);
+		maximumWallAlignment = Math.max(
+			maximumWallAlignment,
+			Math.abs( fixture.chameleon.supportNormal.x ),
+		);
+		assertFiniteHybrid( fixture );
+
+	} );
+	const finalPosition = fixture.chameleon.pelvis.body.translation();
+	assert.ok( maximumObstacleClaws >= 2,
+		`only ${ maximumObstacleClaws } claws transferred to the obstacle; candidates=${ maximumObstacleCandidates }; final=${ finalPosition.x },${ finalPosition.y },${ finalPosition.z }; nominal=${ Array.from( fixture.chameleon.nominalFootPositions ) }` );
+	assert.ok( maximumWallAlignment > 0.45,
+		`support never rotated onto the obstacle (${ maximumWallAlignment })` );
+	assert.ok( maximumHeight > 0.82,
+		`pelvis never climbed above ${ maximumHeight } m` );
+	assert.ok( finalPosition.x < -0.45,
+		`root remained blocked before the obstacle (${ finalPosition.x })` );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-024 released supports cannot cycle a walking gait in flight', async () => {
+
+	const fixture = await createGroundedHybrid();
+	runFrames( fixture, 120, 0.4 );
+	fixture.chameleon.setJumpPose( {
+		takeoffExtension: 0.4,
+		airborneTuck: 0.58,
+		muscleCompliance: 0.36,
+	} );
+	fixture.chameleon.setCommand( {
+		move: new THREE.Vector3( -1, 0, 0 ),
+		facing: new THREE.Vector3( -1, 0, 0 ),
+		release: true,
+	} );
+	runFrames( fixture, 120, 0.08 );
+	const target = fixture.chameleon.wholeBodyGait.getView().target;
+	for ( let foot = 0; foot < 4; foot ++ ) {
+
+		assert.ok( Math.abs( target[ WHOLE_BODY_POSE.STRIDE_0 + foot ] ) < 1e-7,
+			`airborne foot ${ foot } retained a walking stride` );
+		assert.ok( Math.abs( target[ WHOLE_BODY_POSE.LIFT_0 + foot ] ) < 1e-7,
+			`airborne foot ${ foot } retained a walking lift` );
+		assert.ok( Math.abs( target[ WHOLE_BODY_POSE.FLEX_0 + foot ] ) < 1e-7,
+			`airborne foot ${ foot } retained a walking flexion` );
+
+	}
+	for ( let index = WHOLE_BODY_POSE.PELVIS_YAW;
+		index <= WHOLE_BODY_POSE.SUPPORT_SHIFT; index ++ ) assert.ok(
+		Math.abs( target[ index ] ) < 1e-9,
+		`airborne whole-body lane ${ index } retained terrestrial idle`,
+	);
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-025 sub-unit commands preserve proportional physical speed', async () => {
+
+	async function travelledDistance( magnitude ) {
+
+		const fixture = await createGroundedHybrid();
+		runFrames( fixture, 120, 0.6 );
+		const startX = fixture.chameleon.pelvis.body.translation().x;
+		fixture.chameleon.setCommand( {
+			move: new THREE.Vector3( -magnitude, 0, 0 ),
+			facing: new THREE.Vector3( -1, 0, 0 ),
+			sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+		} );
+		runFrames( fixture, 120, 1.8 );
+		const distance = startX - fixture.chameleon.pelvis.body.translation().x;
+		assertFiniteHybrid( fixture );
+		fixture.dispose();
+		return distance;
+
+	}
+
+	const slow = await travelledDistance( 0.3 );
+	const full = await travelledDistance( 1 );
+	assert.ok( slow > 0.08, `sub-unit command did not move (${ slow })` );
+	assert.ok( full > slow * 1.8,
+		`physical speed discarded command magnitude (slow=${ slow }, full=${ full })` );
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-026 held arcade steering produces a stable physical turn arc', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon, physics } = fixture;
+	runFrames( fixture, 120, 0.6 );
+	const start = chameleon.pelvis.body.translation();
+	const startPosition = new THREE.Vector3( start.x, start.y, start.z );
+	const initialForward = chameleon.forward.clone();
+	const control = new PlatformerControlModel( {
+		moveSpeed: chameleon.settings.moveSpeed,
+		sprintMultiplier: chameleon.settings.sprintMultiplier,
+	} );
+	control.reset( initialForward, chameleon.supportNormal );
+	const axes = { x: 1, y: 0 };
+	const move = new THREE.Vector3();
+	let view = control.view;
+	for ( let step = 0; step < 240; step ++ ) {
+
+		if ( step === 54 ) axes.x = 0;
+		physics.step( 1 / 120, ( dt ) => {
+
+			view = control.update( dt, {
+				axes,
+				bodyForward: chameleon.forward,
+				supportNormal: chameleon.supportNormal,
+				velocity: chameleon.pelvis.body.linvel(),
+				supported: chameleon.contactCount >= 1,
+			} );
+			move.set( view.direction.x, view.direction.y, view.direction.z );
+			chameleon.setCommand( {
+				move,
+				facing: view.facing,
+				turning: view.steering,
+				sourceNormal: view.supportNormal,
+			} );
+			chameleon.beforeStep( dt );
+
+		}, () => chameleon.afterStep() );
+
+	}
+	const finalForward = chameleon.forward.clone();
+	const finalPosition = chameleon.pelvis.body.translation();
+	const travel = startPosition.distanceTo(
+		new THREE.Vector3( finalPosition.x, finalPosition.y, finalPosition.z ),
+	);
+	assert.ok( initialForward.dot( finalForward ) < 0.72,
+		`held steering barely rotated the physical body (${ initialForward.dot( finalForward ) })` );
+	assert.ok( finalForward.dot( new THREE.Vector3(
+		view.facing.x, view.facing.y, view.facing.z,
+	) ) > 0.94, 'physical body did not settle on its bounded arcade turn target' );
+	assert.ok( travel > 0.015 && travel < 0.45,
+		`turn should form a short natural arc, not crab or spin in place (${ travel } m)` );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-027 a half-second command produces a responsive physical U-turn', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon, physics } = fixture;
+	runFrames( fixture, 120, 0.6 );
+	const start = chameleon.pelvis.body.translation();
+	const startPosition = new THREE.Vector3( start.x, start.y, start.z );
+	const initialForward = chameleon.forward.clone();
+	const control = new PlatformerControlModel( {
+		moveSpeed: chameleon.settings.moveSpeed,
+		sprintMultiplier: chameleon.settings.sprintMultiplier,
+	} );
+	control.reset( initialForward, chameleon.supportNormal );
+	const axes = { x: 1, y: 0 };
+	const move = new THREE.Vector3();
+	const tangentVelocity = new THREE.Vector3();
+	const surfaceRight = new THREE.Vector3();
+	let view = control.view;
+	let alignmentAt100Ms = 1;
+	let alignmentAt250Ms = 1;
+	let alignmentAt500Ms = 1;
+	let maximumLateralSpeed = 0;
+	let maximumTangentSpeed = 0;
+	const forwardAtRelease = new THREE.Vector3();
+	for ( let step = 0; step < 120; step ++ ) {
+
+		if ( step === 60 ) axes.x = 0;
+		physics.step( 1 / 120, ( dt ) => {
+
+			view = control.update( dt, {
+				axes,
+				bodyForward: chameleon.forward,
+				supportNormal: chameleon.supportNormal,
+				velocity: chameleon.pelvis.body.linvel(),
+				supported: chameleon.contactCount >= 1,
+			} );
+			move.set( view.direction.x, view.direction.y, view.direction.z );
+			chameleon.setCommand( {
+				move,
+				facing: view.facing,
+				turning: view.steering,
+				sourceNormal: view.supportNormal,
+			} );
+			chameleon.beforeStep( dt );
+
+		}, () => chameleon.afterStep() );
+		if ( step < 60 ) {
+
+			const velocity = chameleon.pelvis.body.linvel();
+			tangentVelocity.set( velocity.x, velocity.y, velocity.z )
+				.projectOnPlane( chameleon.supportNormal );
+			surfaceRight.crossVectors( chameleon.forward, chameleon.supportNormal ).normalize();
+			maximumLateralSpeed = Math.max(
+				maximumLateralSpeed, Math.abs( tangentVelocity.dot( surfaceRight ) ),
+			);
+			maximumTangentSpeed = Math.max( maximumTangentSpeed, tangentVelocity.length() );
+
+		}
+		if ( step === 11 ) alignmentAt100Ms = initialForward.dot( chameleon.forward );
+		if ( step === 29 ) alignmentAt250Ms = initialForward.dot( chameleon.forward );
+		if ( step === 59 ) alignmentAt500Ms = initialForward.dot( chameleon.forward );
+		if ( step === 59 ) forwardAtRelease.copy( chameleon.forward );
+
+	}
+	const finalForward = chameleon.forward.clone();
+	const finalPosition = chameleon.pelvis.body.translation();
+	const travel = startPosition.distanceTo(
+		new THREE.Vector3( finalPosition.x, finalPosition.y, finalPosition.z ),
+	);
+	assert.ok( alignmentAt100Ms < 0.985,
+		`body has no immediate steering response at 0.10 s (${ alignmentAt100Ms })` );
+	assert.ok( alignmentAt250Ms < 0.45,
+		`body turn remains heavy at 0.25 s (${ alignmentAt250Ms })` );
+	assert.ok( alignmentAt500Ms < -0.92,
+		`body failed to complete the held half-second U-turn (${ alignmentAt500Ms })` );
+	assert.ok( maximumLateralSpeed < 0.1,
+		`turn crawl became body-local crab motion (${ maximumLateralSpeed } m/s)` );
+	assert.ok( maximumLateralSpeed / Math.max( maximumTangentSpeed, 1e-6 ) < 0.42,
+		`turn crawl lateral ratio is ${ maximumLateralSpeed / maximumTangentSpeed }` );
+	assert.ok( initialForward.dot( finalForward ) < -0.65,
+		`half-second steering failed to produce a near U-turn (${ initialForward.dot( finalForward ) })` );
+	assert.ok( finalForward.dot( new THREE.Vector3(
+		view.facing.x, view.facing.y, view.facing.z,
+	) ) > 0.92, 'body failed to settle rapidly on the arcade target' );
+	assert.ok( travel > 0.02 && travel < 0.5,
+		`responsive turn must remain a compact planted arc (${ travel } m)` );
+	assert.ok( chameleon.contactCount >= 2,
+		`responsive steering destabilized the claws (${ chameleon.contactCount })` );
+	const releaseNormal = chameleon.supportNormal;
+	const releaseForward = forwardAtRelease.clone().projectOnPlane( releaseNormal ).normalize();
+	const settledForward = finalForward.clone().projectOnPlane( releaseNormal ).normalize();
+	const postReleaseOvershoot = Math.acos( THREE.MathUtils.clamp(
+		releaseForward.dot( settledForward ), -1, 1,
+	) );
+	assert.ok( postReleaseOvershoot <= THREE.MathUtils.degToRad( 12 ),
+		`released pivot coasted ${ THREE.MathUtils.radToDeg( postReleaseOvershoot ) } degrees `
+			+ `(half-second alignment ${ alignmentAt500Ms }, final ${ initialForward.dot( finalForward ) })` );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-029 forward arcade turns remain body-tangent while walking and sprinting', async () => {
+
+	for ( const inclination of [ 0, Math.PI / 10 ] ) for ( const sprint of [ false, true ] ) {
+
+		const fixture = await createGroundedHybrid( { inclination } );
+		const { chameleon, physics } = fixture;
+		runFrames( fixture, 120, inclination === 0 ? 0.6 : 2 );
+		const control = new PlatformerControlModel( {
+			moveSpeed: chameleon.settings.moveSpeed,
+			sprintMultiplier: chameleon.settings.sprintMultiplier,
+		} );
+		control.reset( chameleon.forward, chameleon.supportNormal );
+		const axes = { x: 1, y: 1 };
+		const move = new THREE.Vector3();
+		const tangentVelocity = new THREE.Vector3();
+		const surfaceRight = new THREE.Vector3();
+		let maximumLateralRatio = 0;
+		let maximumLateralSpeed = 0;
+		let minimumContacts = 4;
+		const evaluationFloor = chameleon.settings.moveSpeed
+			* ( sprint ? chameleon.settings.sprintMultiplier : 1 ) * 0.2;
+		for ( let step = 0; step < 60; step ++ ) {
+
+			physics.step( 1 / 120, ( dt ) => {
+
+				const view = control.update( dt, {
+					axes,
+					bodyForward: chameleon.forward,
+					supportNormal: chameleon.supportNormal,
+					velocity: chameleon.pelvis.body.linvel(),
+					supported: chameleon.contactCount >= 1,
+					sprint,
+				} );
+				move.set( view.direction.x, view.direction.y, view.direction.z );
+				chameleon.setCommand( {
+					move,
+					facing: view.facing,
+					turning: view.steering,
+					sourceNormal: view.supportNormal,
+					sprint,
+				} );
+				chameleon.beforeStep( dt );
+
+			}, () => chameleon.afterStep() );
+			const velocity = chameleon.pelvis.body.linvel();
+			tangentVelocity.set( velocity.x, velocity.y, velocity.z )
+				.projectOnPlane( chameleon.supportNormal );
+			surfaceRight.crossVectors( chameleon.forward, chameleon.supportNormal ).normalize();
+			const lateralSpeed = Math.abs( tangentVelocity.dot( surfaceRight ) );
+			const tangentSpeed = tangentVelocity.length();
+			maximumLateralSpeed = Math.max( maximumLateralSpeed, lateralSpeed );
+			if ( tangentSpeed >= evaluationFloor ) maximumLateralRatio = Math.max(
+				maximumLateralRatio, lateralSpeed / tangentSpeed,
+			);
+			minimumContacts = Math.min( minimumContacts, chameleon.contactCount );
+
+		}
+		const label = `${ inclination === 0 ? 'flat' : 'incline' }/${ sprint ? 'sprint' : 'walk' }`;
+		assert.ok( maximumLateralRatio < 0.3,
+			`${ label } instantaneous lateral ratio is ${ maximumLateralRatio } (${ maximumLateralSpeed } m/s)` );
+		assert.ok( minimumContacts >= 2,
+			`${ label } steering lost planted support (${ minimumContacts })` );
+		assertFiniteHybrid( fixture );
+		fixture.dispose();
+
+	}
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-028 arcade yaw remains responsive and tangent on an incline', async () => {
+
+	const fixture = await createGroundedHybrid( { inclination: Math.PI / 10 } );
+	const { chameleon, physics } = fixture;
+	runFrames( fixture, 120, 2 );
+	assert.ok( chameleon.supportNormal.x < -0.25 && chameleon.supportNormal.y > 0.9,
+		`inclined support was not acquired (${ chameleon.supportNormal.toArray() })` );
+	const initialForward = chameleon.forward.clone();
+	const control = new PlatformerControlModel( {
+		moveSpeed: chameleon.settings.moveSpeed,
+		sprintMultiplier: chameleon.settings.sprintMultiplier,
+	} );
+	control.reset( initialForward, chameleon.supportNormal );
+	const move = new THREE.Vector3();
+	const tangentVelocity = new THREE.Vector3();
+	const surfaceRight = new THREE.Vector3();
+	const axes = { x: 1, y: 0 };
+	let alignmentAt100Ms = 1;
+	let alignmentAt250Ms = 1;
+	let alignmentAt500Ms = 1;
+	let maximumLateralSpeed = 0;
+	for ( let step = 0; step < 60; step ++ ) {
+
+		physics.step( 1 / 120, ( dt ) => {
+
+			const view = control.update( dt, {
+				axes,
+				bodyForward: chameleon.forward,
+				supportNormal: chameleon.supportNormal,
+				velocity: chameleon.pelvis.body.linvel(),
+				supported: chameleon.contactCount >= 1,
+			} );
+			move.set( view.direction.x, view.direction.y, view.direction.z );
+			chameleon.setCommand( {
+				move,
+				facing: view.facing,
+				turning: view.steering,
+				sourceNormal: view.supportNormal,
+			} );
+			chameleon.beforeStep( dt );
+
+		}, () => chameleon.afterStep() );
+		const velocity = chameleon.pelvis.body.linvel();
+		tangentVelocity.set( velocity.x, velocity.y, velocity.z )
+			.projectOnPlane( chameleon.supportNormal );
+		surfaceRight.crossVectors( chameleon.forward, chameleon.supportNormal ).normalize();
+		maximumLateralSpeed = Math.max(
+			maximumLateralSpeed, Math.abs( tangentVelocity.dot( surfaceRight ) ),
+		);
+		if ( step === 11 ) alignmentAt100Ms = initialForward.dot( chameleon.forward );
+		if ( step === 29 ) alignmentAt250Ms = initialForward.dot( chameleon.forward );
+		if ( step === 59 ) alignmentAt500Ms = initialForward.dot( chameleon.forward );
+
+	}
+	assert.ok( alignmentAt100Ms < 0.985, `incline response at 0.10 s is ${ alignmentAt100Ms }` );
+	assert.ok( alignmentAt250Ms < 0.45, `incline response at 0.25 s is ${ alignmentAt250Ms }` );
+	assert.ok( alignmentAt500Ms < -0.92, `incline response at 0.50 s is ${ alignmentAt500Ms }` );
+	assert.ok( maximumLateralSpeed < 0.11,
+		`inclined turn generated ${ maximumLateralSpeed } m/s of lateral slip` );
+	assert.ok( chameleon.contactCount >= 2,
+		`inclined turn lost its planted support (${ chameleon.contactCount })` );
+	assertFiniteHybrid( fixture );
 	fixture.dispose();
 
 } );

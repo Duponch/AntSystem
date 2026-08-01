@@ -143,6 +143,169 @@ function createLog( scene, physics, {
 
 }
 
+function routePoint( position, normal = [ 0, 1, 0 ], phase = null ) {
+
+	return Object.freeze( {
+		position: Object.freeze( [ position[ 0 ], position[ 1 ], position[ 2 ] ] ),
+		normal: Object.freeze( [ normal[ 0 ], normal[ 1 ], normal[ 2 ] ] ),
+		phase,
+	} );
+
+}
+
+function localRoutePoint( entry, position, normal, clearance = 0, phase = null ) {
+
+	// This conversion runs once while the static laboratory is built. Keeping
+	// portals in collider-local coordinates makes the chain follow the authored
+	// rock rotation instead of relying on fragile world-space measurements.
+	const worldPosition = new THREE.Vector3().fromArray( position );
+	const worldNormal = new THREE.Vector3().fromArray( normal )
+		.transformDirection( entry.object.matrixWorld );
+	entry.object.localToWorld( worldPosition );
+	worldPosition.addScaledVector( worldNormal, clearance );
+	return routePoint( worldPosition.toArray(), worldNormal.toArray(), phase );
+
+}
+
+function slopedRockAccess( entry ) {
+
+	const parameters = entry.object.geometry?.parameters ?? {};
+	const width = Number.isFinite( parameters.width ) ? parameters.width : 5.5;
+	const height = Number.isFinite( parameters.height ) ? parameters.height : 0.55;
+	const depth = Number.isFinite( parameters.depth ) ? parameters.depth : 3.2;
+	const pathX = width * 0.136;
+	const halfHeight = height * 0.5;
+	const front = depth * 0.5;
+	const bodyClearance = 0.24;
+	return Object.freeze( [
+		// First settle on the front face. This target is deliberately below the
+		// lip, so the next segment produces an unambiguous upward tangent command.
+		localRoutePoint(
+			entry,
+			// Keep the pelvis portal at the natural standing height. A portal below
+			// the floor can only be reached through a generous arrival radius, which
+			// advances the route before the claws have actually acquired the face.
+			[ pathX, 0, front ],
+			[ 0, 0, 1 ],
+			bodyClearance,
+			'face',
+		),
+		// The bisector normal represents the contact blend while the front claws
+		// remain planted and the leading claws acquire the upper face.
+		localRoutePoint(
+			entry,
+			[ pathX, halfHeight, front ],
+			[ 0, 1, 1 ],
+			bodyClearance,
+			'lip',
+		),
+		// Finish far enough behind the edge that the body cannot immediately fall
+		// back onto the front face after the support normal switches to the top.
+		localRoutePoint(
+			entry,
+			[ pathX, halfHeight, front - Math.min( 0.55, depth * 0.22 ) ],
+			[ 0, 1, 0 ],
+			bodyClearance,
+			'top',
+		),
+	] );
+
+}
+
+function lowerLogEndpoint( entry ) {
+
+	const axis = entry.object.userData.surface?.branchAxis ?? [ 0, 1, 0 ];
+	const halfLength = entry.collider.halfHeight?.() ?? 0;
+	const sign = axis[ 1 ] >= 0 ? -1 : 1;
+	return [
+		entry.object.position.x + axis[ 0 ] * halfLength * sign,
+		entry.object.position.y + axis[ 1 ] * halfLength * sign,
+		entry.object.position.z + axis[ 2 ] * halfLength * sign,
+	];
+
+}
+
+function upperLogEndpoint( entry ) {
+
+	const axis = entry.object.userData.surface?.branchAxis ?? [ 0, 1, 0 ];
+	const halfLength = entry.collider.halfHeight?.() ?? 0;
+	const sign = axis[ 1 ] >= 0 ? 1 : -1;
+	return [
+		entry.object.position.x + axis[ 0 ] * halfLength * sign,
+		entry.object.position.y + axis[ 1 ] * halfLength * sign,
+		entry.object.position.z + axis[ 2 ] * halfLength * sign,
+	];
+
+}
+
+/**
+ * Static access graph for event-driven click travel. Each path is ordered from
+ * the shared ground network towards its collider. Reversing the same path lets
+ * a creature leave an elevated support without another query or allocation.
+ */
+function createNavigationAccessGraph( colliders ) {
+
+	const byName = new Map( colliders.map( ( entry ) => [ entry.object.name, entry ] ) );
+	const accessByCollider = new Map();
+	const ramp = byName.get( 'PerchAccessRamp' );
+	const rampLower = ramp ? lowerLogEndpoint( ramp ) : [ 0, 0, 0 ];
+	const rampUpper = ramp ? upperLogEndpoint( ramp ) : [ 0.8, 2.3, -3.2 ];
+	for ( const entry of colliders ) {
+
+		const name = entry.object.name;
+		let access = [];
+		switch ( name ) {
+
+			case 'RoughBackWall':
+				access = [ routePoint( [ 0, 0.16, -6.72 ], [ 0, 1, 0 ] ) ];
+				break;
+			case 'RoughSideWall':
+				access = [ routePoint( [ 6.72, 0.16, -1.8 ], [ 0, 1, 0 ] ) ];
+				break;
+			case 'SlopedRock':
+				access = slopedRockAccess( entry );
+				break;
+			case 'WallGroundCornerShelf':
+				access = [
+					routePoint( [ 2.8, 0.16, -6.72 ], [ 0, 1, 0 ] ),
+					routePoint( [ 2.8, 1.28, -6.62 ], [ 0, 0, 1 ] ),
+				];
+				break;
+			case 'HorizontalPerch':
+				access = [
+					routePoint( rampLower ),
+					routePoint( rampUpper ),
+				];
+				break;
+			case 'PerchAccessRamp':
+				access = [ routePoint( rampLower ) ];
+				break;
+			case 'DiagonalPerch':
+			case 'VerticalTrunk':
+			case 'LowPerch':
+				access = [ routePoint( lowerLogEndpoint( entry ) ) ];
+				break;
+			default:
+				if ( name.startsWith( 'RoughRock_' ) ) access = [ routePoint( [
+					entry.object.position.x,
+					0.14,
+					entry.object.position.z,
+				] ) ];
+				break;
+
+		}
+		accessByCollider.set( entry.collider.handle, Object.freeze( {
+			handle: entry.collider.handle,
+			name,
+			clawEligible: entry.object.userData.surface?.clawEligible === true,
+			access: Object.freeze( access ),
+		} ) );
+
+	}
+	return Object.freeze( { accessByCollider, maximumWaypoints: 12 } );
+
+}
+
 export function createLabEnvironment( { scene, physics } ) {
 
 	const group = new THREE.Group();
@@ -249,6 +412,17 @@ export function createLabEnvironment( { scene, physics } ) {
 		position: [ 0.8, 2.3, -3.2 ],
 		direction: [ 1, 0.08, 0.05 ],
 	} ) );
+	// Keep the physical test topology connected: a click on the elevated perch
+	// must describe a walkable/climbable problem rather than an impossible
+	// teleport across empty air. The ramp begins at the spawn-side ground and
+	// overlaps the perch with enough radius for four independent claw probes.
+	colliders.push( createLog( group, physics, {
+		name: 'PerchAccessRamp',
+		radius: 0.23,
+		length: 4.2,
+		position: [ 0.4, 1.15, -1.6 ],
+		direction: [ 0.2, 0.575, -0.8 ],
+	} ) );
 	colliders.push( createLog( group, physics, {
 		name: 'DiagonalPerch',
 		radius: 0.24,
@@ -316,10 +490,12 @@ export function createLabEnvironment( { scene, physics } ) {
 	grid.material.transparent = true;
 	grid.material.opacity = 0.17;
 	group.add( grid );
+	const navigation = createNavigationAccessGraph( colliders );
 
 	return {
 		group,
 		colliders,
+		navigation,
 		dispose() {
 
 			group.traverse( ( object ) => {
@@ -337,6 +513,7 @@ export function createLabEnvironment( { scene, physics } ) {
 				}
 
 			} );
+			navigation.accessByCollider.clear();
 			scene.remove( group );
 
 		},
