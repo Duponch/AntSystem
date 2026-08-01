@@ -129,10 +129,11 @@ test( 'CHAMELEON-LAB-TAIL-VISUAL-003 render mapping keeps its fixed scratch hot 
 		new URL( '../src/chameleon-lab/passive-tail-visual-rig.js', import.meta.url ),
 		'utf8',
 	);
-	const start = source.indexOf( '\n\tapplyPositions( positions ) {' );
-	const end = source.indexOf( '\n\t}\n\n}\n', start );
+	const normalizedSource = source.replace( /\r\n?/gu, '\n' );
+	const start = normalizedSource.indexOf( '\n\tapplyPositions( positions ) {' );
+	const end = normalizedSource.indexOf( '\n\t}\n\n}\n', start );
 	assert.ok( start >= 0 && end > start );
-	const hotPath = source.slice( start, end );
+	const hotPath = normalizedSource.slice( start, end );
 	assert.doesNotMatch( hotPath, /\bnew\s+(?:THREE\.|Float32Array|Array|Map|Set)/u );
 	assert.doesNotMatch( hotPath, /\.clone\s*\(/u );
 	assert.match( hotPath, /_parallelTransportReference/u );

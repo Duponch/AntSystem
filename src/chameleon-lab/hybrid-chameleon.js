@@ -1518,6 +1518,8 @@ export async function createHybridChameleon( {
 	const renderQuaternion = new THREE.Quaternion();
 	const averageSupportNormal = new THREE.Vector3( 0, 1, 0 );
 	const targetSupportNormal = new THREE.Vector3( 0, 1, 0 );
+	const branchSupportAxis = new THREE.Vector3();
+	const branchSupportRadial = new THREE.Vector3();
 	const tempPosition = new THREE.Vector3();
 	const tempQuaternion = new THREE.Quaternion();
 	const tempInverseQuaternion = new THREE.Quaternion();
@@ -1587,6 +1589,7 @@ export async function createHybridChameleon( {
 	const desiredMatrix = new THREE.Matrix4();
 	const supportFrame = {
 		count: 0,
+		coherentCount: 0,
 		centroid: { x: 0, y: 0, z: 0 },
 		normal: { x: 0, y: 1, z: 0 },
 	};
@@ -1621,6 +1624,7 @@ export async function createHybridChameleon( {
 	const collisionWorldProjection = new THREE.Vector3();
 	const collisionWorldNormal = new THREE.Vector3();
 	const tailSurfaceProjectors = [];
+	const surfaceProjectorByCollider = new Map();
 	for ( const [ colliderHandle, surface ] of physics.surfaceByCollider?.entries?.() ?? [] ) {
 
 		const collider = world.getCollider( colliderHandle );
@@ -1670,7 +1674,8 @@ export async function createHybridChameleon( {
 			}
 
 		}
-		tailSurfaceProjectors.push( Object.freeze( {
+		const projectedHalfHeight = collider.halfHeight?.();
+		const projector = Object.freeze( {
 			collider,
 			surface,
 			x: centre.x,
@@ -1681,7 +1686,33 @@ export async function createHybridChameleon( {
 			halfX,
 			halfZ,
 			topY,
-		} ) );
+			halfHeight: Number.isFinite( projectedHalfHeight )
+				? projectedHalfHeight : 0,
+		} );
+		tailSurfaceProjectors.push( projector );
+		surfaceProjectorByCollider.set( collider.handle, projector );
+
+	}
+	function branchProjectorFor( colliderHandle ) {
+
+		let projector = surfaceProjectorByCollider.get( colliderHandle );
+		if ( projector ) return projector;
+		const surface = physics.surfaceByCollider?.get( colliderHandle );
+		if ( surface?.kind !== 'branch' ) return null;
+		const collider = world.getCollider( colliderHandle );
+		if ( ! collider || ! collider.isValid?.() ) return null;
+		const centre = collider.translation();
+		const halfHeight = collider.halfHeight?.();
+		projector = Object.freeze( {
+			collider,
+			surface,
+			x: centre.x,
+			y: centre.y,
+			z: centre.z,
+			halfHeight: Number.isFinite( halfHeight ) ? halfHeight : 0,
+		} );
+		surfaceProjectorByCollider.set( colliderHandle, projector );
+		return projector;
 
 	}
 	let contactCount = 0;
@@ -1839,8 +1870,10 @@ export async function createHybridChameleon( {
 					const approach = Math.max( 0,
 						-( tempVelocity.x * nx + tempVelocity.y * ny + tempVelocity.z * nz ),
 					);
+					const surfaceGrip = Number.isFinite( surface.gripStrengthScale )
+						? surface.gripStrengthScale : 1;
 					const score = impulse * 3.5 + approach * 0.45 + penetration * 12
-						+ solverContacts * 0.035 + ( surface.gripStrengthScale ?? 1 ) * 0.01;
+						+ solverContacts * 0.035 + surfaceGrip * 0.01;
 					if ( score < bestScore - 1e-8
 						|| ( Math.abs( score - bestScore ) <= 1e-8 && other.handle >= bestHandle ) )
 						return;
@@ -1965,8 +1998,26 @@ export async function createHybridChameleon( {
 			if ( supportReacquireSeconds > 0
 				&& probeBestNormal.dot( preferredNormal ) < 0.28 ) continue;
 			const normalContinuity = probeBestNormal.dot( preferredNormal );
-			const obstacleApproach = movement.lengthSq() > 1e-8
-				? Math.max( 0, -probeBestNormal.dot( movement ) ) : 0;
+			const movementAlignment = movement.lengthSq() > 1e-8
+				? probeBestNormal.dot( movement ) : 0;
+			const sameOwner = contact._lockedCollider?.handle === hit.collider.handle;
+			// Interior-exit rejection is needed for reverse lip rays and for the
+			// collider already surrounding a planted claw. Keeping the query on those
+			// cases avoids multiplying an extra shape query across every probe axis.
+			if ( ( directionIndex === 2 || sameOwner )
+				&& hit.collider.containsPoint?.( probeRay.origin ) ) continue;
+			const concaveTransition = directionIndex === 1 && movementAlignment < -0.48;
+			const convexWrap = sameOwner && directionIndex === 2 && movementAlignment > 0.48;
+			// A backwards ray is useful only to wrap around the lip of the collider
+			// already held by that claw. On another convex object it sees the exit
+			// face through the volume and would incorrectly attach to the far side.
+			if ( directionIndex === 2 && movementAlignment > 0.48 && ! sameOwner ) continue;
+			// A convex collider cannot be entered through one face and exited through
+			// its opposite/underside. Only the backwards ray from beyond the lip may
+			// wrap to another face of the same collider.
+			if ( sameOwner && ! convexWrap && normalContinuity < 0.2
+				&& movementAlignment < -0.35 ) continue;
+			if ( sameOwner && ! convexWrap && normalContinuity < -0.18 ) continue;
 			const distanceFromNominal = Math.abs( hit.timeOfImpact - lift );
 			// Keep a separate, explicit transition owner. A valid ground ray has an
 			// almost-zero score and otherwise wins forever against the wall directly
@@ -1974,11 +2025,15 @@ export async function createHybridChameleon( {
 			// still close; the rear pair is admitted only after the support frame has
 			// already rotated towards it. This gives a monotone floor -> edge -> wall
 			// transfer without snapping the complete animal to a remote collider.
-			const transitionEligible = obstacleApproach > 0.48 && normalContinuity < 0.88
+			const transitionStrength = concaveTransition
+				? -movementAlignment : convexWrap ? movementAlignment : 0;
+			const transitionEligible = ( concaveTransition || convexWrap )
+				&& normalContinuity < 0.88
 				&& ( contact.order < 2 || normalContinuity > 0.34 )
 				&& distanceFromNominal <= reach * ( contact.order < 2 ? 0.92 : 0.72 );
 			const candidateTransitionScore = distanceFromNominal
-				+ ( 1 - obstacleApproach ) * 0.06 + Math.max( 0, -normalContinuity ) * 0.04;
+				+ ( 1 - transitionStrength ) * 0.06
+				+ Math.max( 0, -normalContinuity ) * 0.04;
 			if ( transitionEligible && candidateTransitionScore < transitionScore ) {
 
 				transitionScore = candidateTransitionScore;
@@ -2228,6 +2283,90 @@ export async function createHybridChameleon( {
 
 	}
 
+	function resolveBranchSupportNormal( bodyPosition, target ) {
+
+		let dominantHandle = -1;
+		let dominantCount = 0;
+		for ( let foot = 0; foot < 4; foot ++ ) {
+
+			if ( ! activeContacts[ foot ] || ! feet[ foot ]._lockedCollider ) continue;
+			const handle = feet[ foot ]._lockedCollider.handle;
+			let count = 0;
+			for ( let other = 0; other < 4; other ++ )
+				if ( activeContacts[ other ]
+					&& feet[ other ]._lockedCollider?.handle === handle ) count ++;
+			if ( count > dominantCount ) {
+
+				dominantCount = count;
+				dominantHandle = handle;
+
+			}
+
+		}
+		if ( dominantCount < 2 ) return false;
+		const projector = branchProjectorFor( dominantHandle );
+		if ( ! projector || projector.surface?.kind !== 'branch' ) return false;
+		const authoredAxis = projector.surface.branchAxis;
+		if ( authoredAxis?.length >= 3
+			&& Number.isFinite( authoredAxis[ 0 ] )
+			&& Number.isFinite( authoredAxis[ 1 ] )
+			&& Number.isFinite( authoredAxis[ 2 ] ) ) {
+
+			branchSupportAxis.fromArray( authoredAxis );
+
+		} else if ( Number.isFinite( authoredAxis?.x )
+			&& Number.isFinite( authoredAxis?.y )
+			&& Number.isFinite( authoredAxis?.z ) ) {
+
+			branchSupportAxis.set( authoredAxis.x, authoredAxis.y, authoredAxis.z );
+
+		} else {
+
+			const colliderRotation = projector.collider.rotation();
+			tempInverseQuaternion.set(
+				colliderRotation.x, colliderRotation.y,
+				colliderRotation.z, colliderRotation.w,
+			).normalize();
+			branchSupportAxis.set( 0, 1, 0 ).applyQuaternion( tempInverseQuaternion );
+
+		}
+		const axisLengthSquared = branchSupportAxis.lengthSq();
+		if ( ! Number.isFinite( axisLengthSquared ) || axisLengthSquared < 1e-8 ) return false;
+		branchSupportAxis.normalize();
+		branchSupportRadial.set(
+			bodyPosition.x - projector.x,
+			bodyPosition.y - projector.y,
+			bodyPosition.z - projector.z,
+		);
+		const axialDistance = branchSupportRadial.dot( branchSupportAxis );
+		if ( projector.halfHeight > 0
+			&& Math.abs( axialDistance ) > projector.halfHeight + settings.gripReach * 0.25 )
+			return false;
+		branchSupportRadial.addScaledVector( branchSupportAxis, -axialDistance );
+		const radialLengthSquared = branchSupportRadial.lengthSq();
+		if ( ! Number.isFinite( radialLengthSquared ) || radialLengthSquared < 1e-8 ) return false;
+		branchSupportRadial.normalize();
+		let coherentContacts = 0;
+		for ( let foot = 0; foot < 4; foot ++ ) {
+
+			if ( ! activeContacts[ foot ]
+				|| feet[ foot ]._lockedCollider?.handle !== dominantHandle ) continue;
+			const radialAlignment = feet[ foot ].normal.dot( branchSupportRadial );
+			const axialAlignment = Math.abs( feet[ foot ].normal.dot( branchSupportAxis ) );
+			// Only cylindrical flank contacts vote for the analytic radial frame.
+			// End-cap normals are axial and must remain free to carry the support
+			// continuously over the rim or onto the following object.
+			if ( Number.isFinite( radialAlignment ) && Number.isFinite( axialAlignment )
+				&& radialAlignment > 0.32 && radialAlignment > axialAlignment + 0.08 )
+				coherentContacts ++;
+
+		}
+		if ( coherentContacts < 2 ) return false;
+		target.copy( branchSupportRadial );
+		return true;
+
+	}
+
 	function updateGait( dt ) {
 
 		previousFootPositions.set( currentFootPositions );
@@ -2273,6 +2412,15 @@ export async function createHybridChameleon( {
 					? feet[ foot ]._candidateCollider : null;
 
 			}
+			// A manifold-authoritative landing deliberately changes support
+			// hemisphere. Seed the temporal frame from that impact before the first
+			// planted aggregation; otherwise a slightly downward cylinder normal can
+			// be rejected against the stale pre-jump world-up frame.
+			supportFrame.normal.x = reacquireNormal.x;
+			supportFrame.normal.y = reacquireNormal.y;
+			supportFrame.normal.z = reacquireNormal.z;
+			averageSupportNormal.copy( reacquireNormal );
+			targetSupportNormal.copy( reacquireNormal );
 			gait.requestSettlement();
 			pendingSupportReset = false;
 			reacquireState = 'attached';
@@ -2409,11 +2557,13 @@ export async function createHybridChameleon( {
 		}
 		suspension.update( dt, suspensionInput );
 		const frame = supportFrameFromContacts(
-			currentFootPositions, currentFootNormals, activeContacts, supportFrame,
+			currentFootPositions, currentFootNormals, activeContacts,
+			supportFrame, averageSupportNormal,
 		);
-		if ( frame.count >= 1 ) {
+		if ( frame.coherentCount >= 1 ) {
 
 			targetSupportNormal.set( frame.normal.x, frame.normal.y, frame.normal.z ).normalize();
+			resolveBranchSupportNormal( bodyPosition, targetSupportNormal );
 			// Keep edge transitions monotone instead of switching the complete body
 			// frame whenever a single swing foot reaches the neighbouring face. A
 			// hard reacquisition may start almost orthogonal, in which case snapping
@@ -2421,7 +2571,8 @@ export async function createHybridChameleon( {
 			if ( averageSupportNormal.dot( targetSupportNormal ) < 0.12 )
 				averageSupportNormal.copy( targetSupportNormal );
 			else averageSupportNormal.lerp(
-				targetSupportNormal, 1 - Math.exp( -dt * ( frame.count >= 3 ? 24 : 16 ) ),
+				targetSupportNormal,
+				1 - Math.exp( -dt * ( frame.coherentCount >= 3 ? 24 : 16 ) ),
 			).normalize();
 
 		}
@@ -2439,6 +2590,7 @@ export async function createHybridChameleon( {
 		readVector( body.angvel(), angularVelocity );
 		desiredRoot.set( 0, 0, 0 );
 		let suggestions = 0;
+		let supportGripScale = 0;
 		for ( let foot = 0; foot < 4; foot ++ ) {
 
 			if ( ! activeContacts[ foot ] ) continue;
@@ -2449,11 +2601,23 @@ export async function createHybridChameleon( {
 				currentFootPositions[ offset + 2 ],
 			).sub( rootOffset.copy( bodyToFootOffsets[ foot ] ).applyQuaternion( rotation ) );
 			desiredRoot.add( rootSuggestion );
+			const rawGripScale = feet[ foot ]._lockedSurface?.gripStrengthScale;
+			supportGripScale += THREE.MathUtils.clamp(
+				Number.isFinite( rawGripScale ) ? rawGripScale : 1,
+				0.55,
+				1.6,
+			);
 			suggestions ++;
 
 		}
-		if ( suggestions > 0 ) desiredRoot.multiplyScalar( 1 / suggestions );
+		if ( suggestions > 0 ) {
+
+			desiredRoot.multiplyScalar( 1 / suggestions );
+			supportGripScale /= suggestions;
+
+		}
 		else desiredRoot.copy( position );
+		if ( suggestions === 0 ) supportGripScale = 1;
 		// The authored soles are not flat bone sticks: aligning their exported
 		// normals can lower a wrist relative to its patch. Solve the resulting
 		// crouch at the physical root so rear knees keep their flexion without
@@ -2525,7 +2689,8 @@ export async function createHybridChameleon( {
 		);
 		rootForceInput.dampingRatio = settings.motorDamping
 			* THREE.MathUtils.clamp( settings.gripDamping / 8, 0.2, 2.5 );
-		rootForceInput.maximumAcceleration = Math.max( 8, settings.gripStrength / totalMass );
+		rootForceInput.maximumAcceleration = Math.max( 8, settings.gripStrength / totalMass )
+			* supportGripScale;
 		stableRootForce( rootForceInput, supportForceRecord );
 		supportForce.set( supportForceRecord.x, supportForceRecord.y, supportForceRecord.z );
 		readVector( world.gravity, gravityVector );
@@ -2630,6 +2795,7 @@ export async function createHybridChameleon( {
 			9.5 + settings.motorStrength * 2.5 + steepness * 3.5,
 			settings.motorDamping,
 			settings.turnTorque * THREE.MathUtils.clamp( settings.rightingStrength, 0.2, 2 )
+				* supportGripScale
 				* ( 1 + steepness * 2.4 ),
 			swingTorque,
 			torqueCurrent,

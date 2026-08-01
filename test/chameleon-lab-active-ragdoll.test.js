@@ -84,6 +84,68 @@ async function createGroundedHybrid( { inclination = 0 } = {} ) {
 
 }
 
+async function createBranchHybrid( {
+	radius = 0.18,
+	halfHeight = 3,
+	registerAfterCreation = false,
+	branchAxis = [ 1, 0, 0 ],
+	gripStrengthScale = 1.25,
+	spawn = null,
+} = {} ) {
+
+	const physics = await createPhysicsWorld( {
+		gravity: { x: 0, y: -9.81, z: 0 },
+		fixedDt: 1 / 120,
+		maxSubsteps: 4,
+	} );
+	physics.surfaceByCollider = new Map();
+	const { RAPIER, world } = physics;
+	const halfTurn = -Math.PI * 0.25;
+	const branchBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setRotation( {
+			x: 0,
+			y: 0,
+			z: Math.sin( halfTurn ),
+			w: Math.cos( halfTurn ),
+		} ),
+	);
+	const branchCollider = world.createCollider(
+		RAPIER.ColliderDesc.cylinder( halfHeight, radius )
+			.setFriction( 1.15 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		branchBody,
+	);
+	const branchSurface = Object.freeze( {
+		kind: 'branch',
+		clawEligible: true,
+		gripStrengthScale,
+		branchAxis: Object.freeze( branchAxis ),
+		branchRadius: radius,
+	} );
+	if ( ! registerAfterCreation )
+		physics.surfaceByCollider.set( branchCollider.handle, branchSurface );
+	const chameleon = await createHybridChameleon( {
+		scene: new THREE.Scene(),
+		physics,
+		assetScene: await loadPhysicalScene(),
+		spawn: spawn ?? new THREE.Vector3( 0, radius + 0.3, 0 ),
+	} );
+	if ( registerAfterCreation )
+		physics.surfaceByCollider.set( branchCollider.handle, branchSurface );
+	return {
+		physics,
+		chameleon,
+		branchCollider,
+		dispose() {
+
+			chameleon.dispose();
+			physics.dispose();
+
+		},
+	};
+
+}
+
 function runFrames( fixture, renderHz, seconds, afterFixedStep = null ) {
 
 	const frames = Math.round( renderHz * seconds );
@@ -2023,6 +2085,316 @@ test( 'CHAMELEON-LAB-RAGDOLL-028 arcade yaw remains responsive and tangent on an
 		`inclined turn generated ${ maximumLateralSpeed } m/s of lateral slip` );
 	assert.ok( chameleon.contactCount >= 2,
 		`inclined turn lost its planted support (${ chameleon.contactCount })` );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-030 a small branch settles after travel without perpetual rocking', async () => {
+
+	const fixture = await createBranchHybrid( { radius: 0.18 } );
+	const { chameleon, branchCollider } = fixture;
+	runFrames( fixture, 120, 1.2 );
+	const direction = new THREE.Vector3( -1, 0, 0 );
+	chameleon.setCommand( {
+		move: direction,
+		facing: direction,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	runFrames( fixture, 120, 1.6 );
+	chameleon.setCommand( {
+		move: new THREE.Vector3(),
+		facing: direction,
+		sourceNormal: chameleon.supportNormal,
+	} );
+	let reference = null;
+	let maximumDrift = 0;
+	let maximumLinearSpeed = 0;
+	let maximumAngularSpeed = 0;
+	let minimumContacts = 4;
+	runFrames( fixture, 120, 6, ( _dt, step ) => {
+
+		const position = chameleon.pelvis.body.translation();
+		if ( step === 360 ) reference = new THREE.Vector3( position.x, position.y, position.z );
+		if ( step >= 360 ) {
+
+			maximumDrift = Math.max(
+				maximumDrift,
+				reference.distanceTo( new THREE.Vector3( position.x, position.y, position.z ) ),
+			);
+			maximumLinearSpeed = Math.max(
+				maximumLinearSpeed, vectorMagnitude( chameleon.pelvis.body.linvel() ),
+			);
+			maximumAngularSpeed = Math.max(
+				maximumAngularSpeed, vectorMagnitude( chameleon.pelvis.body.angvel() ),
+			);
+
+		}
+		minimumContacts = Math.min( minimumContacts, chameleon.contactCount );
+
+	} );
+	assert.ok( chameleon.feet.filter(
+		( foot ) => foot.collider?.handle === branchCollider.handle,
+	).length >= 2, 'small branch did not retain a two-claw grip' );
+	assert.ok( minimumContacts >= 2,
+		'small branch lost its support polygon (' + minimumContacts + ')' );
+	assert.equal( chameleon.staticGripLocked, true,
+		'small branch never entered a static physical grip' );
+	assert.equal( chameleon.pelvis.body.isSleeping(), true,
+		'small branch body kept solving instead of sleeping in its grip' );
+	assert.ok( maximumDrift < 0.012,
+		'small branch kept rocking by ' + maximumDrift + ' m after settlement' );
+	assert.ok( maximumLinearSpeed < 0.035 && maximumAngularSpeed < 0.08,
+		'small branch remained restless (linear=' + maximumLinearSpeed
+			+ ', angular=' + maximumAngularSpeed + ')' );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and opposite face', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { RAPIER, world } = fixture.physics;
+	const wallBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( -1.65, 0.8, 0.75 ),
+	);
+	const wallCollider = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 0.25, 0.8, 2 )
+			.setFriction( 1.05 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		wallBody,
+	);
+	fixture.physics.surfaceByCollider.set( wallCollider.handle, Object.freeze( {
+		kind: 'bark-wall',
+		clawEligible: true,
+		gripStrengthScale: 1.2,
+	} ) );
+	const forward = new THREE.Vector3( -1, 0, 0 );
+	fixture.chameleon.setCommand( {
+		move: forward,
+		facing: forward,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	let frontAlignment = -Infinity;
+	let crownAlignment = -Infinity;
+	let oppositeAlignment = Infinity;
+	let maximumHeight = -Infinity;
+	let farthestX = Infinity;
+	let minimumContacts = 4;
+	let minimumHighSupportY = Infinity;
+	let undersideFootContacts = 0;
+	let maximumFixedStepDisplacement = 0;
+	let maximumSupportAngle = 0;
+	const previousPosition = new THREE.Vector3();
+	const previousNormal = fixture.chameleon.supportNormal.clone();
+	{
+
+		const position = fixture.chameleon.pelvis.body.translation();
+		previousPosition.set( position.x, position.y, position.z );
+
+	}
+	const checkpoints = [];
+	runFrames( fixture, 120, 11, ( _dt, step ) => {
+
+		const normal = fixture.chameleon.supportNormal;
+		const position = fixture.chameleon.pelvis.body.translation();
+		const currentPosition = new THREE.Vector3( position.x, position.y, position.z );
+		maximumFixedStepDisplacement = Math.max(
+			maximumFixedStepDisplacement, previousPosition.distanceTo( currentPosition ),
+		);
+		previousPosition.copy( currentPosition );
+		if ( fixture.chameleon.contactCount >= 2 ) maximumSupportAngle = Math.max(
+			maximumSupportAngle,
+			Math.acos( THREE.MathUtils.clamp( previousNormal.dot( normal ), -1, 1 ) ),
+		);
+		previousNormal.copy( normal );
+		if ( step % 120 === 0 ) checkpoints.push(
+			step / 120 + 's p=' + position.x.toFixed( 2 ) + ',' + position.y.toFixed( 2 )
+			+ ' n=' + normal.x.toFixed( 2 ) + ',' + normal.y.toFixed( 2 )
+			+ ' c=' + fixture.chameleon.contactCount,
+		);
+		if ( position.x > -1.5 && position.y > 0.3 )
+			frontAlignment = Math.max( frontAlignment, normal.x );
+		if ( position.y > 1.55 ) {
+
+			crownAlignment = Math.max( crownAlignment, normal.y );
+			minimumHighSupportY = Math.min( minimumHighSupportY, normal.y );
+			for ( const foot of fixture.chameleon.feet )
+				if ( foot.collider?.handle === wallCollider.handle && foot.normal.y < -0.5 )
+					undersideFootContacts ++;
+
+		}
+		if ( position.x < -1.9 ) oppositeAlignment = Math.min( oppositeAlignment, normal.x );
+		maximumHeight = Math.max( maximumHeight, position.y );
+		farthestX = Math.min( farthestX, position.x );
+		minimumContacts = Math.min( minimumContacts, fixture.chameleon.contactCount );
+
+	} );
+	assert.ok( frontAlignment > 0.62,
+		'forward input never established the near wall face (' + frontAlignment + ')' );
+	assert.ok( crownAlignment > 0.72 && maximumHeight > 1.55,
+		'forward input did not wrap onto the crown (' + crownAlignment
+			+ ', y=' + maximumHeight + '; ' + checkpoints.join( '; ' ) + ')' );
+	assert.ok( oppositeAlignment < -0.5,
+		'forward input never wrapped onto the opposite face (' + oppositeAlignment + ')' );
+	assert.ok( minimumHighSupportY > -0.2,
+		'the crown traversal attached to the underside (' + minimumHighSupportY + ')' );
+	assert.equal( undersideFootContacts, 0,
+		'the crown traversal accepted an underside claw contact' );
+	assert.ok( farthestX < -2.05,
+		'the body did not continue beyond the far edge (' + farthestX
+			+ '; ' + checkpoints.join( '; ' ) + ')' );
+	assert.ok( minimumContacts >= 2,
+		'the traversal lost its two-claw support polygon (' + minimumContacts
+			+ '; ' + checkpoints.join( '; ' ) + ')' );
+	assert.ok( maximumFixedStepDisplacement < 0.035,
+		'the edge handoff teleported the body by ' + maximumFixedStepDisplacement + ' m' );
+	assert.ok( maximumSupportAngle < 0.55,
+		'the support frame snapped by ' + THREE.MathUtils.radToDeg( maximumSupportAngle )
+			+ ' degrees in one fixed step' );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-032 a branch registered after creation gets the same radial static grip', async () => {
+
+	const fixture = await createBranchHybrid( {
+		radius: 0.18,
+		registerAfterCreation: true,
+	} );
+	const direction = new THREE.Vector3( -1, 0, 0 );
+	runFrames( fixture, 120, 1.2 );
+	fixture.chameleon.setCommand( {
+		move: direction,
+		facing: direction,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	runFrames( fixture, 120, 1.4 );
+	fixture.chameleon.setCommand( {
+		move: new THREE.Vector3(),
+		facing: direction,
+		sourceNormal: fixture.chameleon.supportNormal,
+	} );
+	runFrames( fixture, 120, 6 );
+	assert.ok( fixture.chameleon.contactCount >= 2 );
+	assert.ok( fixture.chameleon.supportNormal.y > 0.88,
+		'late branch metadata did not activate the radial frame' );
+	assert.equal( fixture.chameleon.staticGripLocked, true );
+	assert.equal( fixture.chameleon.pelvis.body.isSleeping(), true );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-033 invalid branch metadata fails safe without poisoning physics', async () => {
+
+	const fixture = await createBranchHybrid( {
+		radius: 0.18,
+		branchAxis: [ NaN, Infinity, 0 ],
+		gripStrengthScale: NaN,
+	} );
+	const direction = new THREE.Vector3( -1, 0, 0 );
+	runFrames( fixture, 120, 1.2 );
+	fixture.chameleon.setCommand( {
+		move: direction,
+		facing: direction,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	runFrames( fixture, 120, 1.4 );
+	fixture.chameleon.setCommand( {
+		move: new THREE.Vector3(),
+		facing: direction,
+		sourceNormal: fixture.chameleon.supportNormal,
+	} );
+	runFrames( fixture, 120, 6 );
+	assert.ok( fixture.chameleon.contactCount >= 2,
+		'invalid metadata destroyed the two-claw support polygon' );
+	assert.ok( fixture.chameleon.supportNormal.y > 0.88,
+		'invalid branch axis prevented the collider-derived radial frame' );
+	assert.ok( Math.abs( fixture.chameleon.supportNormal.length() - 1 ) < 1e-6,
+		'invalid metadata produced a non-unit support normal' );
+	assert.equal( fixture.chameleon.staticGripLocked, true,
+		'invalid grip scale prevented the fail-safe static grip' );
+	assert.equal( fixture.chameleon.pelvis.body.isSleeping(), true,
+		'invalid metadata kept the physical body awake' );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-034 branch flank hands support to its physical end cap', async () => {
+
+	const fixture = await createBranchHybrid( {
+		radius: 0.3,
+		halfHeight: 0.5,
+		spawn: new THREE.Vector3( 0, 0.6, 0 ),
+	} );
+	const { chameleon, branchCollider } = fixture;
+	runFrames( fixture, 120, 1.5 );
+	const direction = new THREE.Vector3( -1, 0, 0 );
+	chameleon.setCommand( {
+		move: direction,
+		facing: direction,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	let maximumEndCapFeet = 0;
+	let maximumEndCapSupportAlignment = -Infinity;
+	let farthestX = Infinity;
+	let minimumTransitionContacts = 4;
+	let firstLowSupport = null;
+	let endCapEstablished = false;
+	let maximumTransitionStepDisplacement = 0;
+	const initial = chameleon.pelvis.body.translation();
+	const previousPosition = new THREE.Vector3( initial.x, initial.y, initial.z );
+	runFrames( fixture, 120, 5, () => {
+
+		const position = chameleon.pelvis.body.translation();
+		const currentPosition = new THREE.Vector3( position.x, position.y, position.z );
+		const fixedStepDisplacement = previousPosition.distanceTo( currentPosition );
+		previousPosition.copy( currentPosition );
+		const endCapFeet = chameleon.feet.filter(
+			foot => foot.collider?.handle === branchCollider.handle && foot.normal.x < -0.72,
+		).length;
+		if ( ! endCapEstablished ) {
+
+			maximumTransitionStepDisplacement = Math.max(
+				maximumTransitionStepDisplacement, fixedStepDisplacement,
+			);
+			minimumTransitionContacts = Math.min(
+				minimumTransitionContacts, chameleon.contactCount,
+			);
+			if ( chameleon.contactCount < 2 && ! firstLowSupport )
+				firstLowSupport = {
+					x: position.x,
+					y: position.y,
+					contacts: chameleon.contactCount,
+					support: chameleon.supportNormal.toArray(),
+				};
+
+		}
+		maximumEndCapFeet = Math.max( maximumEndCapFeet, endCapFeet );
+		if ( endCapFeet >= 2 ) endCapEstablished = true;
+		if ( endCapFeet >= 2 ) maximumEndCapSupportAlignment = Math.max(
+			maximumEndCapSupportAlignment, -chameleon.supportNormal.x,
+		);
+		farthestX = Math.min( farthestX, position.x );
+
+	} );
+	assert.ok( maximumEndCapFeet >= 2,
+		'the front pair never established end-cap contacts' );
+	assert.ok( maximumEndCapSupportAlignment > 0.65,
+		'end-cap contacts did not rotate the support frame ('
+			+ maximumEndCapSupportAlignment + ')' );
+	assert.ok( farthestX < -0.52,
+		'the body stalled before wrapping beyond the cylinder cap (' + farthestX + ')' );
+	assert.ok( minimumTransitionContacts >= 2,
+		'the side-to-cap handoff lost its support polygon ('
+			+ minimumTransitionContacts + '; ' + JSON.stringify( firstLowSupport ) + ')' );
+	assert.ok( maximumTransitionStepDisplacement < 0.025,
+		'the side-to-cap handoff teleported the body by '
+			+ maximumTransitionStepDisplacement + ' m' );
 	assertFiniteHybrid( fixture );
 	fixture.dispose();
 

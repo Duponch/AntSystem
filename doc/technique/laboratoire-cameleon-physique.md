@@ -167,12 +167,45 @@ donc pas de roulis parasite sur une poutre, tandis qu’une seule griffe peut
 maintenir le repère pendant le passage d’une arête. Le nombre d’opérations reste
 strictement borné à quatre appuis par pas.
 
+L’agrégation des normales est cohérente avec le repère accepté au pas précédent,
+et non une somme arithmétique aveugle. Une normale orthogonale peut prendre le
+relais lors d’un passage d’arête ; une normale strictement opposée ne peut pas
+annuler le vecteur ni retourner le ventre. Si les seules contributions restantes
+s’annulent ou appartiennent à l’hémisphère opposé, le dernier repère normalisé
+est conservé. Sur un collider cylindrique dominant marqué comme branche, le
+repère de support est en plus reconstruit analytiquement depuis son axe et le
+rayon centre-vers-corps. Les appuis répartis autour d’un petit périmètre ne font
+donc plus basculer la normale moyenne d’un flanc à l’autre. Le coefficient de
+prise du collider ne modifie pas la fréquence du solveur : il borne seulement
+les plafonds de force et de couple déjà calculés, à coût constant.
+
+Les projecteurs de surface sont résolus depuis le registre courant des colliders,
+pas figés à la construction du caméléon : enregistrer une branche après sa
+création active donc le même repère radial. L’axe déclaré, le rayon et
+`gripStrengthScale` sont validés avant usage. Une donnée absente, non finie ou
+dégénérée déclenche un repli déterministe vers l’axe transformé et les dimensions
+du collider Rapier, avec une échelle de prise neutre. Ce fail-safe conserve une
+normale unitaire et n’injecte jamais de `NaN` dans les forces ou les couples.
+
+Le projecteur respecte aussi la longueur finie du cylindre. Sur le fût, la
+normale est radiale ; au-delà de la demi-longueur utile, les contacts du bouchon
+font converger le cadre vers l’axe sortant. La transition utilise les contacts
+physiques réellement acquis et conserve le polygone de deux griffes : elle ne
+prolonge pas artificiellement un cylindre infini au-delà de son extrémité.
+
 Après convergence au repos sur plusieurs griffes, le contrôleur annule forces et
 couples puis laisse Rapier endormir le corps. Les ancres restent alors
 bit-identiques sous un verrou de prise statique, sans rappel PD ni jitter caché.
 Toute intention de déplacement ou de rotation libère ce verrou ; un impact
 réveille Rapier et une saisie réveille explicitement le même corps. Le
 contrôleur borné reprend au pas fixe suivant.
+
+La fin d’une commande ne peut pas entretenir ce verrou indéfiniment. Chacune des
+deux paires diagonales possède un budget d’une correction. Si un pas est déjà en
+cours, son atterrissage consomme le budget de cette paire, puis la paire opposée
+peut se remettre en place une fois. Les projections de candidats qui bougent
+légèrement sur un cylindre ne peuvent ensuite relancer aucune paire en boucle,
+et le corps peut converger puis dormir sur une branche étroite.
 
 Une prise, un saut, un manque d’appuis ou le mode **Physique libre** désactive
 ce rappel. Rapier reste alors l’unique autorité du mouvement global.
@@ -252,6 +285,16 @@ caméléon peut ainsi franchir une arête puis redescendre ; les changements
 aléatoires, le watchdog d’immobilité et le rappel des limites tournent tous dans
 le plan local du support, sans allocation dans la boucle chaude.
 
+Le faisceau borné de recherche distingue les deux topologies autour d’une lèvre :
+le rayon avant acquiert le mur qui s’oppose au mouvement, puis un rayon de retour
+placé au-delà de l’arête acquiert le sommet ou la face suivante qui accompagne
+le mouvement. Tout rayon dont l’origine est déjà à l’intérieur du collider visé
+est rejeté avant le classement ; il ne peut donc sélectionner artificiellement
+l’envers ou la sous-face du même volume. Le filtre d’hémisphère des normales
+conserve simultanément l’ancien appui, la normale orthogonale de transition et
+le nouveau côté, ce qui rend continu le parcours sol → mur → sommet → face
+opposée avec la seule commande avant.
+
 `Espace` démarre une précharge tant qu’un support ou la tolérance au bord reste
 valide. Maintenir la touche augmente continûment deux cibles : hauteur
 balistique et vitesse vers l’avant anatomique. Le relâchement, ou l’atteinte de
@@ -322,6 +365,12 @@ entière reste tangente au support et n’est jamais étirée pour masquer une e
 proximale. Toutes les rotations restent bornées autour de la pose de repos. Une
 cible inaccessible ne peut donc ni accumuler une torsion, ni faire vibrer
 frénétiquement un poignet ou une cheville.
+
+L’état d’arrêt possède un budget distinct du cycle de marche. Après relâchement,
+chaque paire diagonale peut être corrigée au plus une fois ; si un pas était
+commencé, son atterrissage consomme le budget de sa paire et laisse uniquement
+celui de la diagonale opposée. Cette règle reste vraie même lorsque le point
+projeté sous chaque griffe oscille sur une surface courbe.
 
 Le repère avant/haut/côté n’est jamais déduit des axes locaux de `spine_02` ou
 du bassin, car ces axes suivent la chaîne exportée et ne coïncident pas avec ceux
@@ -599,6 +648,12 @@ Les preuves automatiques actuelles sont :
   couvre précisément l’idle corps entier sans déplacement des pieds et
   `CHAMELEON-LAB-GAIT-009` supprime cette enveloppe terrestre lorsque le corps
   est détaché ;
+- `test/chameleon-procedural-gait.test.js`, de `CHAMELEON-GAIT-001` à `015`,
+  protège la machine de pas et son stockage fixe. `CHAMELEON-GAIT-014` impose
+  au plus une correction pour chacune des deux diagonales après l’arrêt malgré
+  le déplacement apparent des candidats sur un support courbe ;
+  `CHAMELEON-GAIT-015` impose qu’un pas déjà engagé se termine, puis laisse à la
+  diagonale opposée son unique correction sans permettre un nouveau cycle ;
 - `test/chameleon-lab-passive-tail.test.js` protège les treize nœuds fixes, le
   collet sacré à un segment, les ancres explicites, le gradient de compliance,
   les longueurs, la gravité, l’inertie, l’amortissement, les projections de
@@ -616,7 +671,7 @@ Les preuves automatiques actuelles sont :
   configurable, les ligaments, les capsules corps, l’auto-collision des
   segments, l’unique projection externe par nœud et par pas, et la récupération ;
 - `test/chameleon-lab-active-ragdoll.test.js` : les identifiants
-  `CHAMELEON-LAB-RAGDOLL-001` à `028` protègent le corps Rapier unique, les
+  `CHAMELEON-LAB-RAGDOLL-001` à `034` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
@@ -643,7 +698,18 @@ Les preuves automatiques actuelles sont :
   `CHAMELEON-LAB-RAGDOLL-028` impose les mêmes propriétés sur une pente de `18°` ;
   `CHAMELEON-LAB-RAGDOLL-029` combine avance et virage, en marche et en sprint,
   sur sol et pente, avec au moins deux appuis et un ratio latéral inférieur à
-  `0,30` ;
+  `0,30` ; `CHAMELEON-LAB-RAGDOLL-030` conduit puis arrête le corps sur une
+  branche de petit rayon et exige deux griffes, un verrou statique endormi, une
+  dérive et des vitesses résiduelles bornées ; `CHAMELEON-LAB-RAGDOLL-031`
+  maintient uniquement la commande avant et exige la succession mur proche,
+  sommet puis face opposée, sans prise de sous-face ni perte totale d’appui ;
+  `CHAMELEON-LAB-RAGDOLL-032` impose le même repère radial et le même sommeil à
+  une branche enregistrée après la création du caméléon ;
+  `CHAMELEON-LAB-RAGDOLL-033` injecte un axe et une force de prise non finis et
+  vérifie le repli vers le collider, une normale unitaire, deux griffes et un
+  verrou statique sain ; `CHAMELEON-LAB-RAGDOLL-034` conduit le corps du flanc
+  au bouchon physique d’un cylindre fini et exige deux contacts, la rotation du
+  cadre vers l’axe, une progression au-delà du bord et aucun saut de position ;
 - `test/chameleon-physical-asset.test.js` protège les contrats de mesh/rig
   `3.6.0` et d’anatomie `2.2.0`, le mesh source exact, le skin, les 7 206 sommets
   originaux, l’absence de poids `tail_*` sur le corps, le collet `tail_01`, la

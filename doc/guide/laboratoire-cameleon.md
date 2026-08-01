@@ -120,6 +120,22 @@ jitter. Une commande libère explicitement ce verrou ; un impact réveille Rapie
 et le début d’une saisie demande le même réveil. Ces deux interactions externes
 font aussi partie de la vérification manuelle du laboratoire.
 
+Sur une branche cylindrique, les normales des griffes peuvent pointer dans des
+directions très différentes sans s’annuler. Le corps conserve le côté cohérent
+du support, puis utilise l’axe et le rayon de la branche pour construire son
+repère radial. Après l’arrêt, la démarche termine au plus le couple diagonal
+déjà engagé puis peut corriger l’autre : chacune des deux paires diagonales
+dispose d’un seul passage, jamais davantage. Une petite branche rugueuse doit
+donc finir par acquérir le même verrou statique et le même sommeil qu’un sol
+plat, sans balancement continu.
+
+Les propriétés d’une branche restent prises en compte lorsqu’elles sont
+enregistrées après la création du caméléon. Si son axe ou sa force de prise sont
+invalides, le laboratoire revient aux dimensions physiques du collider et à des
+valeurs sûres : le support ne devient ni non fini, ni inutilisable. Arrivé au
+bout du cylindre, le caméléon transfère progressivement ses griffes du flanc au
+bouchon réel, fait pivoter son repère vers l’axe et continue sans bond de pose.
+
 ### Physique libre
 
 La touche `F` suspend la recherche d’appuis et la stabilisation du corps. Le
@@ -156,6 +172,17 @@ Essayez les perchoirs horizontal, diagonal et vertical, puis le plan rocheux
 incliné. Les pieds alternent entre phase d’appui et phase de transfert. Les
 cibles restent bornées autour du corps et les articulations restent proches de
 leur pose anatomique, même lorsqu’un support disparaît.
+
+Sur l’extrémité d’un perchoir cylindrique, au moins deux griffes doivent rester
+en prise pendant le passage du flanc au bouchon. Le corps continue au-delà de
+l’extrémité sans téléportation et sa normale tourne continûment de la direction
+radiale vers la direction axiale.
+
+Maintenez ensuite uniquement la commande avant face à un mur rugueux. Le
+caméléon doit monter, franchir le sommet et redescendre sur la face opposée sans
+demander de saut ni de correction latérale. Les griffes passent progressivement
+d’une normale à la suivante ; une normale opposée ou une sonde née à l’intérieur
+du volume ne doit ni attirer le corps sous l’arête, ni inverser son repère.
 
 ### Verre lisse
 
@@ -286,6 +313,9 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
   griffes restent exactement fixes tandis que l’idle du squelette anime très
   légèrement le bassin et le thorax ; ce mouvement peut redonner une faible vie
   secondaire à la queue ;
+- sur une branche étroite, les appuis peuvent entourer le cylindre avec des
+  normales divergentes ; chaque paire diagonale peut se remettre en place une
+  fois, puis le corps se verrouille sans alterner indéfiniment les pas ;
 - le corps amortit progressivement sa dérive ; une seule griffe peut préserver
   brièvement son orientation pendant qu’une autre franchit une arête ;
 - l’animal glisse sur le verre ;
@@ -304,6 +334,12 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 - le corps change instantanément de position sans `R` ;
 - une destination sur le verre est acceptée ou un trajet coupe un vide entre
   deux surfaces non connectées ;
+- maintenir avant au sommet d’un mur colle le corps sous la lèvre, inverse sa
+  normale ou oblige à manœuvrer pour atteindre la face opposée ;
+- le caméléon continue à osciller ou à relancer des pas après son arrêt sur une
+  branche cylindrique rugueuse ;
+- au bout d’une branche, les griffes quittent toutes le support, la normale
+  saute brutalement ou le corps se téléporte au lieu de prendre le bouchon ;
 - un pied reste pris dans le vide ou sur le verre ;
 - le corps traverse durablement le sol, un mur, un rocher ou un tronc ;
 - la queue est remplacée par une forme tubulaire, s’allonge, se détache du

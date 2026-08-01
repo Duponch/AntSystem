@@ -451,5 +451,98 @@ test( 'CHAMELEON-GAIT-009 an external landing can request the same smooth settle
 	assert.equal( swung, true );
 	for ( let foot = 0; foot < 4; foot ++ )
 		assertNear( gait.getView().footPositions[ foot * 3 ], landing.contactPositions[ foot * 3 ] );
+	const settled = Float32Array.from( gait.getView().footPositions );
+	for ( let index = 0; index < 240; index ++ ) gait.update( 1 / 120, landing );
+	assert.deepEqual( gait.getView().footPositions, settled );
+
+} );
+
+test( 'CHAMELEON-GAIT-014 curved-support candidate motion bounds both diagonal settlements', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.15,
+		minSwingDuration: 0.08,
+		maxSwingDuration: 0.08,
+	} );
+	const initial = flatContacts();
+	gait.reset( initial );
+	// Driving even less than one stride arms post-drive settlement without
+	// starting a walking pair.
+	const driven = flatContacts();
+	driven.speed = 0.3;
+	gait.update( 1 / 120, driven );
+	assert.equal( gait.getView().activePair, -1 );
+	const stepsBeforeStop = gait.getTelemetry().stepsStarted;
+	const completedBeforeStop = gait.getTelemetry().stepsCompleted;
+
+	const stopped = flatContacts();
+	stopped.speed = 0;
+	for ( let tick = 0; tick < 240; tick ++ ) {
+
+		// A narrow curved support moves the projection beneath each nominal claw
+		// as the physical root rocks. Keep that candidate error permanently above
+		// the settlement threshold to reproduce the former alternating loop.
+		const candidateAdvance = tick % 2 === 0 ? 0.09 : - 0.09;
+		for ( let foot = 0; foot < 4; foot ++ )
+			stopped.contactPositions[ foot * 3 ] = initial.contactPositions[ foot * 3 ]
+				+ candidateAdvance;
+		gait.update( 1 / 120, stopped );
+
+	}
+
+	assert.equal( gait.getTelemetry().stepsStarted - stepsBeforeStop, 2,
+		'each diagonal must be corrected exactly once' );
+	assert.equal( gait.getTelemetry().stepsCompleted - completedBeforeStop, 2 );
+	assert.equal( gait.getView().activePair, -1 );
+	assert.deepEqual( Array.from( gait.getView().footSwinging ), [ 0, 0, 0, 0 ] );
+	const settled = Float32Array.from( gait.getView().footPositions );
+	for ( let tick = 0; tick < 240; tick ++ ) {
+
+		const candidateAdvance = tick % 2 === 0 ? 0.09 : - 0.09;
+		for ( let foot = 0; foot < 4; foot ++ )
+			stopped.contactPositions[ foot * 3 ] = initial.contactPositions[ foot * 3 ]
+				+ candidateAdvance;
+		gait.update( 1 / 120, stopped );
+
+	}
+	assert.deepEqual( gait.getView().footPositions, settled,
+		'candidate noise restarted settlement after both pair budgets were spent' );
+
+} );
+
+test( 'CHAMELEON-GAIT-015 stopping mid-stride finishes it and corrects the opposite pair once', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.025,
+		minSwingDuration: 0.12,
+		maxSwingDuration: 0.12,
+	} );
+	gait.reset( flatContacts() );
+	const moving = flatContacts( 0.24 );
+	for ( let tick = 0; tick < 30 && gait.getView().activePair < 0; tick ++ )
+		gait.update( 1 / 120, moving );
+	assert.notEqual( gait.getView().activePair, -1 );
+	const activeAtStop = gait.getView().activePair;
+	const stepsAtStop = gait.getTelemetry().stepsStarted;
+
+	const stopped = flatContacts( 0.24 );
+	stopped.speed = 0;
+	for ( let tick = 0; tick < 120; tick ++ ) {
+
+		// Keep the opposite diagonal pair deliberately far from its candidate.
+		// It receives one corrective stride, never an unbounded alternation.
+		const oppositePair = activeAtStop === 0
+			? [ CHAMELEON_FOOT.FRONT_RIGHT, CHAMELEON_FOOT.HIND_LEFT ]
+			: [ CHAMELEON_FOOT.FRONT_LEFT, CHAMELEON_FOOT.HIND_RIGHT ];
+		for ( const foot of oppositePair )
+			stopped.contactPositions[ foot * 3 ] = moving.contactPositions[ foot * 3 ] + 0.08;
+		gait.update( 1 / 120, stopped );
+
+	}
+
+	assert.equal( gait.getTelemetry().stepsStarted, stepsAtStop + 1,
+		'the opposite diagonal did not receive its single corrective stride' );
+	assert.equal( gait.getView().activePair, -1 );
+	assert.deepEqual( Array.from( gait.getView().footSwinging ), [ 0, 0, 0, 0 ] );
 
 } );

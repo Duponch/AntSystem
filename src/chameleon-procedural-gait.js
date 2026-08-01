@@ -357,6 +357,7 @@ export class ChameleonProceduralGait {
 		this._activePair = - 1;
 		this._nextPair = 0;
 		this._settlingAfterDrive = false;
+		this._settlementPairsRemaining = 0;
 		this._initialized = false;
 
 		this._telemetry = Object.seal( {
@@ -418,6 +419,7 @@ export class ChameleonProceduralGait {
 		this._activePair = - 1;
 		this._nextPair = 0;
 		this._settlingAfterDrive = false;
+		this._settlementPairsRemaining = 0;
 		this._initialized = true;
 		this._telemetry.updateCalls = 0;
 		this._telemetry.integrationSteps = 0;
@@ -477,6 +479,7 @@ export class ChameleonProceduralGait {
 	requestSettlement() {
 
 		this._settlingAfterDrive = true;
+		this._settlementPairsRemaining = 0b11;
 		return this;
 
 	}
@@ -507,6 +510,7 @@ export class ChameleonProceduralGait {
 		if ( moving ) {
 
 			this._settlingAfterDrive = true;
+			this._settlementPairsRemaining = 0b11;
 			const drivenDistance = speed * dt;
 			this._distanceSinceStep += drivenDistance;
 			this._telemetry.distanceDriven += drivenDistance;
@@ -522,19 +526,33 @@ export class ChameleonProceduralGait {
 
 			} else if ( ! moving && this._settlingAfterDrive ) {
 
-				// A stop may occur while one diagonal pair is still far behind the
-				// body. Correct that over-extension with one slow, ordinary swing;
+				// A stop may occur while either diagonal pair is still far behind the
+				// body. Correct each over-extension with at most one ordinary swing;
 				// otherwise the IK would have to stretch or the animal would freeze
 				// on tiptoe. The larger threshold prevents stationary micro-steps.
 				const settlingThreshold = Math.max(
 					this.minTargetError * 2,
 					this.stepDistance * 0.24,
 				);
-				let pair = this._nextPair;
-				if ( ! this._pairNeedsStepAtThreshold( pair, input, settlingThreshold ) )
-					pair = pair === 0 ? 1 : 0;
-				if ( this._pairNeedsStepAtThreshold( pair, input, settlingThreshold ) )
-					this._startPair( pair, this.stopSpeed + 1e-5, input );
+				let pair = - 1;
+				for ( let attempt = 0; attempt < 2; attempt ++ ) {
+
+					const candidatePair = attempt === 0
+						? this._nextPair : this._nextPair === 0 ? 1 : 0;
+					const pairBit = 1 << candidatePair;
+					if ( ( this._settlementPairsRemaining & pairBit ) === 0 ) continue;
+					this._settlementPairsRemaining &= ~pairBit;
+					if ( this._pairNeedsStepAtThreshold(
+						candidatePair, input, settlingThreshold,
+					) ) {
+
+						pair = candidatePair;
+						break;
+
+					}
+
+				}
+				if ( pair >= 0 ) this._startPair( pair, this.stopSpeed + 1e-5, input );
 				else this._settlingAfterDrive = false;
 
 			}
@@ -549,9 +567,22 @@ export class ChameleonProceduralGait {
 			const secondDone = this._advanceFoot( second, dt );
 			if ( firstDone && secondDone ) {
 
+				const completedPair = this._activePair;
 				this._activePair = - 1;
 				this._nextPair = this._nextPair === 0 ? 1 : 0;
 				this._telemetry.stepsCompleted ++;
+				// Each diagonal may finish or correct at most once after drive release.
+				// Both pairs reach fresh supports without an endless A/B alternation.
+				// Re-evaluating either pair again against moving candidates would let
+				// root motion keep alternating targets forever; the two-bit budget ends
+				// that feedback while leaving all four claws freshly planted.
+				if ( ! moving ) {
+
+					this._settlementPairsRemaining &= ~( 1 << completedPair );
+					if ( this._settlementPairsRemaining === 0 )
+						this._settlingAfterDrive = false;
+
+				}
 
 			}
 

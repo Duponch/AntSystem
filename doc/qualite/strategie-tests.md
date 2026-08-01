@@ -123,6 +123,9 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   jalons du graphe d’accès statique livré, sans coupe aérienne ni téléportation
   sur les raccords configurés, puis reprise immédiate par une entrée clavier ;
 - adaptation progressive des quatre appuis à deux normales dans un angle sol/mur ;
+- maintien de la seule commande avant pendant la séquence complète sol → mur →
+  sommet → face opposée, sans prise de sous-face ni capture par un rayon dont
+  l’origine se trouve déjà dans le collider ;
 - marche sur les troncs rugueux, puis glissement attendu sur le verre ;
 - passage locomotion stabilisée ↔ **Physique libre** sans téléportation, vrille ni articulation qui s’entortille ;
 - saisie, secousse, lancer du corps unique et récupération progressive ;
@@ -140,6 +143,13 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   micro-mouvement ;
 - verrou statique des griffes par sommeil Rapier après stabilisation, puis réveil
   immédiat sur commande, impact ou saisie ;
+- arrêt sur une branche de petit rayon : au moins deux griffes conservées,
+  normale radiale cohérente malgré des contacts opposés, au plus une remise en
+  place par paire diagonale, puis verrou statique sans balancement perpétuel ;
+- enregistrement tardif d’une branche avec le même verrou radial, métadonnées
+  non finies ramenées sans contamination aux dimensions physiques du collider,
+  puis transfert continu d’au moins deux griffes du flanc au bouchon d’un
+  cylindre fini ;
 - membres souples mais conservant un faible tonus pendant la saisie ou le mode
   libre, sans pénétration du torse ni entrecroisement de segments, puis
   récupération bornée de la pose sans déchirure visuelle ;
@@ -180,9 +190,14 @@ commande ;
 `CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` annule atomiquement l’autorité du saut
 pendant une saisie ou en mode libre. `CHAMELEON-LAB-GAIT-005` protège l’idle
 corps entier sans déplacer les pieds et `CHAMELEON-LAB-GAIT-009` supprime cette
-enveloppe terrestre lorsque le corps est détaché.
+enveloppe terrestre lorsque le corps est détaché. Dans
+`test/chameleon-procedural-gait.test.js`, `CHAMELEON-GAIT-014` borne la remise
+en place d’arrêt à une correction pour chacune des deux diagonales malgré des
+candidats mouvants sur une surface courbe ; `CHAMELEON-GAIT-015` termine le
+couple déjà en vol puis autorise exactement une correction de la diagonale
+opposée, sans redémarrer de boucle.
 
-Les identifiants `CHAMELEON-LAB-RAGDOLL-001` à `028` sont l’autorité de
+Les identifiants `CHAMELEON-LAB-RAGDOLL-001` à `034` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
 corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
 endormable, récupération d’impact et valeurs finies.
@@ -199,7 +214,21 @@ toupie, `CHAMELEON-LAB-RAGDOLL-027` sa réponse mesurée à `0,10`, `0,25` et
 bornée sans perte d’appui, ainsi qu’un dépassement après relâchement inférieur à
 `12°`. `CHAMELEON-LAB-RAGDOLL-028` impose les mêmes garanties sur une pente de
 `18°`, puis `CHAMELEON-LAB-RAGDOLL-029` couvre `avant + virage` en marche et
-sprint, sur plat et pente, avec un ratio latéral inférieur à `0,30`. Les preuves
+sprint, sur plat et pente, avec un ratio latéral inférieur à `0,30`.
+`CHAMELEON-LAB-RAGDOLL-030` exige qu’une petite branche rugueuse conserve au
+moins deux griffes, converge vers le sommeil et reste sous les bornes de dérive
+et de vitesse après déplacement. `CHAMELEON-LAB-RAGDOLL-031` impose avec la
+seule commande avant le passage de la face proche d’un mur à son sommet puis à
+sa face opposée ; il interdit la prise de la sous-face, vérifie la continuité des
+appuis et complète les oracles unitaires d’agrégation des normales opposées et de
+rejet des rayons démarrant dans un collider. `CHAMELEON-LAB-RAGDOLL-032`
+reproduit la prise radiale et le sommeil lorsque la branche est enregistrée
+après la construction du caméléon. `CHAMELEON-LAB-RAGDOLL-033` fournit des
+métadonnées de branche non finies et exige le repli vers la géométrie Rapier,
+une normale unitaire, deux griffes et un verrou endormi. Enfin,
+`CHAMELEON-LAB-RAGDOLL-034` vérifie le transfert physique flanc→bouchon d’un
+cylindre fini : au moins deux appuis, cadre tourné vers l’axe, progression au-delà
+du bord et déplacement par sous-pas borné. Les preuves
 spécialisées des membres verrouillent le faible tonus configurable, les capsules
 du corps,
 l’auto-collision segmentaire et une seule projection de scène par nœud libre et
@@ -217,8 +246,10 @@ finis et le scratch fixe du rig visuel ; la silhouette de peau n’est pas un
 oracle pixel. `CHAMELEON-LAB-PASSIVE-TAIL-021` et
 `CHAMELEON-LAB-PASSIVE-TAIL-022` empêchent qu’un
 plan de contact périmé freine la queue hors d’un support fini et qu’une correction
-de milieu de segment laisse une extrémité dans un collider voisin. Les transitions
-multi-surfaces complexes et les destinations cliquées de bout en bout, la saisie
+de milieu de segment laisse une extrémité dans un collider voisin. Le raccord
+canonique sol–mur–sommet–face opposée et le transfert flanc–bouchon cylindrique
+possèdent désormais leur preuve physique ; les autres transitions multi-surfaces
+complexes et les destinations cliquées de bout en bout, la saisie
 visuelle, la silhouette cutanée de la queue et la sensation du pilotage exigent
 encore l’inspection runtime.
 

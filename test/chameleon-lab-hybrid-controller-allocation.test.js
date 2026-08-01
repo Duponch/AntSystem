@@ -52,6 +52,7 @@ test( 'CHAMELEON-LAB-CONTROLLER-ALLOC-001 support output is stable and numerical
 	assert.deepEqual( output, emptyImmutable );
 	assert.deepEqual( output, {
 		count: 0,
+		coherentCount: 0,
 		centroid: { x: 0, y: 0, z: 0 },
 		normal: { x: 0, y: 1, z: 0 },
 	} );
@@ -100,5 +101,104 @@ test( 'CHAMELEON-LAB-CONTROLLER-ALLOC-002 force output is stable and exactly mat
 		}, 1 ),
 		/force output/u,
 	);
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-ALLOC-003 opposite contact normals cannot cancel the support frame', () => {
+
+	const positions = new Float32Array( 12 );
+	const normals = new Float32Array( [
+		0, 1, 0,
+		0, -1, 0,
+		0, 0, 0,
+		0, 0, 0,
+	] );
+	const active = new Uint8Array( [ 1, 1, 0, 0 ] );
+	const frame = supportFrameFromContacts( positions, normals, active );
+	assert.equal( frame.count, 2 );
+	assert.equal( frame.coherentCount, 2 );
+	assert.deepEqual( frame.normal, { x: 0, y: 1, z: 0 } );
+	assert.equal( Math.hypot( frame.normal.x, frame.normal.y, frame.normal.z ), 1 );
+	const reversed = supportFrameFromContacts(
+		positions,
+		new Float32Array( [
+			0, -1, 0,
+			0, 1, 0,
+			0, 0, 0,
+			0, 0, 0,
+		] ),
+		active,
+	);
+	assert.deepEqual( reversed.normal, frame.normal,
+		'opposite normals must not depend on foot iteration order' );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-ALLOC-004 a previous frame survives an orthogonal cancellation', () => {
+
+	const output = {
+		count: 0,
+		centroid: { x: 0, y: 0, z: 0 },
+		normal: { x: 1, y: 0, z: 0 },
+	};
+	const returned = supportFrameFromContacts(
+		new Float32Array( 12 ),
+		new Float32Array( [
+			0, 1, 0,
+			0, -1, 0,
+			0, 0, 0,
+			0, 0, 0,
+		] ),
+		new Uint8Array( [ 1, 1, 0, 0 ] ),
+		output,
+		{ x: 1, y: 0, z: 0 },
+	);
+	assert.strictEqual( returned, output );
+	assert.deepEqual( output.normal, { x: 1, y: 0, z: 0 } );
+
+} );
+
+test( 'CHAMELEON-LAB-CONTROLLER-ALLOC-005 an orthogonal edge wins while the opposite face is rejected', () => {
+
+	const positions = new Float32Array( 12 );
+	const active = new Uint8Array( [ 1, 1, 0, 0 ] );
+	const output = {
+		count: 0,
+		centroid: { x: 0, y: 0, z: 0 },
+		normal: { x: 0, y: 1, z: 0 },
+	};
+	supportFrameFromContacts(
+		positions,
+		new Float32Array( [
+			1, 0, 0,
+			0, -1, 0,
+			0, 0, 0,
+			0, 0, 0,
+		] ),
+		active,
+		output,
+		{ x: 0, y: 1, z: 0 },
+	);
+	assert.deepEqual( output.normal, { x: 1, y: 0, z: 0 },
+		'the wall normal is a valid ninety-degree transition' );
+	assert.equal( output.coherentCount, 1 );
+
+	output.normal.x = 0;
+	output.normal.y = 1;
+	supportFrameFromContacts(
+		positions,
+		new Float32Array( [
+			0, -1, 0,
+			0, -2, 0,
+			0, 0, 0,
+			0, 0, 0,
+		] ),
+		active,
+		output,
+		{ x: 0, y: 1, z: 0 },
+	);
+	assert.deepEqual( output.normal, { x: 0, y: 1, z: 0 },
+		'an opposite-only contact set preserves the last coherent frame' );
+	assert.equal( output.coherentCount, 0 );
 
 } );

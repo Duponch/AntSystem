@@ -61,9 +61,10 @@ function requireSupportOutput( output ) {
 
 }
 
-function writeSupportFrame( output, count, cx, cy, cz, nx, ny, nz ) {
+function writeSupportFrame( output, count, coherentCount, cx, cy, cz, nx, ny, nz ) {
 
 	output.count = count;
+	output.coherentCount = coherentCount;
 	output.centroid.x = cx;
 	output.centroid.y = cy;
 	output.centroid.z = cz;
@@ -74,13 +75,36 @@ function writeSupportFrame( output, count, cx, cy, cz, nx, ny, nz ) {
 
 }
 
-export function supportFrameFromContacts( positions, normals, active = null, output = null ) {
+export function supportFrameFromContacts(
+	positions, normals, active = null, output = null, previousNormal = null,
+) {
 
 	if ( ! positions || positions.length < HYBRID_FOOT_COUNT * 3 )
 		throw new TypeError( 'four packed contact positions are required' );
 	if ( ! normals || normals.length < HYBRID_FOOT_COUNT * 3 )
 		throw new TypeError( 'four packed contact normals are required' );
+	const target = output !== null && output !== undefined
+		? requireSupportOutput( output ) : null;
+	let previousX = Number( previousNormal?.x );
+	let previousY = Number( previousNormal?.y );
+	let previousZ = Number( previousNormal?.z );
+	const previousLength = Math.hypot( previousX, previousY, previousZ );
+	const hasPreviousNormal = Number.isFinite( previousLength ) && previousLength > 1e-8;
+	if ( hasPreviousNormal ) {
+
+		previousX /= previousLength;
+		previousY /= previousLength;
+		previousZ /= previousLength;
+
+	} else {
+
+		previousX = 0;
+		previousY = 1;
+		previousZ = 0;
+
+	}
 	let count = 0;
+	let coherentCount = 0;
 	let cx = 0; let cy = 0; let cz = 0;
 	let nx = 0; let ny = 0; let nz = 0;
 	for ( let foot = 0; foot < HYBRID_FOOT_COUNT; foot ++ ) {
@@ -91,44 +115,84 @@ export function supportFrameFromContacts( positions, normals, active = null, out
 			+ normals[ offset ] + normals[ offset + 1 ] + normals[ offset + 2 ];
 		if ( ! Number.isFinite( values ) ) continue;
 		cx += positions[ offset ]; cy += positions[ offset + 1 ]; cz += positions[ offset + 2 ];
-		nx += normals[ offset ]; ny += normals[ offset + 1 ]; nz += normals[ offset + 2 ];
 		count ++;
+		const normalLength = Math.hypot(
+			normals[ offset ], normals[ offset + 1 ], normals[ offset + 2 ],
+		);
+		if ( normalLength <= 1e-8 ) continue;
+		const unitX = normals[ offset ] / normalLength;
+		const unitY = normals[ offset + 1 ] / normalLength;
+		const unitZ = normals[ offset + 2 ] / normalLength;
+		// The previous support frame is the temporal hemisphere authority. A
+		// perpendicular normal is valid at an edge; an opposite face cannot cancel
+		// the current frame or flip it through a zero vector.
+		if ( hasPreviousNormal ) {
+
+			const alignment = unitX * previousX + unitY * previousY + unitZ * previousZ;
+			if ( alignment < -1e-8 ) continue;
+
+		}
+		nx += unitX;
+		ny += unitY;
+		nz += unitZ;
+		coherentCount ++;
 
 	}
 	if ( count === 0 ) {
 
-		if ( output !== null && output !== undefined )
-			return writeSupportFrame( requireSupportOutput( output ), 0, 0, 0, 0, 0, 1, 0 );
+		if ( target ) return writeSupportFrame( target, 0, 0, 0, 0, 0, 0, 1, 0 );
 		return Object.freeze( {
 			count: 0,
+			coherentCount: 0,
 			centroid: Object.freeze( { x: 0, y: 0, z: 0 } ),
 			normal: Object.freeze( { x: 0, y: 1, z: 0 } ),
 		} );
 
 	}
 	const inverseCount = 1 / count;
-	const normalLength = Math.hypot( nx, ny, nz ) || 1;
-	if ( output !== null && output !== undefined ) return writeSupportFrame(
-		requireSupportOutput( output ),
+	const coherentLength = Math.hypot( nx, ny, nz );
+	if ( coherentLength > 1e-8 ) {
+
+		nx /= coherentLength;
+		ny /= coherentLength;
+		nz /= coherentLength;
+
+	} else if ( hasPreviousNormal ) {
+
+		nx = previousX;
+		ny = previousY;
+		nz = previousZ;
+
+	} else {
+
+		nx = 0;
+		ny = 1;
+		nz = 0;
+
+	}
+	if ( target ) return writeSupportFrame(
+		target,
 		count,
+		coherentCount,
 		cx * inverseCount,
 		cy * inverseCount,
 		cz * inverseCount,
-		nx / normalLength,
-		ny / normalLength,
-		nz / normalLength,
+		nx,
+		ny,
+		nz,
 	);
 	return Object.freeze( {
 		count,
+		coherentCount,
 		centroid: Object.freeze( {
 			x: cx * inverseCount,
 			y: cy * inverseCount,
 			z: cz * inverseCount,
 		} ),
 		normal: Object.freeze( {
-			x: nx / normalLength,
-			y: ny / normalLength,
-			z: nz / normalLength,
+			x: nx,
+			y: ny,
+			z: nz,
 		} ),
 	} );
 
