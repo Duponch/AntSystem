@@ -21,6 +21,14 @@ transition de peau progressive sur 18 % de la distance géodésique évite une
 charnière visible et laisse le reste traîner, se balancer et se poser sur le
 décor sans tirer le bas du dos. Le laboratoire ne fait pas avancer la colonie.
 
+Le caméléon n’est plus un volume vert uniforme. Sa peau utilise une palette
+facettée : verts végétaux sur le corps, ventre plus clair, crête chaude, pattes
+et queue nuancées. Les yeux pyramidaux possèdent une tourelle jaune, un iris
+ambre, une pupille sombre et un reflet. Cet aspect est peint directement sur
+les facettes du modèle ; il conserve donc exactement la même silhouette, le
+même squelette et le même coût de rendu. Le shader toon commun à l’ensemble du
+jeu sera traité séparément plus tard.
+
 ## Ouvrir le laboratoire
 
 Démarrez le serveur puis ouvrez :

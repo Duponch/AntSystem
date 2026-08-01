@@ -37,6 +37,9 @@ const TAIL_BONE_NAMES = Object.freeze(
 );
 const EXPECTED_REST_MESH_SHA256 = '1732a987975806e9e34a48e529347dfca2291e02b8b9c967b3a7ae18f6f2287c';
 const EXPECTED_TAIL_REST_SHA256 = '6b493bfe12b33cc1e7caba9884b4681ad9317f24ab4da3d14c12b8599a820bd1';
+const EXPECTED_EYE_CENTER = Object.freeze( [ -0.473, 0.142 ] );
+const EXPECTED_PUPIL_RGBA8 = '2,4,4,255';
+const EXPECTED_EYE_HIGHLIGHT_RGBA8 = '255,226,146,255';
 
 function parseGlb( bytes ) {
 
@@ -330,9 +333,28 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.extras?.foot_contact_patch_space, 'blender-rig-local-z-up' );
 	assert.equal( meshNode.extras?.origin_normalized, true );
 	assert.deepEqual( meshNode.extras?.origin_shift, [ 0, 0, 6.119999885559082 ] );
+	assert.equal( meshNode.extras?.look_contract_version, '1.0.0' );
+	assert.equal( meshNode.extras?.look_model, 'faceted-anatomical-color0-rgba8-v1' );
+	assert.equal( meshNode.extras?.eye_style, 'embedded-faceted-turret-iris-pupil-highlight-v1' );
+	assert.deepEqual( meshNode.extras?.eye_palette_center_xz, EXPECTED_EYE_CENTER );
+	assert.deepEqual( meshNode.extras?.eye_palette_turret_axes, [ 0.044, 0.042 ] );
+	assert.deepEqual( meshNode.extras?.eye_palette_iris_axes, [ 0.026, 0.026 ] );
+	assert.deepEqual( meshNode.extras?.eye_palette_pupil_axes, [ 0.01, 0.01 ] );
+	assert.equal( meshNode.extras?.look_draw_calls, 1 );
+	assert.equal( meshNode.extras?.toon_shader, 'deferred-global-treatment' );
 
 	const primitives = gltf.meshes.flatMap( ( mesh ) => mesh.primitives ?? [] );
 	assert.equal( primitives.length, 1, 'asset must contain exactly one skinned primitive' );
+	const material = gltf.materials?.[ primitives[ 0 ].material ];
+	assert.ok( material, 'the physical chameleon must retain one PBR material' );
+	assert.deepEqual( material.pbrMetallicRoughness?.baseColorFactor, [ 1, 1, 1, 1 ],
+		'white base colour is required so it does not contaminate COLOR_0' );
+	assert.equal( material.pbrMetallicRoughness?.metallicFactor, 0 );
+	assert.ok( Math.abs( material.pbrMetallicRoughness?.roughnessFactor - 0.78 ) < 1e-6 );
+	assert.equal( material.doubleSided, true );
+	assert.equal( material.extras?.look_contract_version, '1.0.0' );
+	assert.equal( material.extras?.look_model, 'faceted-anatomical-vertex-palette' );
+	assert.equal( material.extras?.global_toon_shader, 'deferred' );
 
 	const globalMin = [ Infinity, Infinity, Infinity ];
 	const globalMax = [ - Infinity, - Infinity, - Infinity ];
@@ -341,7 +363,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 
 		assert.equal( primitive.mode ?? 4, 4, 'physics meshes must use triangle primitives' );
 		assert.notEqual( primitive.indices, undefined, 'triangle primitive must be indexed' );
-		for ( const semantic of [ 'POSITION', 'NORMAL', 'JOINTS_0', 'WEIGHTS_0' ] ) {
+		for ( const semantic of [ 'POSITION', 'NORMAL', 'JOINTS_0', 'WEIGHTS_0', 'COLOR_0' ] ) {
 
 			assert.notEqual( primitive.attributes?.[ semantic ], undefined, `missing ${ semantic }` );
 
@@ -351,6 +373,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 
 		const positions = createAccessorReader( gltf, binary, primitive.attributes.POSITION );
 		const normals = createAccessorReader( gltf, binary, primitive.attributes.NORMAL );
+		const colours = createAccessorReader( gltf, binary, primitive.attributes.COLOR_0 );
 		const indices = createAccessorReader( gltf, binary, primitive.indices );
 		assert.equal( positions.accessor.type, 'VEC3' );
 		assert.equal( positions.accessor.componentType, 5126 );
@@ -361,6 +384,16 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 		assert.equal( normals.accessor.type, 'VEC3' );
 		assert.equal( normals.accessor.componentType, 5126 );
 		assert.equal( normals.accessor.count, positions.accessor.count );
+		assert.equal( colours.accessor.type, 'VEC4' );
+		assert.equal( colours.accessor.componentType, 5121,
+			'the faceted palette must remain a compact RGBA8 stream' );
+		assert.equal( colours.accessor.normalized, true );
+		assert.equal( colours.accessor.count, positions.accessor.count );
+		assert.equal( colours.accessor.byteOffset ?? 0, 0 );
+		const colourView = gltf.bufferViews[ colours.accessor.bufferView ];
+		assert.equal( colourView.target, 34962, 'COLOR_0 must remain a GPU array buffer' );
+		assert.equal( colourView.byteStride ?? 4, 4 );
+		assert.equal( colourView.byteLength, colours.accessor.count * 4 );
 		assert.equal( indices.accessor.type, 'SCALAR' );
 		assert.ok( [ 5121, 5123, 5125 ].includes( indices.accessor.componentType ) );
 		assert.equal( indices.accessor.count % 3, 0 );
@@ -380,6 +413,54 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 			}
 
 		}
+		const palette = new Set();
+		const colourMin = [ Infinity, Infinity, Infinity, Infinity ];
+		const colourMax = [ - Infinity, - Infinity, - Infinity, - Infinity ];
+		const pupilVerticesBySide = [ 0, 0 ];
+		const highlightVerticesBySide = [ 0, 0 ];
+		for ( let vertex = 0; vertex < colours.accessor.count; vertex ++ ) {
+
+			const rgba = Array.from( { length: 4 }, ( _, lane ) => colours.read( vertex, lane ) );
+			const paletteKey = rgba.join( ',' );
+			assert.equal( rgba[ 3 ], 255, 'the opaque chameleon may not acquire transparent facets' );
+			for ( let lane = 0; lane < 4; lane ++ ) {
+
+				colourMin[ lane ] = Math.min( colourMin[ lane ], rgba[ lane ] );
+				colourMax[ lane ] = Math.max( colourMax[ lane ], rgba[ lane ] );
+
+			}
+			palette.add( paletteKey );
+			if ( paletteKey === EXPECTED_PUPIL_RGBA8 || paletteKey === EXPECTED_EYE_HIGHLIGHT_RGBA8 ) {
+
+				const blenderX = positions.read( vertex, 0 );
+				const blenderY = - positions.read( vertex, 2 );
+				const blenderZ = positions.read( vertex, 1 );
+				const eyeDistance = (
+					( blenderX - EXPECTED_EYE_CENTER[ 0 ] ) / 0.025
+				) ** 2 + (
+					( blenderZ - EXPECTED_EYE_CENTER[ 1 ] ) / 0.025
+				) ** 2;
+				assert.ok( eyeDistance <= 1,
+					'painted pupil and catchlight must stay on the physical eye turret' );
+				const side = blenderY < 0 ? 0 : 1;
+				if ( paletteKey === EXPECTED_PUPIL_RGBA8 ) pupilVerticesBySide[ side ] ++;
+				else highlightVerticesBySide[ side ] ++;
+
+			}
+
+		}
+		assert.deepEqual( colours.accessor.min, colourMin );
+		assert.deepEqual( colours.accessor.max, colourMax );
+		assert.ok( palette.size >= 20,
+			'the anatomical palette must preserve body regions, eye facets and value steps' );
+		assert.ok( palette.size <= 48,
+			'the authored look must stay a deliberate palette rather than per-vertex noise' );
+		assert.ok( palette.has( EXPECTED_PUPIL_RGBA8 ), 'the polygonal pupil colour is missing' );
+		assert.ok( palette.has( EXPECTED_EYE_HIGHLIGHT_RGBA8 ), 'the painted eye catchlight is missing' );
+		assert.ok( pupilVerticesBySide.every( ( count ) => count >= 3 ),
+			'each physical eye turret must contain a polygonal pupil' );
+		assert.ok( highlightVerticesBySide.every( ( count ) => count >= 1 ),
+			'each physical eye turret must contain a painted catchlight' );
 		for ( let lane = 0; lane < 3; lane ++ ) {
 
 			assert.ok( Math.abs( actualMin[ lane ] - positions.accessor.min[ lane ] ) < 1e-5 );

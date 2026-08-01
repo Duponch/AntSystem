@@ -130,10 +130,34 @@ qu’aucun corps Rapier supplémentaire n’est exporté dans le GLB : le solveu
 XPBD borné du runtime représente les douze segments, dont un cinématique et onze
 passifs. Les 43 os d’authoring ne correspondent donc pas à 43 corps Rapier.
 
+### Contrat visuel facetté
+
+Le même mesh porte maintenant une palette anatomique dans l’attribut glTF
+`COLOR_0`. Le flux est un `RGBA8` normalisé, opaque et compact ; il ne crée ni
+primitive, ni matériau, ni draw call supplémentaire. Ses couleurs distinguent
+le dos, le ventre, la crête, les membres, les paumes et la queue. Des motifs
+spatiaux de grande taille évitent l’ancien vert uniforme sans produire de bruit
+« confetti » d’un triangle à l’autre.
+
+Les deux tourelles oculaires restent intégrées à la géométrie originale. Leurs
+facettes reçoivent successivement une couronne jaune, un iris ambre en six
+secteurs, une pupille sombre et un petit reflet peint. Aucun mesh d’œil ou
+texture UV n’est ajouté. Le matériau PBR conserve sa rugosité, ses normales
+facettées, la lumière et les ombres ; son facteur de base est blanc afin de ne
+pas multiplier la palette par l’ancien vert.
+
+`scripts/author-chameleon-physical-look.py` régénère ce flux de façon
+déterministe en préservant byte pour byte les positions, indices, poids et
+matrices de skinning. Le contrat `look_contract_version = 1.0.0` exige un mesh,
+une primitive, un matériau et un seul draw. Le futur shader toon global du jeu
+est volontairement hors de ce contrat : `COLOR_0` fournit seulement l’albédo
+artistique commun qu’il pourra consommer plus tard.
+
 La reconstruction est déterministe et s’exécute sans interface Blender :
 
 ```powershell
 blender --background blender/chameleon_physics_rig.blend --python scripts/rebuild-chameleon-hybrid-asset.py
+python scripts/author-chameleon-physical-look.py
 ```
 
 Blender et son MCP n’ont donc pas besoin d’être ouverts pour lancer, tester ou
