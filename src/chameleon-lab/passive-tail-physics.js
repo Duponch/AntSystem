@@ -92,6 +92,9 @@ export class PassiveTailPhysics {
 		this.collisionFriction = Math.min( 1, nonNegativeNumber(
 			'collisionFriction', options.collisionFriction ?? 0.18,
 		) );
+		this.collisionStaticFrictionSpeed = nonNegativeNumber(
+			'collisionStaticFrictionSpeed', options.collisionStaticFrictionSpeed ?? 0.05,
+		);
 		this.maxSpeed = positiveNumber( 'maxSpeed', options.maxSpeed ?? 12 );
 		this.sleepEnabled = options.sleepEnabled !== false;
 		this.sleepSpeedThreshold = nonNegativeNumber(
@@ -154,6 +157,19 @@ export class PassiveTailPhysics {
 		this._sleepKinematicAnchors = new Float32Array( this.kinematicAnchors.length );
 		this.segmentLengths = new Float32Array( PASSIVE_TAIL_SEGMENT_COUNT );
 		this.bendLengths = new Float32Array( PASSIVE_TAIL_BEND_CONSTRAINT_COUNT );
+		this.bendComplianceScales = new Float32Array( PASSIVE_TAIL_BEND_CONSTRAINT_COUNT );
+		this.bendComplianceScales.fill( 1 );
+		if ( options.bendComplianceProfile !== undefined ) {
+
+			const profile = options.bendComplianceProfile;
+			if ( ! profile || profile.length < PASSIVE_TAIL_BEND_CONSTRAINT_COUNT )
+				throw new TypeError( 'bendComplianceProfile is too short' );
+			for ( let bend = 0; bend < PASSIVE_TAIL_BEND_CONSTRAINT_COUNT; bend ++ )
+				this.bendComplianceScales[ bend ] = positiveNumber(
+					`bendComplianceProfile[${ bend }]`, profile[ bend ],
+				);
+
+		}
 		this.radii = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
 		this.inverseMasses = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
 		this.segmentLambdas = new Float64Array( PASSIVE_TAIL_SEGMENT_COUNT );
@@ -762,9 +778,51 @@ export class PassiveTailPhysics {
 			const tangentX = velocityX - nx * remainingNormalVelocity;
 			const tangentY = velocityY - ny * remainingNormalVelocity;
 			const tangentZ = velocityZ - nz * remainingNormalVelocity;
-			this.previousPositions[ offset ] += tangentX * this.collisionFriction;
-			this.previousPositions[ offset + 1 ] += tangentY * this.collisionFriction;
-			this.previousPositions[ offset + 2 ] += tangentZ * this.collisionFriction;
+			const tangentSpeed = Math.hypot( tangentX, tangentY, tangentZ ) / this.fixedDt;
+			const friction = tangentSpeed <= this.collisionStaticFrictionSpeed
+				? 1 : this.collisionFriction;
+			this.previousPositions[ offset ] += tangentX * friction;
+			this.previousPositions[ offset + 1 ] += tangentY * friction;
+			this.previousPositions[ offset + 2 ] += tangentZ * friction;
+
+		}
+
+	}
+
+	_stabilizeContactVelocities() {
+
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			if ( this._collisionActive[ node ] === 0 ) continue;
+			const offset = node * 3;
+			const normalOffset = COMPONENT_COUNT + offset;
+			const nx = this._collisionPlanes[ normalOffset ];
+			const ny = this._collisionPlanes[ normalOffset + 1 ];
+			const nz = this._collisionPlanes[ normalOffset + 2 ];
+			let velocityX = this.positions[ offset ] - this.previousPositions[ offset ];
+			let velocityY = this.positions[ offset + 1 ] - this.previousPositions[ offset + 1 ];
+			let velocityZ = this.positions[ offset + 2 ] - this.previousPositions[ offset + 2 ];
+			const normalVelocity = velocityX * nx + velocityY * ny + velocityZ * nz;
+			if ( normalVelocity < 0 ) {
+
+				this.previousPositions[ offset ] += nx * normalVelocity;
+				this.previousPositions[ offset + 1 ] += ny * normalVelocity;
+				this.previousPositions[ offset + 2 ] += nz * normalVelocity;
+				velocityX -= nx * normalVelocity;
+				velocityY -= ny * normalVelocity;
+				velocityZ -= nz * normalVelocity;
+
+			}
+			const remainingNormal = velocityX * nx + velocityY * ny + velocityZ * nz;
+			const tangentX = velocityX - nx * remainingNormal;
+			const tangentY = velocityY - ny * remainingNormal;
+			const tangentZ = velocityZ - nz * remainingNormal;
+			const tangentSpeed = Math.hypot( tangentX, tangentY, tangentZ ) / this.fixedDt;
+			const friction = tangentSpeed <= this.collisionStaticFrictionSpeed
+				? 1 : this.collisionFriction;
+			this.previousPositions[ offset ] += tangentX * friction;
+			this.previousPositions[ offset + 1 ] += tangentY * friction;
+			this.previousPositions[ offset + 2 ] += tangentZ * friction;
 
 		}
 
@@ -944,7 +1002,8 @@ export class PassiveTailPhysics {
 				for ( let bend = 0; bend < PASSIVE_TAIL_BEND_CONSTRAINT_COUNT; bend ++ )
 					this._solveDistance(
 						bend, bend + 2, this.bendLengths[ bend ],
-						this.bendLambdas, bend, bendAlpha,
+						this.bendLambdas, bend,
+						bendAlpha * this.bendComplianceScales[ bend ],
 					);
 
 			} else {
@@ -952,7 +1011,8 @@ export class PassiveTailPhysics {
 				for ( let bend = PASSIVE_TAIL_BEND_CONSTRAINT_COUNT - 1; bend >= 0; bend -- )
 					this._solveDistance(
 						bend, bend + 2, this.bendLengths[ bend ],
-						this.bendLambdas, bend, bendAlpha,
+						this.bendLambdas, bend,
+						bendAlpha * this.bendComplianceScales[ bend ],
 					);
 				for ( let segment = PASSIVE_TAIL_SEGMENT_COUNT - 1; segment >= 0; segment -- )
 					this._solveDistance(
@@ -971,9 +1031,17 @@ export class PassiveTailPhysics {
 		this._solveBaseCone();
 		this._solveBaseChainLengths();
 		this._pinRoot();
-		if ( this.kinematicSegmentCount > 1 ) this._projectPassiveChainLengthsForward();
+		// Do not run a final hard forward-chain projection here. It rewrites the
+		// solved positions after XPBD has established its velocity state and turns
+		// small length corrections into a perpetual catapult at the free tip. Seven
+		// alternating iterations already keep the visual error sub-centimetric.
+		// Collisionless analytical callers may still request the legacy exact
+		// centreline; no contact velocity exists to destabilise in that case.
+		if ( this.kinematicSegmentCount > 1 && typeof projectPoint !== 'function' )
+			this._projectPassiveChainLengthsForward();
 		this._projectCachedCollisions();
 		this._pinRoot();
+		this._stabilizeContactVelocities();
 		this._limitVelocitiesAndRecover();
 		this._updateSleepState();
 		this._totalSteps ++;

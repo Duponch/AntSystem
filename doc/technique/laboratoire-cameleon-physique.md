@@ -196,8 +196,12 @@ La recherche teste un ensemble borné de directions et n’accepte que les
 colliders marqués `clawEligible`. Un mur de verre non éligible reste donc un
 support de collision, mais jamais une prise.
 
-La démarche procédurale alterne les couples diagonaux sans phase aérienne. Le
-cycle est volontairement lent et à fort facteur d’appui. Avant la fermeture des
+La démarche procédurale alterne les couples diagonaux sans phase aérienne. Un
+pas ne démarre qu’après la distance d’enjambée configurée : la remise en place
+d’arrêt ne peut plus se déclencher pendant la marche. La trajectoire verticale
+utilise une enveloppe quintique `C2` asymétrique : décollage rapide, plateau de
+dégagement haut, puis pose plus douce. Les doigts ne raclent donc plus le sol
+pendant la majeure partie du transfert. Avant la fermeture des
 contacts, une pose corps entier anime les ceintures scapulaires et pelviennes,
 les segments supérieurs, les coudes ou genoux, le bassin, le thorax, le cou et
 la tête. Le bassin participe davantage au pas ; le thorax contre-oscille et la
@@ -233,9 +237,11 @@ paramètres indépendants exposés dans l’interface.
 ## Queue passive à géométrie originale
 
 La queue emploie une tige XPBD de taille constante : treize nœuds pour douze
-segments. Ses quatre premiers nœuds imposent trois segments cinématiques qui
-suivent exactement le pont sacré `tail_01` à `tail_03` ; la dynamique commence
-sur `tail_04`, après la croupe. Le mouvement de la queue ne peut donc plus
+segments. Les trois premiers nœuds imposent deux segments cinématiques
+`tail_01` et `tail_02`. La liberté physique commence sur `tail_03`, mais sa
+compliance augmente graduellement sur les contraintes proximales
+`0,04 → 0,12 → 0,35 → 0,70 → 1`. Le garde de skinning à trois os reste inchangé
+et protège toujours la croupe. Le mouvement de la queue ne peut donc pas
 entraîner visuellement les fesses. Il n’existe aucun moteur, pose cible ou
 couple musculaire dans ce prototype : gravité, inertie, amortissement,
 contraintes de longueur et de courbure déterminent seuls son mouvement
@@ -243,10 +249,11 @@ secondaire.
 
 Le solveur physique reste ancré au corps rigide, tandis que le bassin reçoit
 encore sa pose procédurale au rendu. Pour éviter que ces deux repères ne
-cisaillent la couture, le rig visuel conserve `tail_01` à `tail_03` dans la pose
-du bassin, puis rebase la ligne dynamique sur l’extrémité et la tangente réelles
-de ce collet avant d’orienter `tail_04` à `tail_12`. Il ne réécrit ni les sommets
-ni leur topologie.
+cisaillent la couture, le rig rebase la ligne dynamique au bout de `tail_02`,
+puis mélange les rotations physiques de `tail_03`, `tail_04` et `tail_05` avec
+des poids `0,28`, `0,58` et `0,82`; `tail_06..12` suivent à 100 %. Il ne réécrit
+ni les sommets ni leur topologie : la frontière rigide/libre devient un gradient
+continu au lieu d’une charnière visible.
 
 Sept itérations résolvent les longueurs, la flexion et les collisions à 120 Hz.
 Chaque nœud possède un rayon décroissant de la base à la pointe. Une projection
@@ -257,7 +264,10 @@ n’est interrogée qu’une fois par nœud dynamique éveillé et par pas fixe 
 plan de contact obtenu est réutilisé pendant les itérations XPBD restantes. Le
 coût des collisions externes ne dépend donc pas du nombre d’itérations. La
 souplesse, l’amortissement, la gravité propre et l’échelle des rayons de
-collision sont réglables. Une fenêtre de repos déterministe met la tige en
+collision sont réglables. Une friction statique annule la dérive tangentielle
+sous `0,055 m/s`; la projection dure qui réinjectait de l’énergie après le solve
+est désactivée dès qu’un projecteur de collisions est présent. Une fenêtre de
+repos déterministe met la tige en
 sommeil lorsque sa racine et tous ses nœuds restent sous les seuils de
 déplacement et de vitesse.
 Pendant ce sommeil, les buffers sont conservés bit pour bit et les contraintes
@@ -294,12 +304,15 @@ Le clic gauche lance un rayon uniquement au début de la saisie. Le point touch�
 est ensuite relié au pointeur par un ressort amorti appliqué au corps unique. La
 vitesse du pointeur est convertie en impulsion bornée au relâchement. Tout le
 modèle suit ainsi une autorité physique cohérente, sans rupture entre segments.
-Au relâchement, le contrôleur interroge d’abord la paire de collision réellement
-touchée par le torse ou la tête. Si le support accepte les griffes, les quatre
-semelles sont projetées sur ce même mur, rocher ou cylindre, puis le corps
-s’aligne progressivement : un lancer peut donc se terminer par un accrochage
-sans téléportation. La recherche plus coûteuse des colliders dynamiques n’est
-effectuée que durant cette courte récupération.
+Au relâchement, aucune surface proche n’est capturée à distance. Le contrôleur
+attend un vrai manifold Rapier du torse ou de la tête, compare tous les impacts
+éligibles de façon déterministe, puis verrouille un seul propriétaire. Un
+réflexe PD tourne d’abord la face ventrale vers sa normale ; aucune griffe ni
+force d’aimantation n’est autorisée lorsque le dos ou le flanc fait face au
+support. À partir de `bodyUp·normal = 0,48`, deux semelles au moins peuvent
+prendre ce même collider. Le verrou persiste pendant le transitoire : un angle
+sol/mur ou deux surfaces voisines ne peuvent plus voler alternativement les
+appuis. L’ensemble reste continu, sans téléportation.
 
 ## Pas fixe, interpolation et budget
 
@@ -404,22 +417,24 @@ Les preuves automatiques actuelles sont :
   les excursions du bassin/thorax/tête, le lissage apériodique et l’absence
   d’allocation dans le modèle de pose ;
 - `test/chameleon-lab-passive-tail.test.js` protège les treize nœuds fixes, le
-  pont sacré à trois segments, les longueurs, la gravité, l’inertie,
+  pont sacré à deux segments, le gradient de compliance, les longueurs, la gravité, l’inertie,
   l’amortissement, la projection bornée des collisions, le reset et la
   récupération des valeurs non finies, ainsi que le sommeil bit-identique et
-  tous ses motifs de réveil ;
+  tous ses motifs de réveil, ainsi que l’absence de vitesse Verlet cachée au sol ;
 - `test/chameleon-lab-anatomical-limb.test.js` protège longueurs exactes,
   ceinture mobile, flexions, paumes complètes, continuité du pôle et suspension ;
 - `test/chameleon-lab-passive-limbs.test.js` protège le faible tonus
   configurable, les ligaments, les capsules corps, l’auto-collision des
   segments, l’unique projection externe par nœud et par pas, et la récupération ;
 - `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
-  `CHAMELEON-LAB-RAGDOLL-001` à `016` protègent le corps Rapier unique, les
+  `CHAMELEON-LAB-RAGDOLL-001` à `019` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
   lancer sur mur ou cylindre, la suppression des prises périmées au décollage
-  et la reprise d’un support réel après impact, ainsi que la flexion au repos,
+  et la reprise d’un support réel après impact, l’absence de capture à distance,
+  le redressement ventral et le verrouillage d’un propriétaire dans un coin,
+  ainsi que la flexion au repos,
   le repère anatomique du modèle et le mouvement doux du cou et de la tête ;
 - `test/chameleon-physical-asset.test.js` protège les contrats de mesh `3.5.0`
   et d’anatomie `2.1.0`, le mesh source exact, le skin, les 7 206 sommets

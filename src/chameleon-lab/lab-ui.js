@@ -367,7 +367,7 @@ export function createLabUI( {
 		object: ragdoll.settings,
 		property: 'stepLength',
 		min: 0.08,
-		max: 0.28,
+		max: 0.34,
 		step: 0.005,
 		format: ( value ) => `${ value.toFixed( 3 ) } m`,
 	} );
@@ -377,7 +377,7 @@ export function createLabUI( {
 		object: ragdoll.settings,
 		property: 'stepHeight',
 		min: 0.015,
-		max: 0.14,
+		max: 0.20,
 		step: 0.005,
 		format: ( value ) => `${ value.toFixed( 3 ) } m`,
 	} );
@@ -387,7 +387,7 @@ export function createLabUI( {
 		object: ragdoll.settings,
 		property: 'strideAmplitude',
 		min: 0.1,
-		max: 0.72,
+		max: 0.9,
 		step: 0.01,
 		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
 	} );
@@ -397,7 +397,7 @@ export function createLabUI( {
 		object: ragdoll.settings,
 		property: 'limbLift',
 		min: 0,
-		max: 0.55,
+		max: 0.75,
 		step: 0.01,
 		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
 	} );
@@ -407,7 +407,7 @@ export function createLabUI( {
 		object: ragdoll.settings,
 		property: 'jointFlex',
 		min: 0,
-		max: 0.9,
+		max: 1.15,
 		step: 0.01,
 		format: ( value ) => `${ value.toFixed( 2 ) } rad`,
 	} );
@@ -501,6 +501,26 @@ export function createLabUI( {
 		max: 0.42,
 		step: 0.01,
 		format: ( value ) => `${ value.toFixed( 2 ) } m`,
+	} );
+	makeRange( {
+		parent: grip,
+		label: 'Réflexe de redressement',
+		object: ragdoll.settings,
+		property: 'rightingStrength',
+		min: 0,
+		max: 2,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) }×`,
+	} );
+	makeRange( {
+		parent: grip,
+		label: 'Verrouillage de surface',
+		object: ragdoll.settings,
+		property: 'surfaceCommitTime',
+		min: 0.2,
+		max: 2,
+		step: 0.05,
+		format: ( value ) => `${ value.toFixed( 2 ) } s`,
 	} );
 
 	const display = fieldset( panel, 'Affichage & coût' );

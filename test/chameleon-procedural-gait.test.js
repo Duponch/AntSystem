@@ -6,6 +6,7 @@ import {
 	CHAMELEON_FOOT,
 	CHAMELEON_FOOT_COMPONENTS,
 	ChameleonProceduralGait,
+	swingClearanceEnvelope,
 	TWO_BONE_IK_RESULT_SIZE,
 	solveTwoBoneIK,
 } from '../src/chameleon-procedural-gait.js';
@@ -161,6 +162,40 @@ test( 'CHAMELEON-GAIT-003 diagonal pairs alternate and a stopped gait stays perf
 	const snapshot = Float32Array.from( gait.getView().footPositions );
 	for ( let index = 0; index < 240; index ++ ) gait.update( 1 / 120, stopped );
 	assert.deepEqual( gait.getView().footPositions, snapshot );
+
+} );
+
+test( 'CHAMELEON-GAIT-010 moving feet wait for the configured stride instead of starting a settlement swing', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		fixedStep: 1 / 120,
+		stepDistance: 0.15,
+		minSwingDuration: 0.18,
+		maxSwingDuration: 0.18,
+	} );
+	gait.reset( flatContacts() );
+	const desired = flatContacts( 0.24 );
+	desired.speed = 0.6;
+	for ( let step = 0; step < 29; step ++ ) gait.update( 1 / 120, desired );
+	assert.equal( gait.getTelemetry().stepsStarted, 0 );
+	assert.equal( gait.getView().activePair, -1 );
+	assert.equal( gait.getView().distanceSinceStep < gait.stepDistance, true );
+
+	gait.update( 1 / 120, desired );
+	assert.equal( gait.getTelemetry().stepsStarted, 1 );
+	assert.notEqual( gait.getView().activePair, -1 );
+
+} );
+
+test( 'CHAMELEON-GAIT-011 C2 swing clearance creates a high plateau with exact still endpoints', () => {
+
+	assert.equal( swingClearanceEnvelope( 0 ), 0 );
+	assert.equal( swingClearanceEnvelope( 1 ), 0 );
+	assert.ok( swingClearanceEnvelope( 0.18 ) >= 0.9 );
+	assert.ok( swingClearanceEnvelope( 0.5 ) >= 0.999999 );
+	assert.ok( swingClearanceEnvelope( 0.78 ) >= 0.85 );
+	assert.ok( swingClearanceEnvelope( 0.1 ) > 0.35 );
+	assert.ok( swingClearanceEnvelope( 0.9 ) > 0.18 );
 
 } );
 

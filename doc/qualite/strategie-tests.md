@@ -122,7 +122,7 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   mouvement du bassin et du thorax, regard cou/tête vivant au repos, semelles
   complètes à plat et absence de jitter distal ;
 - conservation exacte des 7 206 sommets de la queue originale, sans tube de
-  remplacement, avec pont sacré rigide, dynamique à partir de `tail_04`, raccord
+  remplacement, avec pont sacré rigide, liberté graduelle à partir de `tail_03`, raccord
   visuel continu au bassin, inertie, amortissement, contacts continus sur le
   décor et sommeil sans micro-mouvement ;
 - membres souples mais conservant un faible tonus pendant la saisie ou le mode
@@ -130,6 +130,8 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   récupération bornée de la pose sans déchirure visuelle ;
 - lancer sur mur et cylindre rugueux : accrochage à la surface réellement
   touchée, rotation continue du corps et absence de téléportation ;
+- absence de capture avant le premier manifold, aucune griffe dorsale,
+  redressement ventral et propriétaire unique dans un coin multi-surfaces ;
 - caméra sans traversée persistante du décor ;
 - debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
@@ -140,7 +142,7 @@ Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
 `chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll`,
 `chameleon-lab-hybrid-controller-allocation` et
 `chameleon-physical-asset` protègent la structure, les commandes et les bornes.
-Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `016` sont l’autorité de
+Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `019` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
 corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
 endormable, récupération d’impact et valeurs finies. Les preuves spécialisées
@@ -149,7 +151,7 @@ l’auto-collision segmentaire et une seule projection de scène par nœud libre
 par pas, indépendamment du nombre d’itérations XPBD. Les preuves d’asset
 verrouillent les contrats `3.5.0`/`2.1.0`, le mesh source exact,
 `original_tail_vertices = 7206`, l’absence de poids `tail_*` sur le corps, le
-pont sacré `tail_01` à `tail_03`, la racine dynamique `tail_04`, le rebase visuel
+garde cutané `tail_01` à `tail_03`, la racine physique graduelle `tail_03`, le rebase visuel
 et les axes de membres contenus dans le volume fermé. Les transitions
 multi-surfaces complexes, la saisie visuelle, la silhouette cutanée de la queue
 et la sensation du pilotage exigent encore l’inspection runtime.

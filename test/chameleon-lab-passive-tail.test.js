@@ -741,3 +741,43 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-016 external projections stay bounded and slee
 	assertBuffersFinite( tail );
 
 } );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-017 graded collar settles without hidden Verlet spin', () => {
+
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.6, z: 0 },
+		segmentLength: 0.065,
+		kinematicSegmentCount: 2,
+		bendCompliance: 5e-6,
+		bendComplianceProfile: [ 0.04, 0.12, 0.35, 0.7, 1, 1, 1, 1, 1, 1, 1 ],
+		damping: 3.2,
+		collisionFriction: 0.68,
+		collisionStaticFrictionSpeed: 0.055,
+		projectPoint: planeProjector(),
+		sleepEnabled: false,
+	} );
+	assert.equal( tail.kinematicNodeCount, 3 );
+	assert.deepEqual(
+		Array.from( tail.bendComplianceScales.slice( 0, 5 ) ),
+		Array.from( new Float32Array( [ 0.04, 0.12, 0.35, 0.7, 1 ] ) ),
+	);
+	assert.throws( () => tail.applyImpulse( 2, { x: 0, y: 1, z: 0 } ), /passive node/u );
+	tail.applyImpulse( 3, { x: 0, y: 0.35, z: 0.18 } );
+	for ( let step = 0; step < 3_600; step ++ ) tail.stepFixed();
+	let maximumVerletSpeed = 0;
+	for ( let node = tail.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+		const offset = node * 3;
+		maximumVerletSpeed = Math.max( maximumVerletSpeed, Math.hypot(
+			tail.positions[ offset ] - tail.previousPositions[ offset ],
+			tail.positions[ offset + 1 ] - tail.previousPositions[ offset + 1 ],
+			tail.positions[ offset + 2 ] - tail.previousPositions[ offset + 2 ],
+		) / tail.fixedDt );
+
+	}
+	assert.ok( maximumVerletSpeed < 0.001, `hidden tail speed ${ maximumVerletSpeed }` );
+	assert.ok( tail.kineticEnergy() < 1e-6, `residual tail energy ${ tail.kineticEnergy() }` );
+	assert.ok( tail.maxSegmentError() < 0.006 );
+	assertBuffersFinite( tail );
+
+} );

@@ -53,6 +53,16 @@ export class PassiveTailVisualRig {
 			: 1;
 		if ( this.staticBoneCount < 1 || this.staticBoneCount >= this.bones.length )
 			throw new Error( 'Hybrid chameleon static tail collar metadata is invalid.' );
+		// The skin guard protects the rump vertices, but it must not create a hard
+		// motion seam. Physics releases one bone earlier and the first three visual
+		// rotations progressively blend from the authored collar into the rod.
+		this.physicsKinematicBoneCount = Math.max( 1, this.staticBoneCount - 1 );
+		this.transitionWeights = new Float32Array( this.bones.length );
+		for ( let index = this.physicsKinematicBoneCount; index < this.bones.length; index ++ )
+			this.transitionWeights[ index ] = index === this.physicsKinematicBoneCount
+				? 0.28 : index === this.physicsKinematicBoneCount + 1
+					? 0.58 : index === this.physicsKinematicBoneCount + 2 ? 0.82 : 1;
+		this.restQuaternions = this.bones.map( ( bone ) => bone.quaternion.clone() );
 		this.restWorldPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
 		this.rebasedPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
 		this._bonePosition = new THREE.Vector3();
@@ -106,7 +116,7 @@ export class PassiveTailVisualRig {
 
 		if ( ! positions || positions.length < PASSIVE_TAIL_NODE_COUNT * 3 )
 			throw new RangeError( 'tail pose buffer is too short' );
-		const collarIndex = this.staticBoneCount - 1;
+		const collarIndex = this.physicsKinematicBoneCount - 1;
 		const collar = this.bones[ collarIndex ];
 		collar.updateWorldMatrix( true, true );
 		collar.getWorldPosition( this._bonePosition );
@@ -115,7 +125,7 @@ export class PassiveTailVisualRig {
 			.multiplyScalar( this.segmentLengths[ collarIndex ] )
 			.applyQuaternion( this._worldQuaternion )
 			.add( this._bonePosition );
-		const rootOffset = this.staticBoneCount * 3;
+		const rootOffset = this.physicsKinematicBoneCount * 3;
 		const previousOffset = rootOffset - 3;
 		this._physicsRoot.fromArray( positions, rootOffset );
 		this._physicsDirection.set(
@@ -130,7 +140,7 @@ export class PassiveTailVisualRig {
 				this._physicsDirection.normalize(), this._visualDirection.normalize(),
 			);
 		else this._rebaseQuaternion.identity();
-		for ( let node = this.staticBoneCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.physicsKinematicBoneCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			this._relative.fromArray( positions, offset ).sub( this._physicsRoot )
@@ -141,7 +151,7 @@ export class PassiveTailVisualRig {
 
 		}
 
-		for ( let index = this.staticBoneCount; index < this.bones.length; index ++ ) {
+		for ( let index = this.physicsKinematicBoneCount; index < this.bones.length; index ++ ) {
 
 			const bone = this.bones[ index ];
 			bone.updateWorldMatrix( true, true );
@@ -164,8 +174,11 @@ export class PassiveTailVisualRig {
 			this._candidateQuaternion.copy( this._deltaQuaternion )
 				.multiply( this._worldQuaternion );
 			bone.parent.getWorldQuaternion( this._parentWorldQuaternion ).invert();
-			bone.quaternion.copy(
-				this._candidateQuaternion.premultiply( this._parentWorldQuaternion ),
+			this._candidateQuaternion.premultiply( this._parentWorldQuaternion ).normalize();
+			bone.quaternion.slerpQuaternions(
+				this.restQuaternions[ index ],
+				this._candidateQuaternion,
+				this.transitionWeights[ index ],
 			).normalize();
 
 		}

@@ -153,7 +153,8 @@ impossible à agripper.
   en **Physique libre**, sans rigidifier les pattes ;
 - **Cadence** règle le rythme des pas diagonaux ;
 - **Longueur du pas** détermine l’avancée de chaque cible ;
-- **Hauteur du pas** règle le dégagement pendant le transfert ;
+- **Hauteur du pas** règle le dégagement pendant le transfert : le pied monte
+  rapidement, reste haut pendant l’enjambée puis se pose progressivement ;
 - **Amplitude épaules / hanches** règle la part du pas produite par les
   articulations proximales ;
 - **Levée des membres** et **Flexion coudes / genoux** règlent séparément le
@@ -181,12 +182,12 @@ impossible à agripper.
 - **Collision** agrandit ou réduit le rayon de contact des treize nœuds ;
 - **Gravité queue** dose son poids sans modifier la gravité du corps.
 
-Le collet de la queue suit rigidement le bassin jusqu’après la croupe :
-`tail_01`, `tail_02` et `tail_03` restent solidaires du bas du dos, puis la
-partie passive commence sur `tail_04`. Les neuf segments dynamiques conservent
-leur longueur, répondent à l’inertie et sont projetés hors du sol, des murs, des
-rochers et des troncs. Ce raccord empêche une forte courbure de la queue de
-creuser ou couper la silhouette des fesses. La queue n’est pas préhensile dans
+Le collet de la queue suit rigidement le bassin sur `tail_01` et `tail_02`.
+La liberté commence dès `tail_03`, mais augmente progressivement sur trois os :
+la jonction n’a donc pas de charnière visible. Le garde de peau de la croupe
+reste protégé, puis les segments dynamiques conservent leur longueur, répondent
+à l’inertie et sont projetés hors du sol, des murs, des rochers et des troncs.
+Une friction statique empêche une queue posée de tournoyer. La queue n’est pas préhensile dans
 ce prototype. Quand elle est réellement au repos, elle passe en sommeil : sa
 pose reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un
 nouveau mouvement du corps ou une impulsion.
@@ -196,7 +197,15 @@ nouveau mouvement du corps ou une impulsion.
 - **Appuis pieds / griffes** active les quatre recherches de support ;
 - **Force de maintien** borne l’effort transmis au corps ;
 - **Rigidité d’appui** règle la rapidité du rappel ;
-- **Portée capteurs** règle la distance maximale de recherche d’un support.
+- **Portée capteurs** règle la distance maximale de recherche d’un support ;
+- **Réflexe de redressement** dose la rotation automatique vers les pattes ;
+- **Verrouillage de surface** règle la durée pendant laquelle un impact garde
+  le même mur, rocher ou tronc comme propriétaire.
+
+Après un saut ou un lancer, toucher une surface avec le dos ne colle jamais le
+caméléon. Il choisit un seul impact réel, se retourne face ventrale vers lui,
+puis engage au moins deux pattes. Dans un angle, il ne doit pas osciller entre
+les surfaces voisines.
 
 ### Affichage et coût
 

@@ -95,9 +95,9 @@ export function writeWholeBodyTarget( {
 		? -1 + progress * 2
 		: activePair === 1 ? 1 - progress * 2 : 0;
 	const swingEnvelope = activePair < 0 ? 0 : Math.sin( progress * Math.PI );
-	const stride = clamp( finiteOr( strideAmplitude, 0.38 ), 0, 0.72 ) * moving;
-	const lift = clamp( finiteOr( limbLift, 0.24 ), 0, 0.55 ) * moving;
-	const flex = clamp( finiteOr( jointFlex, 0.46 ), 0, 0.9 ) * moving;
+	const stride = clamp( finiteOr( strideAmplitude, 0.38 ), 0, 0.9 ) * moving;
+	const lift = clamp( finiteOr( limbLift, 0.24 ), 0, 0.75 ) * moving;
+	const flex = clamp( finiteOr( jointFlex, 0.46 ), 0, 1.15 ) * moving;
 	const body = clamp( finiteOr( bodyMotion, 1 ), 0, 2 ) * moving;
 	const idle = 1 - moving;
 	const attention = finiteOr( attentionTime, 0 );

@@ -53,6 +53,28 @@ function finiteOr( value, fallback ) {
 
 }
 
+function smootherstep01( value ) {
+
+	const t = clamp( finiteOr( value, 0 ), 0, 1 );
+	return t * t * t * ( t * ( t * 6 - 15 ) + 10 );
+
+}
+
+/**
+ * C2 swing clearance with a quick toe-off and a deliberately softer landing.
+ * Unlike the former quartic arch, the foot spends the useful middle portion
+ * of the stride at full clearance instead of grazing the surface.
+ */
+export function swingClearanceEnvelope( phase ) {
+
+	const p = clamp( finiteOr( phase, 0 ), 0, 1 );
+	return Math.min(
+		smootherstep01( p / 0.22 ),
+		smootherstep01( ( 1 - p ) / 0.30 ),
+	);
+
+}
+
 function normalizePackedVector( target, offset, fallbackX, fallbackY, fallbackZ ) {
 
 	let x = target[ offset ];
@@ -270,7 +292,7 @@ export class ChameleonProceduralGait {
 		fixedStep = 1 / 120,
 		maxSubsteps = 16,
 		stepDistance = 0.2,
-		stepHeight = 0.075,
+		stepHeight = 0.09,
 		minSwingDuration = 0.09,
 		maxSwingDuration = 0.34,
 		swingDuty = 0.72,
@@ -287,7 +309,7 @@ export class ChameleonProceduralGait {
 		this.fixedStep = Math.max( 1 / 1000, finiteOr( fixedStep, 1 / 120 ) );
 		this.maxSubsteps = maxSubsteps;
 		this.stepDistance = Math.max( 0.001, finiteOr( stepDistance, 0.2 ) );
-		this.stepHeight = Math.max( 0, finiteOr( stepHeight, 0.075 ) );
+		this.stepHeight = Math.max( 0, finiteOr( stepHeight, 0.09 ) );
 		this.minSwingDuration = Math.max( this.fixedStep, finiteOr( minSwingDuration, 0.09 ) );
 		this.maxSwingDuration = Math.max(
 			this.minSwingDuration,
@@ -480,7 +502,7 @@ export class ChameleonProceduralGait {
 
 				this._startPair( this._nextPair, speed, input );
 
-			} else if ( this._settlingAfterDrive ) {
+			} else if ( ! moving && this._settlingAfterDrive ) {
 
 				// A stop may occur while one diagonal pair is still far behind the
 				// body. Correct that over-extension with one slow, ordinary swing;
@@ -600,13 +622,13 @@ export class ChameleonProceduralGait {
 		const phase = Math.min( 1, this.footPhase[ foot ] + dt / this._swingDuration );
 		this.footPhase[ foot ] = phase;
 
-		// Quintic blend and quartic lift both have zero slope at their ends:
-		// velocity is continuous when the foot leaves and re-enters stance.
+		// Quintic translation and C2 clearance both have zero slope at their
+		// ends. The asymmetric clearance reaches its plateau quickly, keeps the
+		// toes away from the surface, then lowers them more gently for contact.
 		const phase2 = phase * phase;
 		const phase3 = phase2 * phase;
 		const blend = phase3 * ( phase * ( phase * 6 - 15 ) + 10 );
-		const oneMinusPhase = 1 - phase;
-		const lift = 16 * phase2 * oneMinusPhase * oneMinusPhase * this.stepHeight;
+		const lift = swingClearanceEnvelope( phase ) * this.stepHeight;
 
 		let normalX = this.footStartNormals[ offset ] +
 			( this.footTargetNormals[ offset ] - this.footStartNormals[ offset ] ) * blend;

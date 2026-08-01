@@ -542,8 +542,13 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 	chameleon.syncVisual( 1 );
 	const positions = chameleon.tailPhysics.getView().positions;
 	const radii = chameleon.tailPhysics.getView().radii;
-	// The first four nodes belong to the rigid sacral bridge inside the body
-	// envelope. Ground projection starts at the first genuinely passive sample.
+	// Only the first three nodes are now rigid. The original three-bone skin
+	// guard remains intact, while tail_03 begins a graded physical transition.
+	assert.equal( chameleon.tailPhysics.kinematicNodeCount, 3 );
+	assert.deepEqual(
+		Array.from( chameleon.tailVisualRig.transitionWeights.slice( 2, 6 ) ),
+		Array.from( new Float32Array( [ 0.28, 0.58, 0.82, 1 ] ) ),
+	);
 	for ( let node = chameleon.tailPhysics.kinematicNodeCount;
 		node < chameleon.tail.nodeCount; node ++ ) {
 
@@ -568,8 +573,9 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 			positions[ index * 3 + 4 ] - positions[ index * 3 + 1 ],
 			positions[ index * 3 + 5 ] - positions[ index * 3 + 2 ],
 		).normalize();
+		const exactDynamicBone = chameleon.tailVisualRig.transitionWeights[ index ] >= 0.999;
 		assert.ok(
-			boneAxis.dot( physicalDirection ) > 0.995,
+			boneAxis.dot( physicalDirection ) > ( exactDynamicBone ? 0.995 : 0.72 ),
 			`tail bone ${ index } does not follow the passive centreline`,
 		);
 
@@ -957,6 +963,124 @@ test( 'CHAMELEON-LAB-RAGDOLL-015 post-jump impact reacquires wall and cylinder w
 		fixture.dispose();
 
 	}
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-017 release cannot select a remote surface before a physical manifold exists', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const body = fixture.chameleon.pelvis.body;
+	fixture.chameleon.setDragging( true );
+	body.setTranslation( { x: 0, y: 2.1, z: 0 }, true );
+	body.setLinvel( { x: 0.1, y: 0, z: -0.08 }, true );
+	fixture.physics.world.propagateModifiedBodyPositionsToColliders();
+	fixture.chameleon.setDragging( false );
+	runFrames( fixture, 120, 0.12 );
+	assert.equal( fixture.chameleon.reacquireState, 'seeking' );
+	assert.equal( fixture.chameleon.reacquireColliderHandle, null );
+	assert.equal( fixture.chameleon.contactCount, 0 );
+	assert.equal( fixture.chameleon.candidateContactCount, 0 );
+	assert.ok( body.translation().y > 1.9 );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-018 an inverted landing rights the belly before engaging claws', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const body = fixture.chameleon.pelvis.body;
+	fixture.chameleon.setDragging( true );
+	body.setTranslation( { x: 0, y: 0.62, z: 0 }, true );
+	body.setRotation( { x: 1, y: 0, z: 0, w: 0 }, true );
+	body.setLinvel( { x: 0.05, y: -1.35, z: 0.03 }, true );
+	body.setAngvel( { x: 0.25, y: 0.08, z: -0.18 }, true );
+	fixture.physics.world.propagateModifiedBodyPositionsToColliders();
+	fixture.chameleon.setDragging( false );
+	let contactsWhileDorsal = 0;
+	let bestAlignment = -1;
+	runFrames( fixture, 120, 2.4, () => {
+
+		if ( fixture.chameleon.reacquireVentralAlignment < 0.35 )
+			contactsWhileDorsal = Math.max( contactsWhileDorsal, fixture.chameleon.contactCount );
+		const rotation = new THREE.Quaternion().copy( body.rotation() );
+		bestAlignment = Math.max(
+			bestAlignment,
+			new THREE.Vector3( 0, 1, 0 ).applyQuaternion( rotation ).y,
+		);
+
+	} );
+	assert.equal( contactsWhileDorsal, 0, 'dorsal impact activated claws before righting' );
+	assert.ok( bestAlignment > 0.8, `righting alignment peaked at ${ bestAlignment }` );
+	assert.ok( fixture.chameleon.contactCount >= 2 );
+	const bodyUp = new THREE.Vector3( 0, 1, 0 ).applyQuaternion(
+		new THREE.Quaternion().copy( body.rotation() ),
+	);
+	assert.ok( bodyUp.y > 0.65, `body stayed on its flank/back (${ bodyUp.y })` );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-019 a corner impact commits to one surface without support ping-pong', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { RAPIER, world } = fixture.physics;
+	const xWallBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( 1.45, 0.9, 0 ),
+	);
+	const zWallBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( 0, 0.9, -1.45 ),
+	);
+	const xWall = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 0.1, 1.2, 2 )
+			.setFriction( 0.95 ).setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		xWallBody,
+	);
+	const zWall = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 2, 1.2, 0.1 )
+			.setFriction( 0.95 ).setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		zWallBody,
+	);
+	for ( const [ collider, kind ] of [ [ xWall, 'corner-x' ], [ zWall, 'corner-z' ] ] )
+		fixture.physics.surfaceByCollider.set( collider.handle, Object.freeze( {
+			kind, clawEligible: true, gripStrengthScale: 1,
+		} ) );
+
+	const body = fixture.chameleon.pelvis.body;
+	fixture.chameleon.setDragging( true );
+	body.setTranslation( { x: 0.7, y: 0.82, z: -0.7 }, true );
+	body.setRotation( { x: 1, y: 0, z: 0, w: 0 }, true );
+	body.setLinvel( { x: 3.1, y: 0.08, z: -3.1 }, true );
+	body.setAngvel( { x: 0.22, y: -0.18, z: 0.16 }, true );
+	world.propagateModifiedBodyPositionsToColliders();
+	fixture.chameleon.setDragging( false );
+	let owner = null;
+	let ownerTransitions = 0;
+	let maximumOwnedClaws = 0;
+	runFrames( fixture, 120, 2.5, () => {
+
+		const nextOwner = fixture.chameleon.reacquireColliderHandle;
+		if ( nextOwner !== null && nextOwner !== owner ) {
+
+			owner = nextOwner;
+			ownerTransitions ++;
+
+		}
+		if ( owner !== null ) maximumOwnedClaws = Math.max(
+			maximumOwnedClaws,
+			fixture.chameleon.feet.filter(
+				( foot ) => foot.state === 'holding' && foot.collider?.handle === owner,
+			).length,
+		);
+
+	} );
+	assert.ok( owner === xWall.handle || owner === zWall.handle,
+		`corner owner was ${ owner }` );
+	assert.equal( ownerTransitions, 1, `support changed owner ${ ownerTransitions } times` );
+	assert.ok( maximumOwnedClaws >= 2, `only ${ maximumOwnedClaws } claws reached owner` );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
 
 } );
 
