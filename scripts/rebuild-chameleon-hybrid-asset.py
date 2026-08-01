@@ -36,12 +36,15 @@ TAIL_CENTERLINE_POINT_COUNT = TAIL_BONE_COUNT + 1
 TAIL_BONE_NAMES = tuple(f"tail_{index:02d}" for index in range(1, TAIL_BONE_COUNT + 1))
 TAIL_ROOT_BLEND_GEODESIC_FRACTION = 0.28
 TAIL_ROOT_BODY_BLEND_MAXIMUM = 1.0
-TAIL_STATIC_BONE_COUNT = 3
-TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION = 0.25
-TAIL_DYNAMIC_WEIGHT_FEATHER_FRACTION = 0.08
+# One short sacral link stays rigid.  Motion then enters gradually through
+# tail_02..04: this moves the visible hinge close to the rump while the long
+# pelvis blend below still protects the welded body/tail triangles.
+TAIL_STATIC_BONE_COUNT = 1
+TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION = 0.055
+TAIL_DYNAMIC_WEIGHT_FEATHER_FRACTION = 0.18
 TAIL_BODY_RIGID_DISTANCE = 0.06
 TAIL_BODY_GUARD_DISTANCE = 0.12
-ANATOMY_CONTRACT_VERSION = "2.1.0"
+ANATOMY_CONTRACT_VERSION = "2.2.0"
 LIMB_ORDER = ("front.L", "front.R", "hind.L", "hind.R")
 LIMB_SURFACE_EXPANSION = {"front": 0.20, "hind": 0.22}
 LIMB_ENVELOPE_RADIUS = {
@@ -716,9 +719,10 @@ def bind_original_tail_smoothly(
     glTF because dual-quaternion skinning is not exported.
 
     The proximal geodesic band and a narrow body-side guard both converge to
-    the pelvis transform at the welded interface.  The first three tail bones
-    remain a rigid sacral collar; dynamic weights are only feathered in after
-    the visible rump.  Rest positions, polygons and the original curled
+    the pelvis transform at the welded interface.  One short root bone remains
+    a rigid sacral collar; dynamic weights are feathered progressively through
+    the visible rump instead of beginning at a hard downstream hinge.  Rest
+    positions, polygons and the original curled
     silhouette remain bit-exact; only deformation weights change, with the
     glTF four-influence budget enforced after the merge.
     """
@@ -902,6 +906,61 @@ def point_segment_distance(point: Vector, start: Vector, end: Vector) -> float:
     require(squared_length > 1e-10, "anatomical envelope contains a zero-length bone")
     parameter = max(0.0, min(1.0, (point - start).dot(segment) / squared_length))
     return (point - (start + segment * parameter)).length
+
+
+def measure_tail_collision_envelope(
+    mesh: bpy.types.Mesh,
+    tail_indices: set[int],
+    distances: list[float],
+    maximum_distance: float,
+    centerline: list[Vector],
+) -> list[float]:
+    """Return a conservative sphere/capsule radius for all 13 rod samples.
+
+    The preserved source ends in a broad curled pad; it is not a monotonic cone.
+    Runtime radii must therefore come from the real surface instead of a generic
+    taper.  Surface geodesic ownership avoids assigning a close pass of the
+    spiral to the wrong centreline segment.
+    """
+    segment_radii = [0.0] * TAIL_BONE_COUNT
+    for vertex_index in tail_indices:
+        parameter = max(0.0, min(
+            TAIL_BONE_COUNT - 1e-9,
+            distances[vertex_index] / maximum_distance * TAIL_BONE_COUNT,
+        ))
+        segment_index = min(TAIL_BONE_COUNT - 1, int(parameter))
+        segment_start = centerline[segment_index]
+        segment = centerline[segment_index + 1] - segment_start
+        squared_length = segment.length_squared
+        require(squared_length > 1e-10,
+                f"tail collision segment {segment_index} has zero length")
+        # Capsule end spheres already protect the longitudinal direction.  The
+        # radius is the perpendicular skin thickness around the bone line; a
+        # clamped closest point would count shell overlap as thickness and make
+        # the tail visibly float at every joint.
+        projection = segment_start + segment * (
+            (mesh.vertices[vertex_index].co - segment_start).dot(segment)
+            / squared_length
+        )
+        radial_distance = (mesh.vertices[vertex_index].co - projection).length
+        segment_radii[segment_index] = max(
+            segment_radii[segment_index], radial_distance,
+        )
+
+    require(all(radius > 0.01 for radius in segment_radii),
+            f"tail collision envelope contains an empty segment: {segment_radii}")
+    require(all(radius < 0.18 for radius in segment_radii),
+            f"tail collision envelope is implausibly large: {segment_radii}")
+    safety_margin = 0.003
+    node_radii: list[float] = []
+    for node in range(TAIL_CENTERLINE_POINT_COUNT):
+        adjacent = []
+        if node > 0:
+            adjacent.append(segment_radii[node - 1])
+        if node < TAIL_BONE_COUNT:
+            adjacent.append(segment_radii[node])
+        node_radii.append(max(adjacent) + safety_margin)
+    return node_radii
 
 
 def rebind_limb_envelopes(
@@ -1239,6 +1298,13 @@ def build_exact_source_mesh(
         build_tail_geodesic_contract(exact_mesh, tail_indices)
     )
     reposition_tail_rest_bones(armature, centerline)
+    tail_collision_radii = measure_tail_collision_envelope(
+        exact_mesh,
+        tail_indices,
+        distances,
+        surface_geodesic_length,
+        centerline,
+    )
     tail_guard_stats = bind_original_tail_smoothly(
         exact_object,
         groups_by_name,
@@ -1284,7 +1350,7 @@ def build_exact_source_mesh(
     flattened_centerline = [coordinate for point in centerline for coordinate in point]
     rest_arc_length = sum(segment_lengths)
     exact_object["physics_ready"] = True
-    exact_object["mesh_contract_version"] = "3.5.0"
+    exact_object["mesh_contract_version"] = "3.6.0"
     exact_object["source_object"] = SOURCE_NAME
     exact_object["exact_source_geometry"] = True
     exact_object["source_vertex_count"] = EXPECTED_SOURCE_VERTICES
@@ -1293,7 +1359,7 @@ def build_exact_source_mesh(
     exact_object["original_tail_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["original_tail_rest_position_sha256"] = tail_mesh_hash
     exact_object["tail_deformation_mode"] = "surface-geodesic-bspline-12"
-    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline+rigid-sacral-guard-v2"
+    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline+graded-sacral-guard-v3"
     exact_object["tail_weighted_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["tail_weight_bones"] = TAIL_BONE_COUNT
     exact_object["tail_weight_max_influences"] = 4
@@ -1312,10 +1378,15 @@ def build_exact_source_mesh(
     exact_object["tail_dynamic_weight_start_geodesic_fraction"] = (
         TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION
     )
+    exact_object["tail_dynamic_weight_feather_fraction"] = (
+        TAIL_DYNAMIC_WEIGHT_FEATHER_FRACTION
+    )
     exact_object["tail_surface_geodesic_length"] = surface_geodesic_length
     exact_object["tail_rest_arc_length"] = rest_arc_length
     exact_object["tail_rest_centerline"] = flattened_centerline
     exact_object["tail_rest_segment_lengths"] = segment_lengths
+    exact_object["tail_collision_node_radii"] = tail_collision_radii
+    exact_object["tail_collision_envelope"] = "surface-geodesic-segment-max+3mm-v1"
     exact_object["tail_rest_coordinate_space"] = "blender-rig-local-z-up"
     exact_object["tail_roll_reference"] = [0.0, 1.0, 0.0]
     exact_object["tail_physics_dofs"] = 0
@@ -1355,7 +1426,7 @@ def update_armature_contract(
     armature: bpy.types.Object,
     exact_object: bpy.types.Object,
 ) -> None:
-    armature["rig_version"] = "3.5.0"
+    armature["rig_version"] = "3.6.0"
     armature["physics_proxy_bodies"] = 1
     armature["runtime_controller"] = "hybrid-root-ik"
     armature["visual_bones"] = len(armature.data.bones)
@@ -1438,10 +1509,13 @@ def update_armature_contract(
         "tail_body_blend_maximum",
         "tail_static_collar_bones",
         "tail_dynamic_weight_start_geodesic_fraction",
+        "tail_dynamic_weight_feather_fraction",
         "tail_surface_geodesic_length",
         "tail_rest_arc_length",
         "tail_rest_centerline",
         "tail_rest_segment_lengths",
+        "tail_collision_node_radii",
+        "tail_collision_envelope",
         "tail_rest_coordinate_space",
         "tail_roll_reference",
         "tail_physics_dofs",

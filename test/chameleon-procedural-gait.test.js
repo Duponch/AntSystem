@@ -6,6 +6,7 @@ import {
 	CHAMELEON_FOOT,
 	CHAMELEON_FOOT_COMPONENTS,
 	ChameleonProceduralGait,
+	swingAdvanceEnvelope,
 	swingClearanceEnvelope,
 	TWO_BONE_IK_RESULT_SIZE,
 	solveTwoBoneIK,
@@ -196,6 +197,47 @@ test( 'CHAMELEON-GAIT-011 C2 swing clearance creates a high plateau with exact s
 	assert.ok( swingClearanceEnvelope( 0.78 ) >= 0.85 );
 	assert.ok( swingClearanceEnvelope( 0.1 ) > 0.35 );
 	assert.ok( swingClearanceEnvelope( 0.9 ) > 0.18 );
+
+} );
+
+test( 'CHAMELEON-GAIT-012 a stride lifts before advancing and plants after reaching forwards', () => {
+
+	assert.equal( swingAdvanceEnvelope( 0 ), 0 );
+	assert.equal( swingAdvanceEnvelope( 0.1 ), 0 );
+	assert.equal( swingAdvanceEnvelope( 1 ), 1 );
+	assert.ok( swingClearanceEnvelope( 0.1 ) > 0.5, 'toe-off must already be clearly visible' );
+	assert.ok( swingAdvanceEnvelope( 0.14 ) < 0.01, 'the claw must rise before travelling' );
+	assert.ok( swingAdvanceEnvelope( 0.72 ) > 0.85, 'forward reach must precede placement' );
+	assert.ok( swingClearanceEnvelope( 0.72 ) > 0.99, 'the claw stays clear while reaching' );
+	assert.equal( swingClearanceEnvelope( 1 ), 0 );
+
+} );
+
+test( 'CHAMELEON-GAIT-013 anterior claws use a visibly broader clearance arc', () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.025,
+		stepHeight: 0.09,
+		minSwingDuration: 0.24,
+		maxSwingDuration: 0.24,
+	} );
+	gait.reset( flatContacts() );
+	const desired = flatContacts( 0.3 );
+	let frontPeak = 0;
+	let hindPeak = 0;
+	for ( let frame = 0; frame < 48; frame ++ ) {
+
+		const view = gait.update( 1 / 120, desired );
+		if ( view.footSwinging[ CHAMELEON_FOOT.FRONT_LEFT ] )
+			frontPeak = Math.max( frontPeak, view.footPositions[ 1 ] );
+		if ( view.footSwinging[ CHAMELEON_FOOT.HIND_RIGHT ] )
+			hindPeak = Math.max( hindPeak, view.footPositions[ 10 ] );
+
+	}
+	assert.ok( frontPeak > 0.12, `anterior clearance ${ frontPeak }` );
+	assert.ok( hindPeak > 0.095, `posterior clearance ${ hindPeak }` );
+	assert.ok( frontPeak > hindPeak * 1.2,
+		`anterior arc ${ frontPeak } must be broader than posterior ${ hindPeak }` );
 
 } );
 

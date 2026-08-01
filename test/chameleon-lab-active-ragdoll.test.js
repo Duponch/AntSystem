@@ -531,6 +531,207 @@ test( 'CHAMELEON-LAB-RAGDOLL-008 whole-body strides engage proximal joints witho
 
 } );
 
+test( 'CHAMELEON-LAB-RAGDOLL-020 fixed-step breast-stroke is broad, smooth and render-rate invariant', async () => {
+
+	const slowFixture = await createGroundedHybrid();
+	const fastFixture = await createGroundedHybrid();
+	const command = { move: new THREE.Vector3( -1, 0, 0.12 ) };
+	slowFixture.chameleon.setCommand( command );
+	fastFixture.chameleon.setCommand( command );
+	runFrames( slowFixture, 60, 6 );
+	runFrames( fastFixture, 240, 6 );
+	// Compare the same authoritative fixed pose, not two potentially different
+	// sub-frame accumulator alphas caused by floating-point render partitions.
+	slowFixture.chameleon.syncVisual( 1 );
+	fastFixture.chameleon.syncVisual( 1 );
+	for ( let index = 0; index < slowFixture.chameleon.rig.bones.length; index ++ ) {
+
+		const slow = slowFixture.chameleon.rig.bones[ index ];
+		const fast = fastFixture.chameleon.rig.bones[ index ];
+		if ( slow.name.startsWith( 'tail_' ) ) continue;
+		assert.ok(
+			slow.quaternion.angleTo( fast.quaternion ) < 2e-5,
+			`${ slow.name } depends on render rate (${ slow.quaternion.angleTo( fast.quaternion ) } rad)`,
+		);
+
+	}
+	for ( const key of [ 'positions', 'previousPositions' ] ) {
+
+		const slow = slowFixture.chameleon.tailPhysics[ key ];
+		const fast = fastFixture.chameleon.tailPhysics[ key ];
+		for ( let index = 0; index < slow.length; index ++ ) assert.ok(
+			Math.abs( slow[ index ] - fast[ index ] ) < 1e-6,
+			`tail ${ key }[${ index }] depends on render rate`,
+		);
+
+	}
+	const slowTailOrigin = new THREE.Vector3();
+	const fastTailOrigin = new THREE.Vector3();
+	for ( let index = 0; index < slowFixture.chameleon.tailVisualRig.bones.length; index ++ ) {
+
+		slowFixture.chameleon.tailVisualRig.bones[ index ].getWorldPosition( slowTailOrigin );
+		fastFixture.chameleon.tailVisualRig.bones[ index ].getWorldPosition( fastTailOrigin );
+		assert.ok( slowTailOrigin.distanceTo( fastTailOrigin ) < 2e-4,
+			`tail bone ${ index } world origin depends on render rate` );
+
+	}
+	for ( let repeat = 0; repeat < 20; repeat ++ )
+		fastFixture.chameleon.syncVisual( 0.35, 1 / 240 );
+	const firstRepeatedPose = fastFixture.chameleon.rig.bones.map( ( bone ) => bone.quaternion.clone() );
+	fastFixture.chameleon.syncVisual( 0.35, 1 / 30 );
+	for ( let index = 0; index < firstRepeatedPose.length; index ++ ) assert.ok(
+		fastFixture.chameleon.rig.bones[ index ].quaternion.angleTo( firstRepeatedPose[ index ] ) < 1e-6,
+		`${ fastFixture.chameleon.rig.bones[ index ].name } advances during render-only sync`,
+	);
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon, physics } = fixture;
+	chameleon.setCommand( command );
+	const leg = chameleon.rig.legs[ 0 ];
+	const socket = new THREE.Vector3();
+	const shoulder = new THREE.Vector3();
+	const elbow = new THREE.Vector3();
+	const supportNormal = new THREE.Vector3();
+	const previousUpper = leg.upper.quaternion.clone();
+	const restGirdle = leg.restQuaternions.get( leg.girdle );
+	const restUpper = leg.restQuaternions.get( leg.upper );
+	let minimumShoulderHeight = Infinity;
+	let maximumShoulderHeight = -Infinity;
+	let minimumElbowHeight = Infinity;
+	let maximumElbowHeight = -Infinity;
+	let minimumElbowAboveShoulder = Infinity;
+	let maximumElbowAboveShoulder = -Infinity;
+	let maximumPoleUp = -Infinity;
+	let maximumGirdleExcursion = 0;
+	let maximumUpperExcursion = 0;
+	let maximumRenderRotation = 0;
+	let swingSamples = 0;
+	for ( let frame = 0; frame < 240 * 5; frame ++ ) {
+
+		const result = physics.step(
+			1 / 240,
+			( dt ) => chameleon.beforeStep( dt ),
+			() => chameleon.afterStep(),
+		);
+		chameleon.syncVisual( result.alpha, 1 / 240 );
+		const frameRotation = previousUpper.angleTo( leg.upper.quaternion );
+		maximumRenderRotation = Math.max( maximumRenderRotation, frameRotation );
+		previousUpper.copy( leg.upper.quaternion );
+		if ( chameleon.feet[ 0 ].state !== 'swinging' ) continue;
+		leg.girdle.getWorldPosition( socket );
+		leg.upper.getWorldPosition( shoulder );
+		leg.lower.getWorldPosition( elbow );
+		supportNormal.copy( chameleon.feet[ 0 ].normal ).normalize();
+		const shoulderHeight = shoulder.clone().sub( socket ).dot( supportNormal );
+		const elbowHeight = elbow.clone().sub( socket ).dot( supportNormal );
+		const elbowAboveShoulder = elbow.clone().sub( shoulder ).dot( supportNormal );
+		minimumShoulderHeight = Math.min( minimumShoulderHeight, shoulderHeight );
+		maximumShoulderHeight = Math.max( maximumShoulderHeight, shoulderHeight );
+		minimumElbowHeight = Math.min( minimumElbowHeight, elbowHeight );
+		maximumElbowHeight = Math.max( maximumElbowHeight, elbowHeight );
+		minimumElbowAboveShoulder = Math.min( minimumElbowAboveShoulder, elbowAboveShoulder );
+		maximumElbowAboveShoulder = Math.max( maximumElbowAboveShoulder, elbowAboveShoulder );
+		maximumPoleUp = Math.max(
+			maximumPoleUp,
+			leg.solver.poleDirection[ 0 ] * supportNormal.x
+				+ leg.solver.poleDirection[ 1 ] * supportNormal.y
+				+ leg.solver.poleDirection[ 2 ] * supportNormal.z,
+		);
+		maximumGirdleExcursion = Math.max(
+			maximumGirdleExcursion, restGirdle.angleTo( leg.girdle.quaternion ),
+		);
+		maximumUpperExcursion = Math.max(
+			maximumUpperExcursion, restUpper.angleTo( leg.upper.quaternion ),
+		);
+		swingSamples ++;
+
+	}
+	assert.ok( swingSamples > 100, `only ${ swingSamples } front swing samples` );
+	assert.ok( maximumShoulderHeight > 0.008,
+		`front shoulder never rises above its socket (${ maximumShoulderHeight } m)` );
+	assert.ok( maximumShoulderHeight - minimumShoulderHeight > 0.045,
+		`front shoulder stroke is only ${ maximumShoulderHeight - minimumShoulderHeight } m high` );
+	assert.ok( maximumElbowHeight - minimumElbowHeight > 0.085,
+		`front elbow stroke is only ${ maximumElbowHeight - minimumElbowHeight } m` );
+	assert.ok( maximumElbowAboveShoulder > -0.006,
+		`front elbow remains pinned below the shoulder (${ minimumElbowAboveShoulder }..${ maximumElbowAboveShoulder } m; pole up ${ maximumPoleUp })` );
+	assert.ok( maximumGirdleExcursion > 0.28,
+		`front girdle excursion is only ${ maximumGirdleExcursion } rad` );
+	assert.ok( maximumUpperExcursion > 0.32,
+		`front upper-arm excursion is only ${ maximumUpperExcursion } rad` );
+	assert.ok( maximumRenderRotation < 0.031,
+		`front arm contains a ${ maximumRenderRotation } rad render-frame snap` );
+	const rotationMetrics = chameleon.rig.legs.slice( 0, 2 ).map( ( frontLeg ) => ( {
+		leg: frontLeg,
+		previous: frontLeg.upper.quaternion.clone(),
+		inverse: new THREE.Quaternion(),
+		delta: new THREE.Quaternion(),
+		previousStep: new THREE.Vector3(),
+		step: new THREE.Vector3(),
+		peakSecondDifference: 0,
+		squaredSecondDifference: 0,
+		samples: 0,
+	} ) );
+	for ( let frame = 0; frame < 120 * 5; frame ++ ) {
+
+		const result = physics.step(
+			1 / 120,
+			( dt ) => chameleon.beforeStep( dt ),
+			() => chameleon.afterStep(),
+		);
+		chameleon.syncVisual( result.alpha, 1 / 120 );
+		for ( const metric of rotationMetrics ) {
+
+			metric.inverse.copy( metric.previous ).invert();
+			metric.delta.multiplyQuaternions(
+				metric.leg.upper.quaternion, metric.inverse,
+			).normalize();
+			if ( metric.delta.w < 0 ) metric.delta.set(
+				-metric.delta.x, -metric.delta.y, -metric.delta.z, -metric.delta.w,
+			);
+			const sine = Math.hypot( metric.delta.x, metric.delta.y, metric.delta.z );
+			const angle = 2 * Math.atan2( sine, Math.max( 0, metric.delta.w ) );
+			const scale = sine > 1e-8 ? angle / sine : 2;
+			metric.step.set(
+				metric.delta.x * scale,
+				metric.delta.y * scale,
+				metric.delta.z * scale,
+			);
+			if ( metric.samples > 0 ) {
+
+				const secondDifference = metric.step.distanceTo( metric.previousStep );
+				metric.peakSecondDifference = Math.max(
+					metric.peakSecondDifference, secondDifference,
+				);
+				metric.squaredSecondDifference += secondDifference * secondDifference;
+
+			}
+			metric.samples ++;
+			metric.previousStep.copy( metric.step );
+			metric.previous.copy( metric.leg.upper.quaternion );
+
+		}
+
+	}
+	for ( const metric of rotationMetrics ) {
+
+		const rms = Math.sqrt(
+			metric.squaredSecondDifference / Math.max( 1, metric.samples - 1 ),
+		);
+		assert.ok( metric.peakSecondDifference < 0.012,
+			`${ metric.leg.upper.name } angular acceleration spike ${ metric.peakSecondDifference } rad/tick²` );
+		assert.ok( rms < 0.006,
+			`${ metric.leg.upper.name } angular acceleration RMS ${ rms } rad/tick²` );
+
+	}
+	assertAnatomicalPose( chameleon );
+	assertFiniteHybrid( fixture );
+	fixture.dispose();
+	slowFixture.dispose();
+	fastFixture.dispose();
+
+} );
+
 test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground without penetration', async () => {
 
 	const fixture = await createGroundedHybrid();
@@ -542,13 +743,85 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 	chameleon.syncVisual( 1 );
 	const positions = chameleon.tailPhysics.getView().positions;
 	const radii = chameleon.tailPhysics.getView().radii;
-	// Only the first three nodes are now rigid. The original three-bone skin
-	// guard remains intact, while tail_03 begins a graded physical transition.
-	assert.equal( chameleon.tailPhysics.kinematicNodeCount, 3 );
+	// Only the root link remains rigid: the free curve starts at tail_02, close
+	// enough to the rump to avoid the former visibly frozen tail section.
+	assert.equal( chameleon.tailPhysics.kinematicNodeCount, 2 );
 	assert.deepEqual(
-		Array.from( chameleon.tailVisualRig.transitionWeights.slice( 2, 6 ) ),
-		Array.from( new Float32Array( [ 0.28, 0.58, 0.82, 1 ] ) ),
+		Array.from( chameleon.tailVisualRig.transitionWeights.slice( 0, 4 ) ),
+		Array.from( new Float32Array( [ 0, 1, 1, 1 ] ) ),
 	);
+	// A collision-safe centreline is not enough if the visual bones alternate
+	// between two poses. Sample the settled tail at a deliberately high render
+	// rate and reject any one-frame whip or residual high-speed corkscrew.
+	const previousTailRotations = chameleon.tailVisualRig.bones.map(
+		( bone ) => bone.quaternion.clone(),
+	);
+	let maximumTailRenderRotation = 0;
+	let maximumSettledTailSpeed = 0;
+	let squaredTailRenderRotation = 0;
+	let tailRenderRotationSamples = 0;
+	let squaredSettledTailSpeed = 0;
+	let maximumSettledTailEnergy = 0;
+	let maximumInterpolatedOriginError = 0;
+	const interpolatedTailPositions = chameleon.tailPhysics.getView().interpolatedPositions;
+	const interpolatedBoneOrigin = new THREE.Vector3();
+	const interpolatedPhysicsOrigin = new THREE.Vector3();
+	for ( let frame = 0; frame < 480; frame ++ ) {
+
+		const result = fixture.physics.step(
+			1 / 240,
+			( dt ) => chameleon.beforeStep( dt ),
+			() => chameleon.afterStep(),
+		);
+		chameleon.syncVisual( result.alpha );
+		for ( let index = 0; index < chameleon.tailVisualRig.bones.length; index ++ ) {
+
+			const bone = chameleon.tailVisualRig.bones[ index ];
+			const rotation = previousTailRotations[ index ].angleTo( bone.quaternion );
+			maximumTailRenderRotation = Math.max( maximumTailRenderRotation, rotation );
+			squaredTailRenderRotation += rotation * rotation;
+			tailRenderRotationSamples ++;
+			previousTailRotations[ index ].copy( bone.quaternion );
+			if ( index >= chameleon.tailVisualRig.physicsKinematicBoneCount ) {
+
+				bone.getWorldPosition( interpolatedBoneOrigin );
+				const offset = index * 3;
+				maximumInterpolatedOriginError = Math.max(
+					maximumInterpolatedOriginError,
+					interpolatedBoneOrigin.distanceTo( interpolatedPhysicsOrigin.set(
+						interpolatedTailPositions[ offset ],
+						interpolatedTailPositions[ offset + 1 ],
+						interpolatedTailPositions[ offset + 2 ],
+					) ),
+				);
+
+			}
+
+		}
+		const speed = chameleon.tailPhysics.maxNodeSpeed();
+		maximumSettledTailSpeed = Math.max( maximumSettledTailSpeed, speed );
+		squaredSettledTailSpeed += speed * speed;
+		maximumSettledTailEnergy = Math.max(
+			maximumSettledTailEnergy, chameleon.tailPhysics.kineticEnergy(),
+		);
+
+	}
+	const tailRenderRotationRms = Math.sqrt(
+		squaredTailRenderRotation / Math.max( 1, tailRenderRotationSamples ),
+	);
+	const settledTailSpeedRms = Math.sqrt( squaredSettledTailSpeed / 480 );
+	assert.ok( maximumTailRenderRotation < 0.0015,
+		`settled tail contains a ${ maximumTailRenderRotation } rad render-frame whip` );
+	assert.ok( tailRenderRotationRms < 0.0004,
+		`settled tail rotation RMS is ${ tailRenderRotationRms } rad/frame` );
+	assert.ok( maximumSettledTailSpeed < 0.03,
+		`settled tail contains a ${ maximumSettledTailSpeed } m/s residual spin` );
+	assert.ok( settledTailSpeedRms < 0.02,
+		`settled tail speed RMS is ${ settledTailSpeedRms } m/s` );
+	assert.ok( maximumSettledTailEnergy < 5e-4,
+		`settled tail energy reaches ${ maximumSettledTailEnergy }` );
+	assert.ok( maximumInterpolatedOriginError < 0.009,
+		`interpolated visual tail diverges by ${ maximumInterpolatedOriginError } m` );
 	for ( let node = chameleon.tailPhysics.kinematicNodeCount;
 		node < chameleon.tail.nodeCount; node ++ ) {
 
@@ -561,6 +834,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 	let deformedBones = 0;
 	const boneAxis = new THREE.Vector3( 0, 1, 0 );
 	const physicalDirection = new THREE.Vector3();
+	const boneOrigin = new THREE.Vector3();
 	const boneQuaternion = new THREE.Quaternion();
 	for ( let index = 0; index < chameleon.tailVisualRig.bones.length; index ++ ) {
 
@@ -574,16 +848,76 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 			positions[ index * 3 + 5 ] - positions[ index * 3 + 2 ],
 		).normalize();
 		const exactDynamicBone = chameleon.tailVisualRig.transitionWeights[ index ] >= 0.999;
+		const centrelineAlignment = boneAxis.dot( physicalDirection );
+		bone.getWorldPosition( boneOrigin );
+		const physicalOffset = index * 3;
+		const originError = boneOrigin.distanceTo( new THREE.Vector3(
+			positions[ physicalOffset ], positions[ physicalOffset + 1 ], positions[ physicalOffset + 2 ],
+		) );
 		assert.ok(
-			boneAxis.dot( physicalDirection ) > ( exactDynamicBone ? 0.995 : 0.72 ),
-			`tail bone ${ index } does not follow the passive centreline`,
+			centrelineAlignment > ( exactDynamicBone ? 0.995 : 0.72 ),
+			`tail bone ${ index } does not follow the passive centreline (${ centrelineAlignment }; origin error ${ originError })`,
 		);
+		if ( exactDynamicBone ) assert.ok( originError < 0.009,
+			`tail bone ${ index } origin diverges by ${ originError } m` );
 
 	}
 	assert.ok( deformedBones >= 8, `only ${ deformedBones } tail bones deformed` );
 	assert.ok( chameleon.tailPhysics.kineticEnergy() < chameleon.tailPhysics.maximumKineticEnergy() );
 	assert.ok( chameleon.tailPhysics.stats.totalSteps >= 480 );
 	assert.ok( chameleon.tailPhysics.maxSegmentError() < 0.006, `tail segment error ${ chameleon.tailPhysics.maxSegmentError() }` );
+	// The centreline can remain outside the colliders while the actual tapered
+	// skin still clips through them. Validate the rendered, skinned tail surface
+	// rather than accepting a visually false positive from the rod alone.
+	let tailVertexCount = 0;
+	let minimumTailSurfaceY = Infinity;
+	let minimumTailVertex = -1;
+	let minimumTailInfluences = '';
+	const skinnedVertex = new THREE.Vector3();
+	chameleon.model.traverse( ( object ) => {
+
+		if ( ! object.isSkinnedMesh ) return;
+		const skinIndex = object.geometry.getAttribute( 'skinIndex' );
+		const skinWeight = object.geometry.getAttribute( 'skinWeight' );
+		if ( ! skinIndex || ! skinWeight ) return;
+		const tailJointIndices = new Set( chameleon.tailVisualRig.bones.map(
+			( bone ) => object.skeleton.bones.indexOf( bone ),
+		) );
+		for ( let vertex = 0; vertex < skinIndex.count; vertex ++ ) {
+
+			let tailWeight = 0;
+			for ( let lane = 0; lane < 4; lane ++ ) {
+
+				const joint = skinIndex.getComponent( vertex, lane );
+				if ( tailJointIndices.has( joint ) )
+					tailWeight += skinWeight.getComponent( vertex, lane );
+
+			}
+			if ( tailWeight < 0.5 ) continue;
+			object.getVertexPosition( vertex, skinnedVertex );
+			object.localToWorld( skinnedVertex );
+			if ( skinnedVertex.y < minimumTailSurfaceY ) {
+
+				minimumTailSurfaceY = skinnedVertex.y;
+				minimumTailVertex = vertex;
+				minimumTailInfluences = Array.from( { length: 4 }, ( _, lane ) => {
+
+					const joint = skinIndex.getComponent( vertex, lane );
+					return `${ object.skeleton.bones[ joint ]?.name ?? joint }:${ skinWeight.getComponent( vertex, lane ).toFixed( 3 ) }`;
+
+				} ).join( ',' );
+
+			}
+			tailVertexCount ++;
+
+		}
+
+	} );
+	assert.ok( tailVertexCount > 5_000, `only ${ tailVertexCount } rendered tail vertices sampled` );
+	assert.ok(
+		minimumTailSurfaceY >= -0.001,
+		`rendered tail skin penetrates ground by ${ -minimumTailSurfaceY } m at vertex ${ minimumTailVertex } (${ minimumTailInfluences })`,
+	);
 	fixture.dispose();
 
 } );

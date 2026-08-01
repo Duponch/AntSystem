@@ -20,12 +20,17 @@ différentes :
   suivait le bassin, le rachis et les hanches. La flexion étirait fortement les
   triangles entre ces deux anneaux.
 
-Le contrat `3.2.0` corrige la seconde cause sans toucher à la forme originale :
+Le contrat mesh/rig `3.6.0` corrige la seconde cause sans toucher à la forme
+originale :
 
 - les positions, triangles et 7 206 sommets de queue restent bit-à-bit
   identiques ;
-- une bande proximale de 12 % de la distance géodésique mélange progressivement
-  au maximum 72 % du profil corporel du bord voisin ;
+- aucun sommet du corps ne reçoit de poids `tail_*` et le garde sacré voisin est
+  ramené progressivement vers le bassin ;
+- seul `tail_01` forme le collet rigide ; `tail_02` est la racine dynamique ;
+- les poids dynamiques commencent à `0,055` de la distance géodésique puis
+  apparaissent avec un feather lisse sur `0,18`. Ce gradient de mouvement reste
+  distinct du mélange protecteur avec le bassin sur les 28 % proximaux ;
 - chaque sommet reste limité à quatre influences et garde au moins un os de la
   chaîne de queue ;
 - le matériau exporté est explicitement double face, afin qu’un bref retournement
@@ -69,6 +74,8 @@ une texture de poses ne peut pas épouser deux surfaces propres à chaque animal
 - aucune allocation par frame dans l’IK, la queue ou le choix de LOD ;
 - aucune réécriture de vertex buffer : seules les matrices/poses compactes sont
   mises à jour ;
+- la queue publie ses os une seule fois de la racine vers la pointe, puis propage
+  la hiérarchie une fois ; aucune mise à jour récursive des descendants par os ;
 - cadence des contacts proportionnelle à la visibilité, jamais au FPS écran ;
 - frustum culling et occlusion avant toute mise à jour anatomique ;
 - mesure séparée des coûts CPU solveur, upload de poses, GPU skinning et ombres.

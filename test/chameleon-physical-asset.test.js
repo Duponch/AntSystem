@@ -266,7 +266,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.name, 'Chameleon_Physics_Body' );
 	assert.equal( meshNode.skin, 0, 'the original mesh must reference the rig skin' );
 	assert.equal( meshNode.extras?.physics_ready, true );
-	assert.equal( meshNode.extras?.mesh_contract_version, '3.5.0' );
+	assert.equal( meshNode.extras?.mesh_contract_version, '3.6.0' );
 	assert.equal( meshNode.extras?.source_object, 'Chameleon_Imported_Source' );
 	assert.equal( meshNode.extras?.exact_source_geometry, true );
 	assert.equal( meshNode.extras?.source_vertex_count, EXPECTED_SOURCE_VERTICES );
@@ -275,7 +275,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( meshNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
 	assert.equal( meshNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
-	assert.equal( meshNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+rigid-sacral-guard-v2' );
+	assert.equal( meshNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+graded-sacral-guard-v3' );
 	assert.equal( meshNode.extras?.tail_weighted_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( meshNode.extras?.tail_weight_bones, TAIL_BONE_NAMES.length );
 	assert.equal( meshNode.extras?.tail_weight_max_influences, 4 );
@@ -284,8 +284,9 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.extras?.tail_body_blend_vertices, 2410 );
 	assert.equal( meshNode.extras?.tail_body_blend_geodesic_fraction, 0.28 );
 	assert.equal( meshNode.extras?.tail_body_blend_maximum, 1 );
-	assert.equal( meshNode.extras?.tail_static_collar_bones, 'tail_01,tail_02,tail_03' );
-	assert.equal( meshNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.25 );
+	assert.equal( meshNode.extras?.tail_static_collar_bones, 'tail_01' );
+	assert.equal( meshNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.055 );
+	assert.equal( meshNode.extras?.tail_dynamic_weight_feather_fraction, 0.18 );
 	assert.ok( meshNode.extras?.tail_rigid_guard_vertices >= meshNode.extras?.tail_interface_vertices );
 	assert.equal( meshNode.extras?.body_tail_weight_vertices, 0 );
 	assert.equal( meshNode.extras?.tail_interface_dynamic_weight_vertices, 0 );
@@ -294,6 +295,13 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.ok( meshNode.extras?.tail_rest_arc_length > 1.13 );
 	assert.ok( meshNode.extras?.tail_rest_arc_length < 1.15 );
 	assert.equal( meshNode.extras?.tail_rest_coordinate_space, 'blender-rig-local-z-up' );
+	assert.equal( meshNode.extras?.tail_collision_envelope, 'surface-geodesic-segment-max+3mm-v1' );
+	assert.equal( meshNode.extras?.tail_collision_node_radii?.length, TAIL_BONE_NAMES.length + 1 );
+	assert.ok( meshNode.extras.tail_collision_node_radii.every(
+		( radius ) => Number.isFinite( radius ) && radius >= 0.06 && radius <= 0.16,
+	) );
+	assert.ok( meshNode.extras.tail_collision_node_radii[ 10 ] > meshNode.extras.tail_collision_node_radii[ 5 ],
+		'the original broad curled tip must not be replaced by a generic taper' );
 	assert.deepEqual( meshNode.extras?.tail_roll_reference, [ 0, 1, 0 ] );
 	assert.equal( meshNode.extras?.tail_rest_centerline?.length, ( TAIL_BONE_NAMES.length + 1 ) * 3 );
 	assert.equal( meshNode.extras?.tail_rest_segment_lengths?.length, TAIL_BONE_NAMES.length );
@@ -308,11 +316,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 		meshNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( meshNode.extras?.anatomy_contract_version, '2.1.0' );
+	assert.equal( meshNode.extras?.anatomy_contract_version, '2.2.0' );
 	assert.equal( meshNode.extras?.distal_anatomy_fit, 'closed-volume-zygodactyl-medial-axis-v2' );
 	assert.equal( meshNode.extras?.proximal_joint_fit, 'surface-medial-flexed-v3' );
-	assert.equal( meshNode.extras?.tail_static_collar_bone, 'tail_03' );
-	assert.equal( meshNode.extras?.tail_dynamic_root_bone, 'tail_04' );
+	assert.equal( meshNode.extras?.tail_static_collar_bone, 'tail_01' );
+	assert.equal( meshNode.extras?.tail_dynamic_root_bone, 'tail_02' );
 	assert.equal( meshNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( meshNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( meshNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -473,6 +481,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	const usedBoneNames = new Set();
 	let multiInfluenceVertices = 0;
 	let tailInfluencedVertices = 0;
+	let gradedTailRootVertices = 0;
 	for ( const primitive of gltf.meshes.flatMap( ( mesh ) => mesh.primitives ) ) {
 
 		const joints = createAccessorReader( gltf, binary, primitive.attributes.JOINTS_0 );
@@ -488,6 +497,8 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 			let sum = 0;
 			let positiveInfluences = 0;
 			let hasTailInfluence = false;
+			let freeTailWeight = 0;
+			let collarOrPelvisWeight = 0;
 			for ( let lane = 0; lane < 4; lane ++ ) {
 
 				const joint = joints.read( vertex, lane );
@@ -500,6 +511,9 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 					positiveInfluences ++;
 					const boneName = skinJointNames[ joint ];
 					usedBoneNames.add( boneName );
+					if ( boneName === 'pelvis' || boneName === 'tail_01' )
+						collarOrPelvisWeight += weight;
+					else if ( tailBoneNameSet.has( boneName ) ) freeTailWeight += weight;
 					if ( tailBoneNameSet.has( boneName ) ) {
 
 						hasTailInfluence = true;
@@ -514,6 +528,8 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 			assert.ok( Math.abs( sum - 1 ) < 2e-4, `vertex ${ vertex } weights sum to ${ sum }` );
 			if ( positiveInfluences > 1 ) multiInfluenceVertices ++;
 			if ( hasTailInfluence ) tailInfluencedVertices ++;
+			if ( freeTailWeight > 0.02 && freeTailWeight < 0.98
+				&& collarOrPelvisWeight > 0.02 ) gradedTailRootVertices ++;
 
 		}
 
@@ -521,6 +537,8 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	assert.ok( multiInfluenceVertices > 100, 'body and tail skinning must retain smooth blends' );
 	assert.ok( tailInfluencedVertices >= EXPECTED_ORIGINAL_TAIL_VERTICES,
 		'the complete original tail must be bound to its curved visual chain' );
+	assert.ok( gradedTailRootVertices > 500,
+		`only ${ gradedTailRootVertices } exported corners grade the rigid/free tail junction` );
 	for ( const [ name, uses ] of tailWeightUse ) {
 
 		assert.ok( uses > 0, `${ name } must influence the preserved original tail` );
@@ -534,7 +552,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	const rigNodeIndex = nodeByName.get( 'Chameleon_Physics_Armature' );
 	assert.notEqual( rigNodeIndex, undefined, 'rig root node is missing' );
 	const rigNode = gltf.nodes[ rigNodeIndex ];
-	assert.equal( rigNode.extras?.rig_version, '3.5.0' );
+	assert.equal( rigNode.extras?.rig_version, '3.6.0' );
 	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail-root=\+X.*original-curled.*glTF Y-up/u );
 	assert.equal( rigNode.extras?.visual_bones, 43 );
 	assert.equal( rigNode.extras?.visual_deformation_bones, 42 );
@@ -547,12 +565,17 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	assert.equal( rigNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( rigNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
 	assert.equal( rigNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
-	assert.equal( rigNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+rigid-sacral-guard-v2' );
+	assert.equal( rigNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+graded-sacral-guard-v3' );
 	assert.equal( rigNode.extras?.tail_body_blend_vertices, 2410 );
 	assert.equal( rigNode.extras?.tail_body_blend_geodesic_fraction, 0.28 );
 	assert.equal( rigNode.extras?.tail_body_blend_maximum, 1 );
-	assert.equal( rigNode.extras?.tail_static_collar_bones, 'tail_01,tail_02,tail_03' );
-	assert.equal( rigNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.25 );
+	assert.equal( rigNode.extras?.tail_static_collar_bones, 'tail_01' );
+	assert.equal( rigNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.055 );
+	assert.equal( rigNode.extras?.tail_dynamic_weight_feather_fraction, 0.18 );
+	assert.deepEqual( rigNode.extras?.tail_collision_node_radii,
+		meshNode.extras.tail_collision_node_radii );
+	assert.equal( rigNode.extras?.tail_collision_envelope,
+		'surface-geodesic-segment-max+3mm-v1' );
 	assert.ok( rigNode.extras?.tail_rigid_guard_vertices >= rigNode.extras?.tail_interface_vertices );
 	assert.equal( rigNode.extras?.body_tail_weight_vertices, 0 );
 	assert.equal( rigNode.extras?.tail_interface_dynamic_weight_vertices, 0 );
@@ -563,11 +586,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		rigNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( rigNode.extras?.anatomy_contract_version, '2.1.0' );
+	assert.equal( rigNode.extras?.anatomy_contract_version, '2.2.0' );
 	assert.equal( rigNode.extras?.distal_anatomy_fit, 'closed-volume-zygodactyl-medial-axis-v2' );
 	assert.equal( rigNode.extras?.proximal_joint_fit, 'surface-medial-flexed-v3' );
-	assert.equal( rigNode.extras?.tail_static_collar_bone, 'tail_03' );
-	assert.equal( rigNode.extras?.tail_dynamic_root_bone, 'tail_04' );
+	assert.equal( rigNode.extras?.tail_static_collar_bone, 'tail_01' );
+	assert.equal( rigNode.extras?.tail_dynamic_root_bone, 'tail_02' );
 	assert.equal( rigNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( rigNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( rigNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -941,16 +964,17 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_head_local, [ -0.275, 0, 0.045 ] );
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_tail_local, [ -0.455, 0, -0.015 ] );
 	assert.equal( nodeByName.get( 'jaw' ).extras.anatomical_role, 'jaw-hinge-to-snout' );
-	for ( const name of [ 'tail_01', 'tail_02', 'tail_03' ] ) {
+	assert.equal( nodeByName.get( 'tail_01' ).extras.anatomical_role, 'sacral-tail-collar' );
+	assert.equal( nodeByName.get( 'tail_01' ).extras.tail_dynamic, false );
+	for ( const name of TAIL_BONE_NAMES.slice( 1 ) ) {
 
-		assert.equal( nodeByName.get( name ).extras.anatomical_role, 'sacral-tail-collar' );
-		assert.equal( nodeByName.get( name ).extras.tail_dynamic, false );
+		assert.equal( nodeByName.get( name ).extras.anatomical_role, 'passive-tail-segment' );
+		assert.equal( nodeByName.get( name ).extras.tail_dynamic, true );
 
 	}
-	assert.equal( nodeByName.get( 'tail_04' ).extras.tail_dynamic, true );
 	assertClose(
-		nodeByName.get( 'tail_04' ).extras.rest_head_local,
-		[ 0.3975178003311157, -0.1793597936630249, -0.1213325709104538 ],
+		nodeByName.get( 'tail_02' ).extras.rest_head_local,
+		[ 0.32217520475387573, -0.06899616867303848, 0.056571055203676224 ],
 		2e-6,
 	);
 

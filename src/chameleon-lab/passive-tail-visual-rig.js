@@ -51,34 +51,34 @@ export class PassiveTailVisualRig {
 		this.staticBoneCount = typeof this.metadata.tail_static_collar_bones === 'string'
 			? this.metadata.tail_static_collar_bones.split( ',' ).filter( Boolean ).length
 			: 1;
-		if ( this.staticBoneCount < 1 || this.staticBoneCount >= this.bones.length )
-			throw new Error( 'Hybrid chameleon static tail collar metadata is invalid.' );
-		// The skin guard protects the rump vertices, but it must not create a hard
-		// motion seam. Physics releases one bone earlier and the first three visual
-		// rotations progressively blend from the authored collar into the rod.
-		this.physicsKinematicBoneCount = Math.max( 1, this.staticBoneCount - 1 );
+		if ( this.staticBoneCount !== 1 )
+			throw new Error(
+				'Hybrid chameleon 3.6 tail contract requires tail_01 as the sole static collar bone.',
+			);
+		// Only tail_01 is rigidly attached to the pelvis. The exported skin weights
+		// provide the graded sacral transition, while tail_02 already follows the
+		// collision-tested rod. Keeping that transition in one authority avoids a
+		// second render-only bend that could put the skin back through a surface.
+		this.physicsKinematicBoneCount = this.staticBoneCount;
+		// Rendering must remain a one-to-one view of the collision-tested rod. A
+		// second visual blend changes the world-space curve *after* collision and
+		// can bury the skin even when every physical sample is valid. Compliance is
+		// therefore graded in the solver, not in the renderer.
 		this.transitionWeights = new Float32Array( this.bones.length );
-		for ( let index = this.physicsKinematicBoneCount; index < this.bones.length; index ++ )
-			this.transitionWeights[ index ] = index === this.physicsKinematicBoneCount
-				? 0.28 : index === this.physicsKinematicBoneCount + 1
-					? 0.58 : index === this.physicsKinematicBoneCount + 2 ? 0.82 : 1;
-		this.restQuaternions = this.bones.map( ( bone ) => bone.quaternion.clone() );
+		this.transitionWeights.fill( 1, this.physicsKinematicBoneCount );
 		this.restWorldPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
-		this.rebasedPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
+		this.worldPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
 		this._bonePosition = new THREE.Vector3();
 		this._nextPosition = new THREE.Vector3();
-		this._physicsRoot = new THREE.Vector3();
-		this._visualRoot = new THREE.Vector3();
-		this._physicsDirection = new THREE.Vector3();
-		this._visualDirection = new THREE.Vector3();
-		this._relative = new THREE.Vector3();
 		this._currentDirection = new THREE.Vector3();
 		this._desiredDirection = new THREE.Vector3();
 		this._worldQuaternion = new THREE.Quaternion();
+		this._worldScale = new THREE.Vector3();
+		this._parentWorldPosition = new THREE.Vector3();
 		this._parentWorldQuaternion = new THREE.Quaternion();
+		this._parentWorldScale = new THREE.Vector3();
 		this._deltaQuaternion = new THREE.Quaternion();
 		this._candidateQuaternion = new THREE.Quaternion();
-		this._rebaseQuaternion = new THREE.Quaternion();
 		this.captureRestWorldPositions( this.restWorldPositions );
 
 	}
@@ -116,54 +116,35 @@ export class PassiveTailVisualRig {
 
 		if ( ! positions || positions.length < PASSIVE_TAIL_NODE_COUNT * 3 )
 			throw new RangeError( 'tail pose buffer is too short' );
-		const collarIndex = this.physicsKinematicBoneCount - 1;
-		const collar = this.bones[ collarIndex ];
-		collar.updateWorldMatrix( true, true );
-		collar.getWorldPosition( this._bonePosition );
-		collar.getWorldQuaternion( this._worldQuaternion );
-		this._visualRoot.copy( LOCAL_BONE_AXIS )
-			.multiplyScalar( this.segmentLengths[ collarIndex ] )
-			.applyQuaternion( this._worldQuaternion )
-			.add( this._bonePosition );
-		const rootOffset = this.physicsKinematicBoneCount * 3;
-		const previousOffset = rootOffset - 3;
-		this._physicsRoot.fromArray( positions, rootOffset );
-		this._physicsDirection.set(
-			positions[ rootOffset ] - positions[ previousOffset ],
-			positions[ rootOffset + 1 ] - positions[ previousOffset + 1 ],
-			positions[ rootOffset + 2 ] - positions[ previousOffset + 2 ],
-		);
-		this._visualDirection.subVectors( this._visualRoot, this._bonePosition );
-		if ( this._physicsDirection.lengthSq() > 1e-10
-			&& this._visualDirection.lengthSq() > 1e-10 )
-			this._rebaseQuaternion.setFromUnitVectors(
-				this._physicsDirection.normalize(), this._visualDirection.normalize(),
-			);
-		else this._rebaseQuaternion.identity();
-		for ( let node = this.physicsKinematicBoneCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
-
-			const offset = node * 3;
-			this._relative.fromArray( positions, offset ).sub( this._physicsRoot )
-				.applyQuaternion( this._rebaseQuaternion ).add( this._visualRoot );
-			this.rebasedPositions[ offset ] = this._relative.x;
-			this.rebasedPositions[ offset + 1 ] = this._relative.y;
-			this.rebasedPositions[ offset + 2 ] = this._relative.z;
-
-		}
+		// Positions already live in world space and the two kinematic root samples
+		// are captured from the actual skeleton every fixed step. Never rotate that
+		// collision-safe curve a second time at render time.
+		this.worldPositions.set( positions );
+		const firstDynamicBone = this.bones[ this.physicsKinematicBoneCount ];
+		// Refresh the shared ancestor path once. Dynamic tail bones are ordered from
+		// parent to child, so each solved bone can then publish its own world matrix
+		// for the following bone without recursively revisiting every descendant.
+		firstDynamicBone.parent.updateWorldMatrix( true, false );
 
 		for ( let index = this.physicsKinematicBoneCount; index < this.bones.length; index ++ ) {
 
 			const bone = this.bones[ index ];
-			bone.updateWorldMatrix( true, true );
-			bone.getWorldPosition( this._bonePosition );
-			bone.getWorldQuaternion( this._worldQuaternion );
+			bone.updateWorldMatrix( false, false );
+			bone.matrixWorld.decompose(
+				this._bonePosition, this._worldQuaternion, this._worldScale,
+			);
 			this._currentDirection.copy( LOCAL_BONE_AXIS )
 				.applyQuaternion( this._worldQuaternion ).normalize();
 			const offset = index * 3;
+			// Aim from the *actual* hierarchical bone origin to the physical next
+			// sample. Using only the physical segment direction lets small constraint
+			// length errors accumulate down the fixed-length bone hierarchy. Positional
+			// catch-up keeps every distal origin close to the collision-safe centreline;
+			// the exported skin weights remain the sole graded visual transition.
 			this._desiredDirection.set(
-				this.rebasedPositions[ offset + 3 ] - this.rebasedPositions[ offset ],
-				this.rebasedPositions[ offset + 4 ] - this.rebasedPositions[ offset + 1 ],
-				this.rebasedPositions[ offset + 5 ] - this.rebasedPositions[ offset + 2 ],
+				this.worldPositions[ offset + 3 ] - this._bonePosition.x,
+				this.worldPositions[ offset + 4 ] - this._bonePosition.y,
+				this.worldPositions[ offset + 5 ] - this._bonePosition.z,
 			);
 			if ( this._desiredDirection.lengthSq() < 1e-10 ) continue;
 			this._desiredDirection.normalize();
@@ -173,16 +154,19 @@ export class PassiveTailVisualRig {
 			);
 			this._candidateQuaternion.copy( this._deltaQuaternion )
 				.multiply( this._worldQuaternion );
-			bone.parent.getWorldQuaternion( this._parentWorldQuaternion ).invert();
+			bone.parent.matrixWorld.decompose(
+				this._parentWorldPosition, this._parentWorldQuaternion, this._parentWorldScale,
+			);
+			this._parentWorldQuaternion.invert();
 			this._candidateQuaternion.premultiply( this._parentWorldQuaternion ).normalize();
-			bone.quaternion.slerpQuaternions(
-				this.restQuaternions[ index ],
-				this._candidateQuaternion,
-				this.transitionWeights[ index ],
-			).normalize();
+			bone.quaternion.copy( this._candidateQuaternion ).normalize();
+			// Make this solved transform authoritative before its child is visited.
+			bone.updateWorldMatrix( false, false );
 
 		}
-		this.model.updateMatrixWorld( true );
+		// Preserve the former public side effect for any non-bone attachments with
+		// one linear propagation instead of one recursive subtree pass per tail bone.
+		this.model.updateWorldMatrix( false, true );
 		return this;
 
 	}

@@ -38,6 +38,85 @@ function planeProjector( state = null ) {
 
 }
 
+function tunnelProjector( halfWidth = 0.18, ceiling = 0.5 ) {
+
+	return ( point, radius, outPoint, outNormal ) => {
+
+		let correction = 0;
+		outPoint.x = point.x;
+		outPoint.y = point.y;
+		outPoint.z = point.z;
+		if ( radius - point.y > correction ) {
+
+			correction = radius - point.y;
+			outPoint.y = radius;
+			outNormal.x = 0; outNormal.y = 1; outNormal.z = 0;
+
+		}
+		if ( point.y - ( ceiling - radius ) > correction ) {
+
+			correction = point.y - ( ceiling - radius );
+			outPoint.x = point.x; outPoint.y = ceiling - radius; outPoint.z = point.z;
+			outNormal.x = 0; outNormal.y = -1; outNormal.z = 0;
+
+		}
+		if ( point.z - ( halfWidth - radius ) > correction ) {
+
+			correction = point.z - ( halfWidth - radius );
+			outPoint.x = point.x; outPoint.y = point.y; outPoint.z = halfWidth - radius;
+			outNormal.x = 0; outNormal.y = 0; outNormal.z = -1;
+
+		}
+		if ( -halfWidth + radius - point.z > correction ) {
+
+			correction = -halfWidth + radius - point.z;
+			outPoint.x = point.x; outPoint.y = point.y; outPoint.z = -halfWidth + radius;
+			outNormal.x = 0; outNormal.y = 0; outNormal.z = 1;
+
+		}
+		return correction > 0;
+
+	};
+
+}
+
+function sphereFloorProjector( center = { x: 0.35, y: 0.1, z: 0 }, sphereRadius = 0.1 ) {
+
+	return ( point, radius, outPoint, outNormal ) => {
+
+		let correction = radius - point.y;
+		outPoint.x = point.x;
+		outPoint.y = radius;
+		outPoint.z = point.z;
+		outNormal.x = 0; outNormal.y = 1; outNormal.z = 0;
+		let dx = point.x - center.x;
+		let dy = point.y - center.y;
+		let dz = point.z - center.z;
+		let distance = Math.hypot( dx, dy, dz );
+		const sphereCorrection = sphereRadius + radius - distance;
+		if ( sphereCorrection > correction ) {
+
+			if ( distance < 1e-9 ) {
+
+				dx = 0; dy = 1; dz = 0; distance = 1;
+
+			}
+			const inverseDistance = 1 / distance;
+			outNormal.x = dx * inverseDistance;
+			outNormal.y = dy * inverseDistance;
+			outNormal.z = dz * inverseDistance;
+			outPoint.x = center.x + outNormal.x * ( sphereRadius + radius );
+			outPoint.y = center.y + outNormal.y * ( sphereRadius + radius );
+			outPoint.z = center.z + outNormal.z * ( sphereRadius + radius );
+			correction = sphereCorrection;
+
+		}
+		return correction > 0;
+
+	};
+
+}
+
 function assertBuffersFinite( tail ) {
 
 	assert.equal( tail.isFinite(), true );
@@ -604,7 +683,7 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-013 sleep and wake remain fixed-step invariant
 
 } );
 
-test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 sacral collar stays rigid and dynamics begin at tail four', () => {
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 legacy one-segment pin follows its root direction exactly', () => {
 
 	const tail = createPassiveTailPhysics( {
 		rootPosition: { x: 0.2, y: 0.5, z: -0.1 },
@@ -704,9 +783,10 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-016 external projections stay bounded and slee
 		kinematicSegmentCount: 3,
 		projectPoint: planeProjector( callbackState ),
 	} );
-	const expectedCallsPerAwakeStep = PASSIVE_TAIL_NODE_COUNT - 4;
+	const minimumCallsPerAwakeStep = PASSIVE_TAIL_NODE_COUNT - 4;
 	for ( let step = 0; step < 24; step ++ ) tail.stepFixed();
-	assert.equal( callbackState.calls, 24 * expectedCallsPerAwakeStep );
+	assert.ok( callbackState.calls >= 24 * minimumCallsPerAwakeStep );
+	assert.ok( callbackState.calls <= 24 * ( minimumCallsPerAwakeStep + 3 ) );
 	for ( let step = 24; step < 8_000 && ! tail.isSleeping(); step ++ ) tail.stepFixed();
 	assert.equal( tail.isSleeping(), true );
 	assert.equal( tail.maxNodeSpeed(), 0 );
@@ -778,6 +858,262 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-017 graded collar settles without hidden Verle
 	assert.ok( maximumVerletSpeed < 0.001, `hidden tail speed ${ maximumVerletSpeed }` );
 	assert.ok( tail.kineticEnergy() < 1e-6, `residual tail energy ${ tail.kineticEnergy() }` );
 	assert.ok( tail.maxSegmentError() < 0.006 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-018 one-segment collar releases the tail near the rump with graded physical stiffness', () => {
+
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.45, z: 0 },
+		segmentLength: 0.065,
+		kinematicSegmentCount: 1,
+		bendComplianceProfile: [ 0.03, 0.1, 0.28, 0.58, 0.82, 1, 1, 1, 1, 1, 1 ],
+	} );
+	assert.equal( tail.kinematicNodeCount, 2 );
+	assert.equal( tail.inverseMasses[ 1 ], 0 );
+	assert.ok( tail.inverseMasses[ 2 ] > 0 );
+	assert.deepEqual(
+		Array.from( tail.bendComplianceScales.slice( 0, 6 ) ),
+		Array.from( new Float32Array( [ 0.03, 0.1, 0.28, 0.58, 0.82, 1 ] ) ),
+	);
+	assert.throws( () => tail.applyImpulse( 1, { x: 0, y: 1, z: 0 } ), /passive node/u );
+	assert.doesNotThrow( () => tail.applyImpulse( 2, { x: 0, y: 1, z: 0 } ) );
+	const explicitAnchors = new Float32Array( [
+		0.17, 0.53, -0.09,
+		0.205, 0.487, -0.057,
+	] );
+	tail.setKinematicAnchors( explicitAnchors );
+	tail.stepFixed();
+	assert.deepEqual(
+		Array.from( tail.positions.slice( 0, explicitAnchors.length ) ),
+		Array.from( explicitAnchors ),
+		'explicit skeleton anchors must not be rebuilt from the legacy root direction',
+	);
+	assert.deepEqual(
+		Array.from( tail.previousPositions.slice( 0, explicitAnchors.length ) ),
+		Array.from( explicitAnchors ),
+		'explicit skeleton anchors must have zero synthetic Verlet velocity',
+	);
+	for ( let step = 0; step < 1_200; step ++ ) tail.stepFixed();
+	assert.ok( tail.maxSegmentError() < 0.001 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-019 violent tunnel impacts stay inside every support plane', () => {
+
+	const halfWidth = 0.18;
+	const ceiling = 0.5;
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.25, z: 0 },
+		segmentLength: 0.06,
+		kinematicSegmentCount: 1,
+		damping: 3.2,
+		collisionFriction: 0.72,
+		projectPoint: tunnelProjector( halfWidth, ceiling ),
+		sleepEnabled: false,
+	} );
+	tail.applyImpulse( PASSIVE_TAIL_NODE_COUNT - 1, { x: 0, y: 18, z: 22 } );
+	for ( let step = 0; step < 2_400; step ++ ) {
+
+		tail.stepFixed();
+		for ( let node = tail.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			assert.ok( tail.positions[ offset + 1 ] >= tail.radii[ node ] - 2e-5 );
+			assert.ok( tail.positions[ offset + 1 ] <= ceiling - tail.radii[ node ] + 2e-5 );
+			assert.ok( Math.abs( tail.positions[ offset + 2 ] )
+				<= halfWidth - tail.radii[ node ] + 2e-5 );
+
+		}
+
+	}
+	assert.ok( tail.kineticEnergy() < 1e-5, `tunnel residual ${ tail.kineticEnergy() }` );
+	assert.ok( tail.maxSegmentError() < 0.007 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-020 curved support protects links and damps corkscrew motion', () => {
+
+	const center = { x: 0.35, y: 0.1, z: 0 };
+	const sphereRadius = 0.1;
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.35, z: 0 },
+		segmentLength: 0.065,
+		kinematicSegmentCount: 1,
+		bendCompliance: 5e-6,
+		bendComplianceProfile: [ 0.04, 0.12, 0.35, 0.7, 1, 1, 1, 1, 1, 1, 1 ],
+		damping: 3.2,
+		collisionFriction: 0.68,
+		collisionStaticFrictionSpeed: 0.055,
+		projectPoint: sphereFloorProjector( center, sphereRadius ),
+		sleepEnabled: false,
+	} );
+	tail.applyImpulse( PASSIVE_TAIL_NODE_COUNT - 1, { x: 0, y: 0, z: 2 } );
+	for ( let step = 0; step < 10_000; step ++ ) tail.stepFixed();
+	for ( let segment = tail.kinematicNodeCount - 1;
+		segment < PASSIVE_TAIL_SEGMENT_COUNT; segment ++ ) {
+
+		const first = segment * 3;
+		const second = first + 3;
+		const midpointX = ( tail.positions[ first ] + tail.positions[ second ] ) * 0.5;
+		const midpointY = ( tail.positions[ first + 1 ] + tail.positions[ second + 1 ] ) * 0.5;
+		const midpointZ = ( tail.positions[ first + 2 ] + tail.positions[ second + 2 ] ) * 0.5;
+		const midpointRadius = ( tail.radii[ segment ] + tail.radii[ segment + 1 ] ) * 0.5;
+		assert.ok(
+			Math.hypot(
+				midpointX - center.x,
+				midpointY - center.y,
+				midpointZ - center.z,
+			) - midpointRadius >= sphereRadius - 2e-5,
+			`tail link ${ segment } entered curved support`,
+		);
+
+	}
+	assert.ok( tail.kineticEnergy() < 1e-6, `corkscrew energy ${ tail.kineticEnergy() }` );
+	assert.ok( tail.maxNodeSpeed() < 0.001, `corkscrew speed ${ tail.maxNodeSpeed() }` );
+	assert.ok( tail.maxSegmentError() < 0.006 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-021 leaving a finite coplanar support clears its cached friction', () => {
+
+	const halfExtent = 0.1;
+	const finiteSupport = ( point, radius, outPoint, outNormal ) => {
+
+		if ( Math.abs( point.x ) > halfExtent || Math.abs( point.z ) > halfExtent
+			|| point.y >= radius ) return false;
+		outPoint.x = point.x;
+		outPoint.y = radius;
+		outPoint.z = point.z;
+		outNormal.x = 0;
+		outNormal.y = 1;
+		outNormal.z = 0;
+		return true;
+
+	};
+	const tail = createPassiveTailPhysics( {
+		segmentLength: 0.06,
+		gravity: { x: 0, y: 0, z: 0 },
+		damping: 0,
+		internalDamping: 0,
+		torsionDamping: 0,
+		stretchCompliance: 1e6,
+		bendCompliance: 1e6,
+		solverIterations: 1,
+		collisionFriction: 1,
+		collisionStaticFrictionSpeed: 100,
+		sleepEnabled: false,
+		projectPoint: finiteSupport,
+	} );
+	const node = PASSIVE_TAIL_NODE_COUNT - 1;
+	const offset = node * 3;
+	const radius = tail.radii[ node ];
+
+	// Establish a cached horizontal contact plane inside the finite patch.
+	tail.positions[ offset ] = 0;
+	tail.positions[ offset + 1 ] = radius - 0.01;
+	tail.positions[ offset + 2 ] = 0;
+	tail.previousPositions.set( tail.positions );
+	tail.stepFixed();
+	assert.equal( tail._collisionActive[ node ], 1 );
+
+	// Move the node beyond the patch edge while it remains exactly coplanar.
+	// The next integration tick carries 1 cm of tangential Verlet displacement.
+	// A stale infinite plane would erase that displacement as static friction.
+	tail.positions[ offset ] = 0.3;
+	tail.positions[ offset + 1 ] = radius;
+	tail.positions[ offset + 2 ] = 0;
+	tail.previousPositions[ offset ] = 0.29;
+	tail.previousPositions[ offset + 1 ] = radius;
+	tail.previousPositions[ offset + 2 ] = 0;
+	tail.stepFixed();
+
+	assert.equal( tail._collisionActive[ node ], 0,
+		'the cached contact must end at the finite collider boundary' );
+	assert.ok(
+		Math.abs( tail.positions[ offset ] - tail.previousPositions[ offset ] - 0.01 ) < 5e-5,
+		'coplanar motion outside the collider was consumed by ghost friction',
+	);
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-022 segment projection cannot push a node into an adjacent collider', () => {
+
+	const floorTop = 0.2;
+	const ceilingBottom = 0.22;
+	const halfExtent = 0.035;
+	const ceilingX = 0.1;
+	const adjacentProjector = ( point, radius, outPoint, outNormal ) => {
+
+		let bestCorrection = 0;
+		outPoint.x = point.x;
+		outPoint.y = point.y;
+		outPoint.z = point.z;
+		if ( Math.abs( point.x ) <= halfExtent && Math.abs( point.z ) <= 0.1 ) {
+
+			const correction = floorTop + radius - point.y;
+			if ( correction > bestCorrection ) {
+
+				bestCorrection = correction;
+				outPoint.y = floorTop + radius;
+				outNormal.x = 0;
+				outNormal.y = 1;
+				outNormal.z = 0;
+
+			}
+
+		}
+		if ( Math.abs( point.x - ceilingX ) <= halfExtent
+			&& Math.abs( point.z ) <= 0.1 ) {
+
+			const correction = point.y - ( ceilingBottom - radius );
+			if ( correction > bestCorrection ) {
+
+				bestCorrection = correction;
+				outPoint.x = point.x;
+				outPoint.y = ceilingBottom - radius;
+				outPoint.z = point.z;
+				outNormal.x = 0;
+				outNormal.y = -1;
+				outNormal.z = 0;
+
+			}
+
+		}
+		return bestCorrection > 0;
+
+	};
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: -0.1, y: 0.15, z: 0 },
+		segmentLength: 0.2,
+		gravity: { x: 0, y: 0, z: 0 },
+		damping: 0,
+		internalDamping: 0,
+		torsionDamping: 0,
+		solverIterations: 1,
+		collisionFriction: 0,
+		sleepEnabled: false,
+		projectPoint: adjacentProjector,
+	} );
+	const node = 1;
+	const offset = node * 3;
+	const maximumY = ceilingBottom - tail.radii[ node ];
+	assert.ok( tail.positions[ offset + 1 ] < maximumY,
+		'test setup starts inside the adjacent ceiling' );
+
+	// Segment zero spans the narrow floor patch although both endpoints are
+	// outside it. Its midpoint correction moves node one upward into the adjacent
+	// ceiling, which must be caught by a final endpoint reconciliation pass.
+	tail.stepFixed();
+	assert.ok(
+		tail.positions[ offset + 1 ] <= maximumY + 2e-5,
+		`segment correction left node ${ node } ${ tail.positions[ offset + 1 ] - maximumY } m inside the adjacent ceiling`,
+	);
 	assertBuffersFinite( tail );
 
 } );

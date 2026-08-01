@@ -89,6 +89,12 @@ export class PassiveTailPhysics {
 		this.kinematicDamping = nonNegativeNumber(
 			'kinematicDamping', options.kinematicDamping ?? 20,
 		);
+		this.internalDamping = nonNegativeNumber(
+			'internalDamping', options.internalDamping ?? 10,
+		);
+		this.torsionDamping = nonNegativeNumber(
+			'torsionDamping', options.torsionDamping ?? 18,
+		);
 		this.collisionFriction = Math.min( 1, nonNegativeNumber(
 			'collisionFriction', options.collisionFriction ?? 0.18,
 		) );
@@ -127,6 +133,11 @@ export class PassiveTailPhysics {
 		this.baseConeSin = 0;
 		this.baseConeEnabled = false;
 		const legacyKinematicSegments = options.pinBaseSegment === true ? 1 : 0;
+		// `pinBaseSegment` is the legacy shorthand that derives node one from a
+		// root direction.  An explicit kinematic chain instead supplies every
+		// anchor from the animated skeleton and must never be overwritten here.
+		this._legacyDirectionalPin = options.kinematicSegmentCount === undefined
+			&& options.pinBaseSegment === true;
 		this.kinematicSegmentCount = options.kinematicSegmentCount ?? legacyKinematicSegments;
 		if ( ! Number.isInteger( this.kinematicSegmentCount )
 			|| this.kinematicSegmentCount < 0
@@ -185,6 +196,9 @@ export class PassiveTailPhysics {
 		this._projectedNormal = Object.seal( { x: 0, y: 1, z: 0 } );
 		this._collisionActive = new Uint8Array( PASSIVE_TAIL_NODE_COUNT );
 		this._collisionPlanes = new Float32Array( COMPONENT_COUNT * 2 );
+		this._segmentMovedNodes = new Uint8Array( PASSIVE_TAIL_NODE_COUNT );
+		this._velocityScratch = new Float32Array( COMPONENT_COUNT );
+		this._collisionSweepPhase = 0;
 		this._accumulator = 0;
 		this._totalSteps = 0;
 		this._invalidCorrections = 0;
@@ -435,6 +449,9 @@ export class PassiveTailPhysics {
 		this.interpolatedPositions.set( this.positions );
 		this.segmentLambdas.fill( 0 );
 		this.bendLambdas.fill( 0 );
+		this._collisionActive.fill( 0 );
+		this._collisionPlanes.fill( 0 );
+		this._collisionSweepPhase = 0;
 		this._accumulator = 0;
 		this._sleeping = false;
 		this._sleepCandidateSteps = 0;
@@ -469,7 +486,7 @@ export class PassiveTailPhysics {
 
 	_pinRoot() {
 
-		if ( this.pinBaseSegment && this.kinematicSegmentCount === 1 ) {
+		if ( this._legacyDirectionalPin && this.kinematicSegmentCount === 1 ) {
 
 			this.kinematicAnchors[ 3 ] = this.rootX
 				+ this.baseDirectionX * this.segmentLengths[ 0 ];
@@ -702,23 +719,57 @@ export class PassiveTailPhysics {
 
 			}
 			const scale = this.segmentLengths[ segment ] / Math.max( length, EPSILON );
-			this.positions[ second ] = this.positions[ first ] + dx * scale;
-			this.positions[ second + 1 ] = this.positions[ first + 1 ] + dy * scale;
-			this.positions[ second + 2 ] = this.positions[ first + 2 ] + dz * scale;
+			const nextX = this.positions[ first ] + dx * scale;
+			const nextY = this.positions[ first + 1 ] + dy * scale;
+			const nextZ = this.positions[ first + 2 ] + dz * scale;
+			// A positional projection must move the Verlet history by the exact same
+			// delta.  Rewriting only `positions` creates a fictitious angular velocity
+			// on every link; on contact this accumulated into the former "helicopter"
+			// motion of the tip.
+			this.previousPositions[ second ] += nextX - this.positions[ second ];
+			this.previousPositions[ second + 1 ] += nextY - this.positions[ second + 1 ];
+			this.previousPositions[ second + 2 ] += nextZ - this.positions[ second + 2 ];
+			this.positions[ second ] = nextX;
+			this.positions[ second + 1 ] = nextY;
+			this.positions[ second + 2 ] = nextZ;
 
 		}
 
 	}
 
-	_projectCollisions( projectPoint ) {
+	_projectCollisions( projectPoint, replaceContacts = false, nodeMask = null ) {
 
-		this._collisionActive.fill( 0 );
-		if ( typeof projectPoint !== 'function' ) return;
+		if ( typeof projectPoint !== 'function' ) {
+
+			if ( replaceContacts ) {
+
+				if ( nodeMask === null ) this._collisionActive.fill( 0 );
+				else for ( let node = this.kinematicNodeCount;
+					node < PASSIVE_TAIL_NODE_COUNT; node ++ )
+					if ( nodeMask[ node ] !== 0 ) this._collisionActive[ node ] = 0;
+
+			}
+			return 0;
+
+		}
+		// A contact is authoritative only while the real finite collider confirms it.
+		// Clearing before the query avoids keeping the infinite tangent plane of a
+		// rock after a node has slid beyond that rock's actual boundary.
+		if ( replaceContacts ) {
+
+			if ( nodeMask === null ) this._collisionActive.fill( 0 );
+			else for ( let node = this.kinematicNodeCount;
+				node < PASSIVE_TAIL_NODE_COUNT; node ++ )
+				if ( nodeMask[ node ] !== 0 ) this._collisionActive[ node ] = 0;
+
+		}
 		const point = this._collisionPoint;
 		const projected = this._projectedPoint;
 		const normal = this._projectedNormal;
+		let maximumCorrection = 0;
 		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
+			if ( nodeMask !== null && nodeMask[ node ] === 0 ) continue;
 			const offset = node * 3;
 			point.x = this.positions[ offset ];
 			point.y = this.positions[ offset + 1 ];
@@ -745,6 +796,10 @@ export class PassiveTailPhysics {
 			const correctionX = projected.x - point.x;
 			const correctionY = projected.y - point.y;
 			const correctionZ = projected.z - point.z;
+			maximumCorrection = Math.max(
+				maximumCorrection,
+				Math.hypot( correctionX, correctionY, correctionZ ),
+			);
 			const planeOffset = offset;
 			this._collisionActive[ node ] = 1;
 			this._collisionPlanes[ planeOffset ] = projected.x;
@@ -786,6 +841,158 @@ export class PassiveTailPhysics {
 			this.previousPositions[ offset + 2 ] += tangentZ * friction;
 
 		}
+		return maximumCorrection;
+
+	}
+
+	_projectSegmentCollisions( projectPoint ) {
+
+		this._segmentMovedNodes.fill( 0 );
+		if ( typeof projectPoint !== 'function' ) return 0;
+		const point = this._collisionPoint;
+		const projected = this._projectedPoint;
+		const normal = this._projectedNormal;
+		let maximumCorrection = 0;
+		// Endpoint spheres are sufficient on one plane. Curved contacts, contact
+		// boundaries and a quarter of the otherwise unclassified links receive a
+		// midpoint sweep. This closes the visible gaps between samples without
+		// doubling the ordinary flat-ground broad-phase cost.
+		const sweepPhase = this._collisionSweepPhase;
+		for ( let segment = this.kinematicNodeCount - 1;
+			segment < PASSIVE_TAIL_SEGMENT_COUNT; segment ++ ) {
+
+			const firstNode = segment;
+			const secondNode = segment + 1;
+			const firstActive = this._collisionActive[ firstNode ] !== 0;
+			const secondActive = this._collisionActive[ secondNode ] !== 0;
+			let inspect = firstActive !== secondActive;
+			if ( firstActive && secondActive ) {
+
+				const firstNormal = COMPONENT_COUNT + firstNode * 3;
+				const secondNormal = COMPONENT_COUNT + secondNode * 3;
+				const normalDot =
+					this._collisionPlanes[ firstNormal ] * this._collisionPlanes[ secondNormal ]
+					+ this._collisionPlanes[ firstNormal + 1 ]
+						* this._collisionPlanes[ secondNormal + 1 ]
+					+ this._collisionPlanes[ firstNormal + 2 ]
+						* this._collisionPlanes[ secondNormal + 2 ];
+				inspect = normalDot < 0.985;
+
+			} else if ( ! firstActive && ! secondActive )
+				inspect = ( segment & 3 ) === sweepPhase;
+			if ( ! inspect ) continue;
+
+			const first = firstNode * 3;
+			const second = secondNode * 3;
+			point.x = ( this.positions[ first ] + this.positions[ second ] ) * 0.5;
+			point.y = ( this.positions[ first + 1 ] + this.positions[ second + 1 ] ) * 0.5;
+			point.z = ( this.positions[ first + 2 ] + this.positions[ second + 2 ] ) * 0.5;
+			projected.x = point.x;
+			projected.y = point.y;
+			projected.z = point.z;
+			normal.x = 0;
+			normal.y = 1;
+			normal.z = 0;
+			const radius = ( this.radii[ firstNode ] + this.radii[ secondNode ] ) * 0.5;
+			if ( projectPoint( point, radius, projected, normal ) !== true ) continue;
+			const values = projected.x + projected.y + projected.z
+				+ normal.x + normal.y + normal.z;
+			const normalLength = Math.hypot( normal.x, normal.y, normal.z );
+			if ( ! Number.isFinite( values ) || normalLength <= EPSILON ) {
+
+				this._rejectedProjections ++;
+				continue;
+
+			}
+			const normalX = normal.x / normalLength;
+			const normalY = normal.y / normalLength;
+			const normalZ = normal.z / normalLength;
+			const correctionX = projected.x - point.x;
+			const correctionY = projected.y - point.y;
+			const correctionZ = projected.z - point.z;
+			const correctionLength = Math.hypot(
+				correctionX, correctionY, correctionZ,
+			);
+			if ( correctionLength <= EPSILON ) continue;
+			maximumCorrection = Math.max( maximumCorrection, correctionLength );
+			const firstWeight = this.inverseMasses[ firstNode ];
+			const secondWeight = this.inverseMasses[ secondNode ];
+			const totalWeight = firstWeight + secondWeight;
+			if ( totalWeight <= EPSILON ) continue;
+			// The midpoint moves by half the sum of both endpoint displacements.
+			// Preserve each endpoint's Verlet velocity while satisfying that virtual
+			// capsule sample, so a collision cannot become an angular impulse.
+			const firstScale = 2 * firstWeight / totalWeight;
+			const secondScale = 2 * secondWeight / totalWeight;
+			if ( firstWeight > 0 ) {
+
+				const dx = correctionX * firstScale;
+				const dy = correctionY * firstScale;
+				const dz = correctionZ * firstScale;
+				this.positions[ first ] += dx;
+				this.positions[ first + 1 ] += dy;
+				this.positions[ first + 2 ] += dz;
+				this.previousPositions[ first ] += dx;
+				this.previousPositions[ first + 1 ] += dy;
+				this.previousPositions[ first + 2 ] += dz;
+				this._segmentMovedNodes[ firstNode ] = 1;
+
+			}
+			if ( secondWeight > 0 ) {
+
+				const dx = correctionX * secondScale;
+				const dy = correctionY * secondScale;
+				const dz = correctionZ * secondScale;
+				this.positions[ second ] += dx;
+				this.positions[ second + 1 ] += dy;
+				this.positions[ second + 2 ] += dz;
+				this.previousPositions[ second ] += dx;
+				this.previousPositions[ second + 1 ] += dy;
+				this.previousPositions[ second + 2 ] += dz;
+				this._segmentMovedNodes[ secondNode ] = 1;
+
+			}
+			for ( let endpoint = 0; endpoint < 2; endpoint ++ ) {
+
+				const node = endpoint === 0 ? firstNode : secondNode;
+				if ( this.inverseMasses[ node ] <= 0 ) continue;
+				const offset = node * 3;
+				let velocityX = this.positions[ offset ] - this.previousPositions[ offset ];
+				let velocityY = this.positions[ offset + 1 ]
+					- this.previousPositions[ offset + 1 ];
+				let velocityZ = this.positions[ offset + 2 ]
+					- this.previousPositions[ offset + 2 ];
+				const inward = velocityX * normalX
+					+ velocityY * normalY + velocityZ * normalZ;
+				if ( inward < 0 ) {
+
+					this.previousPositions[ offset ] += normalX * inward;
+					this.previousPositions[ offset + 1 ] += normalY * inward;
+					this.previousPositions[ offset + 2 ] += normalZ * inward;
+					velocityX -= normalX * inward;
+					velocityY -= normalY * inward;
+					velocityZ -= normalZ * inward;
+
+				}
+				const remainingNormal = velocityX * normalX
+					+ velocityY * normalY + velocityZ * normalZ;
+				const tangentX = velocityX - normalX * remainingNormal;
+				const tangentY = velocityY - normalY * remainingNormal;
+				const tangentZ = velocityZ - normalZ * remainingNormal;
+				const tangentSpeed = Math.hypot(
+					tangentX, tangentY, tangentZ,
+				) / this.fixedDt;
+				const friction = tangentSpeed <= this.collisionStaticFrictionSpeed
+					? 1 : this.collisionFriction;
+				this.previousPositions[ offset ] += tangentX * friction;
+				this.previousPositions[ offset + 1 ] += tangentY * friction;
+				this.previousPositions[ offset + 2 ] += tangentZ * friction;
+
+			}
+
+		}
+		this._collisionSweepPhase = ( sweepPhase + 1 ) & 3;
+		return maximumCorrection;
 
 	}
 
@@ -828,30 +1035,99 @@ export class PassiveTailPhysics {
 
 	}
 
-	_projectCachedCollisions() {
+	_dampInternalVelocities() {
 
+		const blend = 1 - Math.exp( -this.internalDamping * this.fixedDt );
+		if ( blend <= EPSILON ) return;
+		for ( let node = 0; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			if ( node < this.kinematicNodeCount ) {
+
+				this._velocityScratch[ offset ] = 0;
+				this._velocityScratch[ offset + 1 ] = 0;
+				this._velocityScratch[ offset + 2 ] = 0;
+				continue;
+
+			}
+			this._velocityScratch[ offset ] =
+				this.positions[ offset ] - this.previousPositions[ offset ];
+			this._velocityScratch[ offset + 1 ] =
+				this.positions[ offset + 1 ] - this.previousPositions[ offset + 1 ];
+			this._velocityScratch[ offset + 2 ] =
+				this.positions[ offset + 2 ] - this.previousPositions[ offset + 2 ];
+
+		}
+		// One allocation-free Laplacian viscosity pass damps the alternating
+		// constraint velocities that make a curved chain corkscrew, while preserving
+		// coherent translation. This is internal tissue damping, not a target pose.
 		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
-			if ( this._collisionActive[ node ] === 0 ) continue;
 			const offset = node * 3;
-			const normalOffset = COMPONENT_COUNT + offset;
-			const nx = this._collisionPlanes[ normalOffset ];
-			const ny = this._collisionPlanes[ normalOffset + 1 ];
-			const nz = this._collisionPlanes[ normalOffset + 2 ];
-			const signedDistance =
-				( this.positions[ offset ] - this._collisionPlanes[ offset ] ) * nx
-				+ ( this.positions[ offset + 1 ] - this._collisionPlanes[ offset + 1 ] ) * ny
-				+ ( this.positions[ offset + 2 ] - this._collisionPlanes[ offset + 2 ] ) * nz;
-			if ( signedDistance >= 0 ) continue;
-			const correctionX = -signedDistance * nx;
-			const correctionY = -signedDistance * ny;
-			const correctionZ = -signedDistance * nz;
-			this.positions[ offset ] += correctionX;
-			this.positions[ offset + 1 ] += correctionY;
-			this.positions[ offset + 2 ] += correctionZ;
-			this.previousPositions[ offset ] += correctionX;
-			this.previousPositions[ offset + 1 ] += correctionY;
-			this.previousPositions[ offset + 2 ] += correctionZ;
+			const previous = ( node - 1 ) * 3;
+			const next = Math.min( node + 1, PASSIVE_TAIL_NODE_COUNT - 1 ) * 3;
+			for ( let lane = 0; lane < 3; lane ++ ) {
+
+				const velocity = this._velocityScratch[ offset + lane ];
+				const neighbourhood = (
+					this._velocityScratch[ previous + lane ]
+					+ velocity * 2
+					+ this._velocityScratch[ next + lane ]
+				) * 0.25;
+				const damped = velocity + ( neighbourhood - velocity ) * blend;
+				this.previousPositions[ offset + lane ] =
+					this.positions[ offset + lane ] - damped;
+
+			}
+
+		}
+
+	}
+
+	_dampRootAxisSpin() {
+
+		const blend = 1 - Math.exp( -this.torsionDamping * this.fixedDt );
+		if ( blend <= EPSILON || this.kinematicNodeCount < 2 ) return;
+		const rootNode = this.kinematicNodeCount - 1;
+		const previousRootNode = rootNode - 1;
+		const root = rootNode * 3;
+		const previousRoot = previousRootNode * 3;
+		let axisX = this.positions[ root ] - this.positions[ previousRoot ];
+		let axisY = this.positions[ root + 1 ] - this.positions[ previousRoot + 1 ];
+		let axisZ = this.positions[ root + 2 ] - this.positions[ previousRoot + 2 ];
+		const axisLength = Math.hypot( axisX, axisY, axisZ );
+		if ( axisLength <= EPSILON ) return;
+		axisX /= axisLength;
+		axisY /= axisLength;
+		axisZ /= axisLength;
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			const relativeX = this.positions[ offset ] - this.positions[ root ];
+			const relativeY = this.positions[ offset + 1 ] - this.positions[ root + 1 ];
+			const relativeZ = this.positions[ offset + 2 ] - this.positions[ root + 2 ];
+			const axial = relativeX * axisX + relativeY * axisY + relativeZ * axisZ;
+			const radialX = relativeX - axisX * axial;
+			const radialY = relativeY - axisY * axial;
+			const radialZ = relativeZ - axisZ * axial;
+			let tangentX = axisY * radialZ - axisZ * radialY;
+			let tangentY = axisZ * radialX - axisX * radialZ;
+			let tangentZ = axisX * radialY - axisY * radialX;
+			const tangentLength = Math.hypot( tangentX, tangentY, tangentZ );
+			if ( tangentLength <= EPSILON ) continue;
+			tangentX /= tangentLength;
+			tangentY /= tangentLength;
+			tangentZ /= tangentLength;
+			const velocityX = this.positions[ offset ] - this.previousPositions[ offset ];
+			const velocityY = this.positions[ offset + 1 ]
+				- this.previousPositions[ offset + 1 ];
+			const velocityZ = this.positions[ offset + 2 ]
+				- this.previousPositions[ offset + 2 ];
+			const spinVelocity = velocityX * tangentX
+				+ velocityY * tangentY + velocityZ * tangentZ;
+			this.previousPositions[ offset ] += tangentX * spinVelocity * blend;
+			this.previousPositions[ offset + 1 ] += tangentY * spinVelocity * blend;
+			this.previousPositions[ offset + 2 ] += tangentZ * spinVelocity * blend;
 
 		}
 
@@ -989,7 +1265,6 @@ export class PassiveTailPhysics {
 		this.bendLambdas.fill( 0 );
 		const stretchAlpha = this.stretchCompliance / ( this.fixedDt * this.fixedDt );
 		const bendAlpha = this.bendCompliance / ( this.fixedDt * this.fixedDt );
-		const collisionIteration = Math.floor( this.solverIterations * 0.5 );
 		for ( let iteration = 0; iteration < this.solverIterations; iteration ++ ) {
 
 			if ( iteration % 2 === 0 ) {
@@ -1023,24 +1298,43 @@ export class PassiveTailPhysics {
 			}
 			this._pinRoot();
 			this._solveBaseCone();
-			if ( iteration === collisionIteration ) this._projectCollisions( projectPoint );
-			else if ( iteration > collisionIteration ) this._projectCachedCollisions();
-
 		}
 		this._pinRoot();
 		this._solveBaseCone();
 		this._solveBaseChainLengths();
 		this._pinRoot();
-		// Do not run a final hard forward-chain projection here. It rewrites the
-		// solved positions after XPBD has established its velocity state and turns
-		// small length corrections into a perpetual catapult at the free tip. Seven
-		// alternating iterations already keep the visual error sub-centimetric.
-		// Collisionless analytical callers may still request the legacy exact
-		// centreline; no contact velocity exists to destabilise in that case.
-		if ( this.kinematicSegmentCount > 1 && typeof projectPoint !== 'function' )
+		// Collisionless analytical users retain an exact velocity-preserving chain.
+		// With contacts, keep the converged XPBD lengths: a hard forward rewrite can
+		// fight the surface constraint even when its Verlet delta is compensated.
+		// Always query real colliders at the final solved positions. The retained
+		// plane only stabilises contact velocity/friction; it never replaces a real
+		// curved-surface projection inside the geometric constraint loop.
+		if ( this.kinematicSegmentCount > 0 && typeof projectPoint !== 'function' )
 			this._projectPassiveChainLengthsForward();
-		this._projectCachedCollisions();
+		// The first full query replaces the previous tick's contacts. Reconciliation
+		// passes retain contacts found earlier in this same tick, except for endpoints
+		// moved by a segment sweep: those are explicitly revalidated against the real
+		// finite collider so an obsolete tangent plane cannot apply friction in air.
+		let collisionCorrection = this._projectCollisions( projectPoint, true );
+		// A deep projection can push a node from one wall into another. Cap that
+		// exceptional reconciliation at three passes; ordinary resting motion stays
+		// at one node query plus the bounded adaptive sweeps.
+		for ( let pass = 1; pass < 3 && collisionCorrection > 0.001; pass ++ )
+			collisionCorrection = this._projectCollisions( projectPoint );
+		// A midpoint capsule correction can push one endpoint into an adjacent
+		// collider. Re-query only the endpoints that actually moved, then perform one
+		// bounded second midpoint reconciliation. Ordinary free/resting motion adds no
+		// node queries and remains O(1) for the fixed twelve-link rod.
+		for ( let reconciliation = 0; reconciliation < 2; reconciliation ++ ) {
+
+			const segmentCorrection = this._projectSegmentCollisions( projectPoint );
+			if ( segmentCorrection <= EPSILON ) break;
+			this._projectCollisions( projectPoint, true, this._segmentMovedNodes );
+
+		}
 		this._pinRoot();
+		this._dampInternalVelocities();
+		this._dampRootAxisSpin();
 		this._stabilizeContactVelocities();
 		this._limitVelocitiesAndRecover();
 		this._updateSleepState();

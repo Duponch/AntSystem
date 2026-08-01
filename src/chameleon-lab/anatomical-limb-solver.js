@@ -540,14 +540,19 @@ export class AnatomicalLimbSolver {
 		reachX *= reachInverse; reachY *= reachInverse; reachZ *= reachInverse;
 		const stride = clamp( finiteOr( input.stride, 0 ), -1, 1 );
 		const abduction = clamp( finiteOr( input.abduction, 0 ), 0, 1.4 );
+		const elevation = clamp( finiteOr( input.girdleElevation, 0 ), 0, 1.4 );
 		const reachWeight = clamp( finiteOr( input.girdleReachWeight, 0 ), 0, 0.72 );
+		const elevationScale = this.kind === 'front' ? 1.08 : 0.78;
 		const girdle = this._candidate;
 		girdle[ 0 ] = rest[ 0 ] * ( 1 - reachWeight ) + reachX * reachWeight
-			+ tangent[ 0 ] * stride * 0.48 + bodyRight[ 0 ] * this.sideSign * abduction * 0.24;
+			+ tangent[ 0 ] * stride * 0.48 + bodyRight[ 0 ] * this.sideSign * abduction * 0.24
+			+ normal[ 0 ] * elevation * elevationScale;
 		girdle[ 1 ] = rest[ 1 ] * ( 1 - reachWeight ) + reachY * reachWeight
-			+ tangent[ 1 ] * stride * 0.48 + bodyRight[ 1 ] * this.sideSign * abduction * 0.24;
+			+ tangent[ 1 ] * stride * 0.48 + bodyRight[ 1 ] * this.sideSign * abduction * 0.24
+			+ normal[ 1 ] * elevation * elevationScale;
 		girdle[ 2 ] = rest[ 2 ] * ( 1 - reachWeight ) + reachZ * reachWeight
-			+ tangent[ 2 ] * stride * 0.48 + bodyRight[ 2 ] * this.sideSign * abduction * 0.24;
+			+ tangent[ 2 ] * stride * 0.48 + bodyRight[ 2 ] * this.sideSign * abduction * 0.24
+			+ normal[ 2 ] * elevation * elevationScale;
 		normalize3( girdle, 0, rest[ 0 ], rest[ 1 ], rest[ 2 ] );
 		let restDot = clamp( girdle[ 0 ] * rest[ 0 ] + girdle[ 1 ] * rest[ 1 ] + girdle[ 2 ] * rest[ 2 ], -1, 1 );
 		let girdleSwing = Math.acos( restDot );

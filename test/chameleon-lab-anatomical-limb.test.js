@@ -215,6 +215,36 @@ test( 'ANATOMICAL-LIMB-005 persistent pole vectors do not invert at near-singula
 
 } );
 
+test( 'ANATOMICAL-LIMB-010 front stroke elevates the shoulder before planting the hand', () => {
+
+	const solver = new AnatomicalLimbSolver( { kind: 'front', side: 'L' } );
+	const common = {
+		socket: [ -0.135, 0.22, -0.06 ],
+		contact: [ -0.24, 0.002, -0.27 ],
+		contactNormal: [ 0, 1, 0 ],
+		bodyForward: [ -1, 0, 0 ],
+		bodyUp: [ 0, 1, 0 ],
+		stride: 0.2,
+		abduction: 0.25,
+		girdleReachWeight: 0.18,
+		minimumFlexion: 1.35,
+		dt: 1 / 120,
+	};
+	const planted = solver.solve( common );
+	const plantedShoulderY = planted.positions[ P.SHOULDER + 1 ];
+	const lifted = solver.solve( { ...common, girdleElevation: 0.72 } );
+	const shoulderRise = lifted.positions[ P.SHOULDER + 1 ] - plantedShoulderY;
+
+	assert.ok( shoulderRise > 0.045, `front shoulder only rose ${ shoulderRise } m` );
+	assert.ok(
+		lifted.positions[ P.SHOULDER + 1 ] > lifted.positions[ P.SOCKET + 1 ],
+		'the anterior girdle must pass above its socket during the aerial stroke',
+	);
+	assert.ok( lifted.metrics[ M.GIRDLE_SWING ] <= CHAMELEON_LIMB_PRESETS.front.girdleSwingLimit + 1e-5 );
+	assert.ok( lifted.positions.every( Number.isFinite ) );
+
+} );
+
 test( 'ANATOMICAL-LIMB-006 swing-twist decomposition respects both limits', () => {
 
 	const swing = quaternionAxisAngle( [ 1, 0, 0 ], 1.15 );

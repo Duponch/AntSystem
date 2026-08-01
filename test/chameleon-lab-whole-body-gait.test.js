@@ -22,7 +22,7 @@ function gaitView( activePair, phase ) {
 		footPhase[ 2 ] = phase;
 
 	}
-	return { activePair, footPhase };
+	return { activePair, footPhase, nextPair: activePair === 0 ? 1 : 0 };
 
 }
 
@@ -147,5 +147,92 @@ test( 'CHAMELEON-LAB-GAIT-005 idle neck explores smoothly while the body only br
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.CHEST_PITCH ] ) < 0.005 );
 	assert.equal( later[ WHOLE_BODY_POSE.MOTION_WEIGHT ], 1 );
 	assert.deepEqual( later, repeated, 'idle attention must remain deterministic' );
+
+} );
+
+test( 'CHAMELEON-LAB-GAIT-006 anterior breast-stroke lifts, reaches, then plants from the shoulder', () => {
+
+	const toeOff = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const reach = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const plant = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const parameters = {
+		speed: 1, strideAmplitude: 0.48, limbLift: 0.36, jointFlex: 0.72,
+	};
+	writeWholeBodyTarget( { ...parameters, gaitView: gaitView( 0, 0.12 ) }, toeOff );
+	writeWholeBodyTarget( { ...parameters, gaitView: gaitView( 0, 0.55 ) }, reach );
+	writeWholeBodyTarget( { ...parameters, gaitView: gaitView( 0, 0.94 ) }, plant );
+
+	assert.ok( toeOff[ WHOLE_BODY_POSE.STRIDE_0 ] < -0.45,
+		'the front arm must fold/lift before its forward sweep' );
+	assert.ok( Math.abs( toeOff[ WHOLE_BODY_POSE.LIFT_0 ] ) > 0.35 );
+	assert.ok( reach[ WHOLE_BODY_POSE.STRIDE_0 ] > 0.1 );
+	assert.ok( Math.abs( reach[ WHOLE_BODY_POSE.LIFT_0 ] ) > 0.5 );
+	assert.ok( plant[ WHOLE_BODY_POSE.STRIDE_0 ] > 0.5 );
+	assert.ok( Math.abs( plant[ WHOLE_BODY_POSE.LIFT_0 ] ) < 0.08,
+		'the palm must descend only after the shoulder has reached forwards' );
+	assert.ok(
+		Math.abs( reach[ WHOLE_BODY_POSE.LIFT_0 ] )
+			> Math.abs( reach[ WHOLE_BODY_POSE.LIFT_3 ] ) * 1.2,
+		'the anterior shoulder must describe the broader arc',
+	);
+
+} );
+
+test( 'CHAMELEON-LAB-GAIT-007 couplet hand-off is pose-continuous without a neutral-frame twitch', () => {
+
+	const completed = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const handOff = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const started = new Float32Array( WHOLE_BODY_POSE_SIZE );
+	const parameters = {
+		speed: 1, strideAmplitude: 0.64, limbLift: 0.43, jointFlex: 0.82,
+	};
+	writeWholeBodyTarget( { ...parameters, gaitView: gaitView( 0, 1 ) }, completed );
+	const between = gaitView( -1, 0 );
+	between.nextPair = 1;
+	writeWholeBodyTarget( { ...parameters, gaitView: between }, handOff );
+	writeWholeBodyTarget( { ...parameters, gaitView: gaitView( 1, 0 ) }, started );
+
+	for ( let index = 0; index < WHOLE_BODY_POSE_SIZE; index ++ ) {
+
+		assert.ok( Math.abs( completed[ index ] - handOff[ index ] ) < 1e-6,
+			`completed -> hand-off discontinuity in lane ${ index }` );
+		assert.ok( Math.abs( handOff[ index ] - started[ index ] ) < 1e-6,
+			`hand-off -> next couplet discontinuity in lane ${ index }` );
+
+	}
+
+} );
+
+test( 'CHAMELEON-LAB-GAIT-008 exact damped response is smooth and fixed-time invariant', () => {
+
+	const options = { responseFrequency: 8.5, dampingRatio: 1.05 };
+	const sixty = new WholeBodyGaitModel( options );
+	const oneTwenty = new WholeBodyGaitModel( options );
+	const input = {
+		gaitView: gaitView( 0, 0.55 ), speed: 1,
+		strideAmplitude: 0.64, limbLift: 0.43, jointFlex: 0.82,
+	};
+	for ( let frame = 0; frame < 60; frame ++ ) sixty.update( 1 / 60, input );
+	let maximumAccelerationDelta = 0;
+	let previousDelta = 0;
+	let previousValue = 0;
+	for ( let frame = 0; frame < 120; frame ++ ) {
+
+		oneTwenty.update( 1 / 120, input );
+		const value = oneTwenty.getView().current[ WHOLE_BODY_POSE.LIFT_0 ];
+		const delta = value - previousValue;
+		maximumAccelerationDelta = Math.max(
+			maximumAccelerationDelta, Math.abs( delta - previousDelta ),
+		);
+		previousValue = value;
+		previousDelta = delta;
+
+	}
+	for ( let index = 0; index < WHOLE_BODY_POSE_SIZE; index ++ )
+		assert.ok( Math.abs(
+			sixty.getView().current[ index ] - oneTwenty.getView().current[ index ],
+		) < 2e-6, `dt partition drift in lane ${ index }` );
+	assert.ok( maximumAccelerationDelta < 0.07,
+		`damped pose contains a visible impulse (${ maximumAccelerationDelta })` );
 
 } );

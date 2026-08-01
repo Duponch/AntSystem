@@ -15,10 +15,11 @@ visuelles ne sont pas une chaîne de corps rigides libre de s’entortiller.
 
 Le modèle visible reprend la géométrie originale, y compris les **7 206 sommets
 de la queue d’origine**. Elle n’est ni remplacée par un tube, ni reconstruite :
-douze os suivent sa courbure source. Les trois premiers forment un pont rigide
-au-dessus de la croupe ; la simulation passive commence sur le quatrième et
-laisse le reste traîner, se balancer et se poser sur le décor sans tirer le bas
-du dos. Le laboratoire ne fait pas avancer la colonie.
+douze os suivent sa courbure source. Seul `tail_01` forme un court collet rigide
+au-dessus de la croupe ; la simulation passive commence dès `tail_02`. Une
+transition de peau progressive sur 18 % de la distance géodésique évite une
+charnière visible et laisse le reste traîner, se balancer et se poser sur le
+décor sans tirer le bas du dos. Le laboratoire ne fait pas avancer la colonie.
 
 ## Ouvrir le laboratoire
 
@@ -85,6 +86,9 @@ le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la
 tête conservent de petits mouvements de regard au repos, sans provoquer de pas
 ni de vibration des appuis. Quand le bassin ou le thorax oscillent, le repère de
 marche reste celui du corps entier et non l’axe local incliné d’un os de colonne.
+La démarche corps entier et l’IK sont calculées au pas fixe de 120 Hz. Le rendu
+interpole seulement deux poses déjà résolues : changer la fréquence d’écran ou
+rendre plusieurs fois la même image ne modifie donc ni le cycle ni les os.
 
 ### Physique libre
 
@@ -182,11 +186,12 @@ impossible à agripper.
 - **Collision** agrandit ou réduit le rayon de contact des treize nœuds ;
 - **Gravité queue** dose son poids sans modifier la gravité du corps.
 
-Le collet de la queue suit rigidement le bassin sur `tail_01` et `tail_02`.
-La liberté commence dès `tail_03`, mais augmente progressivement sur trois os :
-la jonction n’a donc pas de charnière visible. Le garde de peau de la croupe
-reste protégé, puis les segments dynamiques conservent leur longueur, répondent
-à l’inertie et sont projetés hors du sol, des murs, des rochers et des troncs.
+Le collet de la queue suit rigidement le bassin sur le seul `tail_01`. La liberté
+commence dès `tail_02`, tandis que les poids dynamiques apparaissent
+progressivement sur 18 % de la distance géodésique : la jonction n’a donc pas de
+charnière visible. Le garde de peau de la croupe reste protégé, puis les segments
+dynamiques conservent leur longueur, répondent à l’inertie et sont projetés hors
+du sol, des murs, des rochers et des troncs.
 Une friction statique empêche une queue posée de tournoyer. La queue n’est pas préhensile dans
 ce prototype. Quand elle est réellement au repos, elle passe en sommeil : sa
 pose reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un

@@ -82,17 +82,21 @@ les os des pattes et ne crée aucune énergie dans le solveur physique.
 ## Contrat de l’asset et queue originale
 
 `public/assets/ChameleonPhysical.glb` exporte un unique mesh skinné à partir de
-la géométrie source préservée. Son contrat `mesh_contract_version = 3.5.0`
-verrouille notamment :
+la géométrie source préservée. Ses contrats `mesh_contract_version = 3.6.0` et
+`rig_version = 3.6.0` verrouillent notamment :
 
 - `exact_source_geometry = true` ;
 - `source_vertex_count = 25002` ;
 - `source_polygon_count = 50000` ;
 - `original_tail_vertices = 7206` ;
 - `tail_deformation_mode = "surface-geodesic-bspline-12"` ;
+- `tail_static_collar_bone = "tail_01"` ;
+- `tail_dynamic_root_bone = "tail_02"` ;
+- `tail_dynamic_weight_start_geodesic_fraction = 0.055` ;
+- `tail_dynamic_weight_feather_fraction = 0.18` ;
 - `tail_physics_dofs = 0`.
 
-Le contrat anatomique `2.1.0` recale les pivots sur la pose source réellement
+Le contrat anatomique `2.2.0` recale les pivots sur la pose source réellement
 fléchie : thorax/épaule/coude/poignet à l’avant, bassin/hanche/genou/cheville à
 l’arrière, puis cou et crâne. Il publie aussi le plan de flexion au repos de
 chaque membre. L’IK peut ainsi reproduire le rig exporté avant d’ajouter un pas,
@@ -116,15 +120,15 @@ support, normale du support vers l’animal ». Les matrices inverses sont test�
 Les 7 206 sommets de la queue sont ceux de la queue originale enroulée. Ils ne
 sont ni supprimés, ni remplacés par une queue tubulaire. Aucun sommet du corps
 n’est pondéré par un os `tail_*`. À la couture, un garde sacré conserve les
-sommets dans le repère du bassin ; `tail_01`, `tail_02` et `tail_03` forment un
-pont rigide au-dessus de la croupe. La pondération dynamique ne commence
-qu’après ce pont, sur `tail_04`, puis suit la ligne centrale courbe par distance
-géodésique et mélange B-spline cubique. La queue peut ainsi fléchir sans tirer
-les sommets du bas du dos ni créer une coupure de silhouette. Le champ
-`tail_physics_dofs = 0` signifie qu’aucun corps Rapier supplémentaire n’est
-exporté dans le GLB : le solveur XPBD borné du runtime représente les douze
-segments, dont trois cinématiques et neuf passifs. Les 43 os d’authoring ne
-correspondent donc pas à 43 corps Rapier.
+sommets du corps dans le repère du bassin et seul `tail_01` forme le court collet
+rigide. `tail_02` est déjà la racine dynamique. Les poids dynamiques commencent
+à `0,055` de la distance géodésique, puis apparaissent avec un feather lisse sur
+`0,18` ; la ligne centrale courbe conserve son mélange B-spline cubique. Cette
+transition de skinning rapproche la flexion de la croupe sans créer de charnière
+ni tirer les sommets du bas du dos. Le champ `tail_physics_dofs = 0` signifie
+qu’aucun corps Rapier supplémentaire n’est exporté dans le GLB : le solveur
+XPBD borné du runtime représente les douze segments, dont un cinématique et onze
+passifs. Les 43 os d’authoring ne correspondent donc pas à 43 corps Rapier.
 
 La reconstruction est déterministe et s’exécute sans interface Blender :
 
@@ -207,18 +211,24 @@ les segments supérieurs, les coudes ou genoux, le bassin, le thorax, le cou et
 la tête. Le bassin participe davantage au pas ; le thorax contre-oscille et la
 tête compense pour conserver un regard stable.
 
-À chaque rendu interpolé, le rig restaure sa pose de référence, applique cette
-pré-pose lissée puis résout chaque patte par une chaîne analytique à ceinture
-mobile : ceinture, segment supérieur, segment inférieur, paume et deux groupes
-de doigts zygodactyles. Les longueurs, directions de repos, pivots, plans de
-flexion et centres de semelle viennent du GLB. À vitesse nulle, l’attraction de
-la ceinture vers le pied et le biais d’abduction valent exactement zéro : la
-pose fléchie exportée est donc la référence réelle. L’épaule ou la hanche effectue une excursion ample ; le
-coude ou genou adapte réellement son angle ; la paume entière reste tangente au
-support et n’est jamais étirée pour masquer une erreur proximale. Toutes les
-rotations restent bornées autour de la pose de repos. Une cible inaccessible ne
-peut donc ni accumuler une torsion, ni faire vibrer frénétiquement un poignet ou
-une cheville.
+À chaque tick fixe de `120 Hz`, le buffer de pose restaure la référence, applique
+cette pré-pose lissée puis résout chaque patte par une chaîne analytique à
+ceinture mobile : ceinture, segment supérieur, segment inférieur, paume et deux
+groupes de doigts zygodactyles. Un servo critique conserve la vitesse angulaire
+de chaque os et plafonne son accélération : une inversion de cycle ne peut donc
+plus inverser un bras en un tick. Le buffer conserve ensuite les transformations
+locales précédentes et courantes. Le rendu ne relance ni la démarche ni l’IK : il
+interpole seulement ces deux snapshots immuables, de sorte qu’un rendu répété ne
+peut pas avancer la pose et que 60 ou 240 images par seconde produisent les mêmes
+os au même tick. Les longueurs, directions de repos, pivots, plans de flexion et
+centres de semelle viennent du GLB. À vitesse nulle, l’attraction de la ceinture
+vers le pied et le biais d’abduction valent exactement zéro : la pose fléchie
+exportée est donc la référence réelle. L’épaule ou la hanche effectue une
+excursion ample ; le coude ou genou adapte réellement son angle ; la paume
+entière reste tangente au support et n’est jamais étirée pour masquer une erreur
+proximale. Toutes les rotations restent bornées autour de la pose de repos. Une
+cible inaccessible ne peut donc ni accumuler une torsion, ni faire vibrer
+frénétiquement un poignet ou une cheville.
 
 Le repère avant/haut/côté n’est jamais déduit des axes locaux de `spine_02` ou
 du bassin, car ces axes suivent la chaîne exportée et ne coïncident pas avec ceux
@@ -237,32 +247,42 @@ paramètres indépendants exposés dans l’interface.
 ## Queue passive à géométrie originale
 
 La queue emploie une tige XPBD de taille constante : treize nœuds pour douze
-segments. Les trois premiers nœuds imposent deux segments cinématiques
-`tail_01` et `tail_02`. La liberté physique commence sur `tail_03`, mais sa
-compliance augmente graduellement sur les contraintes proximales
-`0,04 → 0,12 → 0,35 → 0,70 → 1`. Le garde de skinning à trois os reste inchangé
-et protège toujours la croupe. Le mouvement de la queue ne peut donc pas
-entraîner visuellement les fesses. Il n’existe aucun moteur, pose cible ou
-couple musculaire dans ce prototype : gravité, inertie, amortissement,
-contraintes de longueur et de courbure déterminent seuls son mouvement
-secondaire.
+segments. Les deux premiers nœuds imposent le seul segment cinématique
+`tail_01`; la liberté physique commence sur `tail_02`. Sa compliance augmente
+graduellement sur les contraintes proximales `0,04 → 0,12 → 0,35 → 0,70 → 1`.
+Le collet de skinning rigide se limite lui aussi à `tail_01`; le feather
+géodésique exporté sur `0,18` rend ensuite l’entrée de `tail_02+` progressive et
+protège la croupe. Il n’existe aucun moteur, pose cible ou couple musculaire dans
+ce prototype : gravité, inertie, amortissement, contraintes de longueur et de
+courbure déterminent seuls son mouvement secondaire.
 
-Le solveur physique reste ancré au corps rigide, tandis que le bassin reçoit
-encore sa pose procédurale au rendu. Pour éviter que ces deux repères ne
-cisaillent la couture, le rig rebase la ligne dynamique au bout de `tail_02`,
-puis mélange les rotations physiques de `tail_03`, `tail_04` et `tail_05` avec
-des poids `0,28`, `0,58` et `0,82`; `tail_06..12` suivent à 100 %. Il ne réécrit
-ni les sommets ni leur topologie : la frontière rigide/libre devient un gradient
-continu au lieu d’une charnière visible.
+Les deux ancres cinématiques sont lues sur les os réellement posés au tick fixe.
+Le rig visuel applique ensuite directement la courbe collisionnée à
+`tail_02..12`, sans rebase ni second mélange de rotations au rendu. Le skin
+exporté reste l’unique autorité du raccord progressif : une correction purement
+visuelle ne peut donc plus replacer la peau sous une surface après la résolution
+des collisions. Les os sont publiés parent vers enfant en un parcours linéaire,
+puis la hiérarchie reçoit une unique propagation finale : le coût ne devient pas
+quadratique avec le nombre d’os de la queue.
 
-Sept itérations résolvent les longueurs, la flexion et les collisions à 120 Hz.
-Chaque nœud possède un rayon décroissant de la base à la pointe. Une projection
-bornée contre les colliders fixes du laboratoire empêche la traversée du sol,
-des murs, rochers et troncs ; le sol utilise une surface unilatérale afin de ne
-jamais éjecter une queue posée vers le dessous d’une dalle épaisse. La scène
-n’est interrogée qu’une fois par nœud dynamique éveillé et par pas fixe ; le
-plan de contact obtenu est réutilisé pendant les itérations XPBD restantes. Le
-coût des collisions externes ne dépend donc pas du nombre d’itérations. La
+Sept itérations résolvent les longueurs et la flexion à 120 Hz, puis une passe
+de collision bornée projette la courbe finale.
+Chaque nœud reçoit depuis l’asset un rayon mesuré sur l’enveloppe réelle de la
+peau par segment géodésique, avec une marge de 3 mm ; le profil peut donc
+s’élargir à nouveau près de la pointe enroulée. Une projection bornée contre les
+colliders fixes du laboratoire empêche la traversée du sol, des murs, rochers et
+troncs ; le sol utilise une surface unilatérale afin de ne jamais éjecter une
+queue posée vers le dessous d’une dalle épaisse. Les projections des nœuds et un
+quart tournant des milieux de segments ferment les interstices entre les
+échantillons ; seules les pénétrations profondes déclenchent jusqu’à deux passes
+de réconciliation supplémentaires. Si un milieu de segment déplace ses
+extrémités, seules ces extrémités sont immédiatement reprojetées, au plus deux
+fois, afin que la dernière correction ne puisse pas les introduire dans un
+collider adjacent. Le plan d’un nœud ne stabilise la friction et la vitesse que
+pendant le tick où le collider fini a réellement confirmé le contact : sortir
+tangentiellement du bord d’un rocher invalide donc aussi sa friction. Le nombre
+de requêtes ne dépend pas du nombre d’itérations XPBD et le cas ordinaire
+n’effectue aucune reprojection supplémentaire. La
 souplesse, l’amortissement, la gravité propre et l’échelle des rayons de
 collision sont réglables. Une friction statique annule la dérive tangentielle
 sous `0,055 m/s`; la projection dure qui réinjectait de l’énergie après le solve
@@ -316,9 +336,11 @@ appuis. L’ensemble reste continu, sans téléportation.
 
 ## Pas fixe, interpolation et budget
 
-Rapier avance à `120 Hz`, soit `1/120 s`, avec au plus quatre sous-pas par image.
-À durée acceptée identique, le résultat physique ne dépend pas d’un rendu à 60
-ou 240 Hz. Le rendu interpole la pose précédente et la pose courante.
+Rapier, la démarche corps entier, l’IK anatomique et la queue avancent à
+`120 Hz`, soit `1/120 s`, avec au plus quatre sous-pas par image. À durée acceptée
+identique, le résultat physique et les transformations locales des os ne
+dépendent pas d’un rendu à 60 ou 240 Hz. Le rendu interpole les poses précédente
+et courante sans exécuter de nouvelle logique.
 
 Une image exceptionnellement longue ne crée pas une dette sans limite : le
 temps qui dépasse quatre sous-pas est compté dans `droppedSeconds`, puis
@@ -417,30 +439,36 @@ Les preuves automatiques actuelles sont :
   les excursions du bassin/thorax/tête, le lissage apériodique et l’absence
   d’allocation dans le modèle de pose ;
 - `test/chameleon-lab-passive-tail.test.js` protège les treize nœuds fixes, le
-  pont sacré à deux segments, le gradient de compliance, les longueurs, la gravité, l’inertie,
-  l’amortissement, la projection bornée des collisions, le reset et la
-  récupération des valeurs non finies, ainsi que le sommeil bit-identique et
-  tous ses motifs de réveil, ainsi que l’absence de vitesse Verlet cachée au sol ;
+  collet sacré à un segment, les ancres explicites, le gradient de compliance,
+  les longueurs, la gravité, l’inertie, l’amortissement, les projections de
+  nœuds et de segments, le reset et la récupération des valeurs non finies,
+  ainsi que le sommeil bit-identique, tous ses motifs de réveil et l’absence de
+  vitesse Verlet cachée au sol. Il interdit aussi la friction fantôme après la
+  sortie coplanaire d’un support fini et la pénétration d’un collider adjacent
+  créée par une correction de milieu de segment ;
 - `test/chameleon-lab-anatomical-limb.test.js` protège longueurs exactes,
   ceinture mobile, flexions, paumes complètes, continuité du pôle et suspension ;
 - `test/chameleon-lab-passive-limbs.test.js` protège le faible tonus
   configurable, les ligaments, les capsules corps, l’auto-collision des
   segments, l’unique projection externe par nœud et par pas, et la récupération ;
 - `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
-  `CHAMELEON-LAB-RAGDOLL-001` à `019` protègent le corps Rapier unique, les
+  `CHAMELEON-LAB-RAGDOLL-001` à `020` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
   lancer sur mur ou cylindre, la suppression des prises périmées au décollage
   et la reprise d’un support réel après impact, l’absence de capture à distance,
   le redressement ventral et le verrouillage d’un propriétaire dans un coin,
-  ainsi que la flexion au repos,
-  le repère anatomique du modèle et le mouvement doux du cou et de la tête ;
-- `test/chameleon-physical-asset.test.js` protège les contrats de mesh `3.5.0`
-  et d’anatomie `2.1.0`, le mesh source exact, le skin, les 7 206 sommets
-  originaux, l’absence de poids `tail_*` sur le corps, le pont sacré rigide, la
-  racine dynamique `tail_04`, les axes de membres contenus dans le volume fermé
-  et les poids géodésiques bornés.
+  ainsi que la flexion au repos, le repère anatomique du modèle et le mouvement
+  doux du cou et de la tête. `RAGDOLL-020` mesure en plus l’amplitude de la
+  brasse avant, borne les variations de vitesse angulaire, interdit tout
+  avancement pendant une synchronisation de rendu seule et compare les poses à
+  60/240 Hz ;
+- `test/chameleon-physical-asset.test.js` protège les contrats de mesh/rig
+  `3.6.0` et d’anatomie `2.2.0`, le mesh source exact, le skin, les 7 206 sommets
+  originaux, l’absence de poids `tail_*` sur le corps, le collet `tail_01`, la
+  racine dynamique `tail_02`, le feather géodésique `0,18`, les rayons de
+  collision exportés et les axes de membres contenus dans le volume fermé.
 
 Le build WebGPU protège l’assemblage des modules. Une inspection dans un
 navigateur WebGPU reste indispensable pour les transitions multi-surfaces, la

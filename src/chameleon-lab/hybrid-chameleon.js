@@ -43,6 +43,15 @@ const IDENTITY_QUATERNION = new THREE.Quaternion();
 const BODY_COLLISION_GROUP = chameleonCollisionGroups();
 const REST_FLEXION_RETENTION = 0.84;
 const MINIMUM_REST_FLEXION_RETENTION = 0.72;
+// Maximum radial envelope of the preserved original tail around its authored
+// twelve-segment medial line (rest-mesh audit, plus 3 mm collision margin).
+// The source finishes in a broad spiral rather than a geometric taper, so a
+// formula that shrinks towards zero necessarily lets the rendered skin enter
+// the floor even while the XPBD centreline remains valid.
+const TAIL_COLLISION_RADII_FALLBACK = new Float32Array( [
+	0.148, 0.148, 0.097, 0.073, 0.066, 0.066, 0.069,
+	0.079, 0.080, 0.089, 0.094, 0.094, 0.083,
+] );
 
 const LEG_SPECS = Object.freeze( [
 	Object.freeze( { name: 'front.L', kind: 'front', side: 'L', girdle: 'front_girdleL', upper: 'front_upperL', lower: 'front_lowerL', palm: 'front_palmL', inner: 'front_digits_innerL', outer: 'front_digits_outerL' } ),
@@ -172,6 +181,9 @@ class StableVisualRig {
 			quaternion: bone.quaternion.clone(),
 			scale: bone.scale.clone(),
 		} ) );
+		this.activeRest = this.rest.filter(
+			( pose ) => ! pose.bone.name.startsWith( 'tail_' ),
+		);
 		const modelWorldQuaternion = model.getWorldQuaternion( new THREE.Quaternion() );
 		const inverseModelWorldQuaternion = modelWorldQuaternion.clone().invert();
 		this.legs = LEG_SPECS.map( ( spec ) => {
@@ -393,8 +405,6 @@ class StableVisualRig {
 		this._surfaceTarget = new THREE.Vector3();
 		this._surfaceCross = new THREE.Vector3();
 		this._twist = new THREE.Quaternion();
-		this._smoothed = new THREE.Quaternion();
-		this._maximumFrameRotation = 0.16;
 		this._suspensionOffset = new THREE.Vector3();
 		this._inverseModelWorld = new THREE.Quaternion();
 		this._basis = new THREE.Matrix4();
@@ -412,6 +422,7 @@ class StableVisualRig {
 			palmYaw: 0,
 			stride: 0,
 			abduction: 0,
+			girdleElevation: 0,
 			girdleReachWeight: 0,
 			minimumFlexion: 0.42,
 			maximumFlexion: 2.62,
@@ -534,6 +545,19 @@ class StableVisualRig {
 	restore() {
 
 		for ( const pose of this.rest ) {
+
+			pose.bone.position.copy( pose.position );
+			pose.bone.quaternion.copy( pose.quaternion );
+			pose.bone.scale.copy( pose.scale );
+
+		}
+		this.model.updateMatrixWorld( true );
+
+	}
+
+	restoreActive() {
+
+		for ( const pose of this.activeRest ) {
 
 			pose.bone.position.copy( pose.position );
 			pose.bone.quaternion.copy( pose.quaternion );
@@ -688,11 +712,10 @@ class StableVisualRig {
 		if ( fromRest && bounded ) {
 
 			const previous = leg.solvedQuaternions.get( bone );
-			const angle = previous.angleTo( desired );
-			const blend = angle > this._maximumFrameRotation && angle > 1e-8
-				? this._maximumFrameRotation / angle : 1;
-			this._smoothed.slerpQuaternions( previous, desired, blend );
-			previous.copy( this._smoothed );
+			// This layer writes an exact fixed-step target. Temporal filtering belongs
+			// to FixedRigPoseBuffer so IK never gets filtered twice and rendering can
+			// stay a pure interpolation of immutable snapshots.
+			previous.copy( desired );
 			bone.quaternion.slerpQuaternions(
 				leg.restQuaternions.get( bone ), previous, influence,
 			);
@@ -711,7 +734,7 @@ class StableVisualRig {
 		landingCompression = 0 ) {
 
 		const influence = THREE.MathUtils.clamp( weight, 0, 1 );
-		this._maximumFrameRotation = THREE.MathUtils.clamp( renderDt, 1 / 1000, 1 / 20 ) * 9.6;
+		const boundedRenderDt = THREE.MathUtils.clamp( renderDt, 1 / 1000, 1 / 20 );
 		if ( influence <= 0 ) {
 
 			this.model.updateMatrixWorld( true );
@@ -772,13 +795,18 @@ class StableVisualRig {
 				: 0;
 			const strideDrive = Math.abs( this._solveInput.stride );
 			this._solveInput.abduction = strideDrive * ( leg.kind === 'front' ? 0.16 : 0.20 )
-				+ flexionDrive * 0.08 + liftDrive * 0.22;
+				+ flexionDrive * 0.08 + liftDrive * ( leg.kind === 'front' ? 0.38 : 0.27 );
+			this._solveInput.girdleElevation = liftDrive;
 			this._solveInput.girdleReachWeight = THREE.MathUtils.clamp(
-				0.10 + strideDrive * 0.18 + flexionDrive * 0.12 + liftDrive * 0.10,
-				0, 0.40,
+				0.09 + strideDrive * 0.16 + flexionDrive * 0.10 - liftDrive * 0.08,
+				0.06, 0.34,
 			);
 			this._poleVector.copy( leg.restPoleParentLocal )
-				.applyQuaternion( this._legParentWorldQuaternion ).normalize();
+				.applyQuaternion( this._legParentWorldQuaternion )
+				.addScaledVector(
+					this._desiredNormal,
+					liftDrive * ( leg.kind === 'front' ? 4.8 : 1.10 ),
+				).normalize();
 			this._solveInput.minimumFlexion = Math.max(
 				leg.solver.preset.minimumFlexion,
 				leg.restFlexion * MINIMUM_REST_FLEXION_RETENTION,
@@ -787,6 +815,7 @@ class StableVisualRig {
 				+ liftDrive * ( leg.kind === 'front' ? 0.34 : 0.42 );
 			this._solveInput.maximumFlexion = leg.solver.preset.maximumFlexion;
 			this._solveInput.girdleSwingLimit = leg.solver.preset.girdleSwingLimit;
+			this._solveInput.dt = boundedRenderDt;
 			const solved = leg.solver.solve( this._solveInput );
 			this._soleTargetNormal.copy( this._desiredNormal ).multiplyScalar( -1 );
 			this._applySegment(
@@ -847,6 +876,204 @@ class StableVisualRig {
 
 		}
 		this.model.updateMatrixWorld( true );
+
+	}
+
+}
+
+/**
+ * Fixed-step authority for every local bone transform.
+ *
+ * IK is evaluated once per physics tick. Rendering only interpolates two
+ * immutable snapshots, so neither display refresh rate nor duplicate renders
+ * can advance the gait. All vectors/quaternions are allocated once here.
+ */
+class FixedRigPoseBuffer {
+
+	constructor( rig, response = 32, maximumAngularSpeed = 5.8,
+		maximumAngularAcceleration = 120 ) {
+
+		this.rig = rig;
+		// Tail bones have their own XPBD interpolation and are applied after this
+		// buffer. Excluding them avoids two redundant quaternion passes per render.
+		this.bones = rig.bones.filter( ( bone ) => ! bone.name.startsWith( 'tail_' ) );
+		this.response = response;
+		this.maximumAngularSpeed = maximumAngularSpeed;
+		this.maximumAngularAcceleration = maximumAngularAcceleration;
+		this.previousQuaternions = this.bones.map( ( bone ) => bone.quaternion.clone() );
+		this.currentQuaternions = this.bones.map( ( bone ) => bone.quaternion.clone() );
+		this.targetQuaternions = this.bones.map( ( bone ) => bone.quaternion.clone() );
+		this.previousPositions = this.bones.map( ( bone ) => bone.position.clone() );
+		this.currentPositions = this.bones.map( ( bone ) => bone.position.clone() );
+		this.targetPositions = this.bones.map( ( bone ) => bone.position.clone() );
+		this.angularVelocities = new Float32Array( this.bones.length * 3 );
+		this.positionBoneIndex = this.bones.indexOf( rig.pelvis );
+		this.linearVelocities = new Float32Array( 3 );
+		this._inverseQuaternion = new THREE.Quaternion();
+		this._errorQuaternion = new THREE.Quaternion();
+		this._incrementQuaternion = new THREE.Quaternion();
+		this._axis = new THREE.Vector3();
+
+	}
+
+	resetFromRig() {
+
+		for ( let index = 0; index < this.bones.length; index ++ ) {
+
+			const bone = this.bones[ index ];
+			this.previousQuaternions[ index ].copy( bone.quaternion );
+			this.currentQuaternions[ index ].copy( bone.quaternion );
+			this.targetQuaternions[ index ].copy( bone.quaternion );
+			this.previousPositions[ index ].copy( bone.position );
+			this.currentPositions[ index ].copy( bone.position );
+			this.targetPositions[ index ].copy( bone.position );
+
+		}
+		this.angularVelocities.fill( 0 );
+		this.linearVelocities.fill( 0 );
+		return this;
+
+	}
+
+	commitSolvedPose( dt, snap = false ) {
+
+		const fixedDt = THREE.MathUtils.clamp( dt, 1 / 1000, 1 / 20 );
+		const frequencySquared = this.response * this.response;
+		const criticalDamping = 2 * this.response;
+		for ( let index = 0; index < this.bones.length; index ++ ) {
+
+			const bone = this.bones[ index ];
+			const previousQuaternion = this.previousQuaternions[ index ];
+			const currentQuaternion = this.currentQuaternions[ index ];
+			const previousPosition = this.previousPositions[ index ];
+			const currentPosition = this.currentPositions[ index ];
+			previousQuaternion.copy( currentQuaternion );
+			previousPosition.copy( currentPosition );
+			this.targetQuaternions[ index ].copy( bone.quaternion );
+			this.targetPositions[ index ].copy( bone.position );
+			const velocityOffset = index * 3;
+			if ( snap ) {
+
+				currentQuaternion.copy( this.targetQuaternions[ index ] );
+				currentPosition.copy( this.targetPositions[ index ] );
+				for ( let lane = 0; lane < 3; lane ++ ) {
+
+					this.angularVelocities[ velocityOffset + lane ] = 0;
+
+				}
+				if ( index === this.positionBoneIndex ) this.linearVelocities.fill( 0 );
+
+			} else {
+
+				// Parent-space shortest-arc error. Persisting angular velocity turns the
+				// pose filter into a true critically damped servo: it cannot reverse a
+				// limb in one tick as a positional slerp can.
+				this._inverseQuaternion.copy( currentQuaternion ).invert();
+				this._errorQuaternion.multiplyQuaternions(
+					this.targetQuaternions[ index ], this._inverseQuaternion,
+				).normalize();
+				if ( this._errorQuaternion.w < 0 ) this._errorQuaternion.set(
+					-this._errorQuaternion.x, -this._errorQuaternion.y,
+					-this._errorQuaternion.z, -this._errorQuaternion.w,
+				);
+				const sine = Math.hypot(
+					this._errorQuaternion.x,
+					this._errorQuaternion.y,
+					this._errorQuaternion.z,
+				);
+				const angle = 2 * Math.atan2( sine, Math.max( 0, this._errorQuaternion.w ) );
+				const errorScale = sine > 1e-8 ? angle / sine : 2;
+				let velocityX = this.angularVelocities[ velocityOffset ];
+				let velocityY = this.angularVelocities[ velocityOffset + 1 ];
+				let velocityZ = this.angularVelocities[ velocityOffset + 2 ];
+				let accelerationX = this._errorQuaternion.x * errorScale * frequencySquared
+					- velocityX * criticalDamping;
+				let accelerationY = this._errorQuaternion.y * errorScale * frequencySquared
+					- velocityY * criticalDamping;
+				let accelerationZ = this._errorQuaternion.z * errorScale * frequencySquared
+					- velocityZ * criticalDamping;
+				const acceleration = Math.hypot( accelerationX, accelerationY, accelerationZ );
+				if ( acceleration > this.maximumAngularAcceleration ) {
+
+					const scale = this.maximumAngularAcceleration / acceleration;
+					accelerationX *= scale;
+					accelerationY *= scale;
+					accelerationZ *= scale;
+
+				}
+				velocityX += accelerationX * fixedDt;
+				velocityY += accelerationY * fixedDt;
+				velocityZ += accelerationZ * fixedDt;
+				const angularSpeed = Math.hypot( velocityX, velocityY, velocityZ );
+				if ( angularSpeed > this.maximumAngularSpeed ) {
+
+					const scale = this.maximumAngularSpeed / angularSpeed;
+					velocityX *= scale;
+					velocityY *= scale;
+					velocityZ *= scale;
+
+				}
+				this.angularVelocities[ velocityOffset ] = velocityX;
+				this.angularVelocities[ velocityOffset + 1 ] = velocityY;
+				this.angularVelocities[ velocityOffset + 2 ] = velocityZ;
+				const incrementAngle = Math.hypot( velocityX, velocityY, velocityZ ) * fixedDt;
+				if ( incrementAngle > 1e-9 ) {
+
+					this._axis.set( velocityX, velocityY, velocityZ ).normalize();
+					this._incrementQuaternion.setFromAxisAngle( this._axis, incrementAngle );
+					currentQuaternion.premultiply( this._incrementQuaternion ).normalize();
+
+				}
+
+				// The few translated rig bones use the same persistent-velocity principle.
+				// A bounded linear servo prevents suspension/bob offsets from acquiring a
+				// separate first-order twitch while remaining allocation-free.
+				if ( index === this.positionBoneIndex ) {
+
+					for ( let lane = 0; lane < 3; lane ++ ) {
+
+						const coordinate = lane === 0 ? 'x' : lane === 1 ? 'y' : 'z';
+						let linearVelocity = this.linearVelocities[ lane ];
+						let linearAcceleration = (
+							this.targetPositions[ index ][ coordinate ] - currentPosition[ coordinate ]
+						) * frequencySquared - linearVelocity * criticalDamping;
+						linearAcceleration = THREE.MathUtils.clamp( linearAcceleration, -8, 8 );
+						linearVelocity = THREE.MathUtils.clamp(
+							linearVelocity + linearAcceleration * fixedDt, -0.8, 0.8,
+						);
+						this.linearVelocities[ lane ] = linearVelocity;
+						currentPosition[ coordinate ] += linearVelocity * fixedDt;
+
+					}
+
+				} else currentPosition.copy( this.targetPositions[ index ] );
+
+			}
+			bone.quaternion.copy( currentQuaternion );
+			bone.position.copy( currentPosition );
+
+		}
+		this.rig.model.updateMatrixWorld( true );
+		return this;
+
+	}
+
+	applyInterpolated( alpha ) {
+
+		const t = THREE.MathUtils.clamp( alpha, 0, 1 );
+		for ( let index = 0; index < this.bones.length; index ++ ) {
+
+			const bone = this.bones[ index ];
+			bone.quaternion.slerpQuaternions(
+				this.previousQuaternions[ index ], this.currentQuaternions[ index ], t,
+			).normalize();
+			if ( index === this.positionBoneIndex ) bone.position.lerpVectors(
+				this.previousPositions[ index ], this.currentPositions[ index ], t,
+			);
+
+		}
+		this.rig.model.updateMatrixWorld( true );
+		return this;
 
 	}
 
@@ -925,6 +1152,7 @@ export async function createHybridChameleon( {
 	visualRoot.position.copy( spawn );
 	visualRoot.updateMatrixWorld( true );
 	rig.restore();
+	const activeRigPose = new FixedRigPoseBuffer( rig, 32 );
 	for ( const leg of rig.legs ) leg.shoulderBodyOffset = leg.upper
 		.getWorldPosition( new THREE.Vector3() ).sub( spawn );
 	const tailVisualRig = new PassiveTailVisualRig( model );
@@ -944,13 +1172,13 @@ export async function createHybridChameleon( {
 		tailKinematicBodyOffsets[ index + 2 ] = tailInitialPositions[ index + 2 ] - spawn.z;
 
 	}
-	const tailRadii = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
-	for ( let node = 0; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
-
-		const ratio = node / ( PASSIVE_TAIL_NODE_COUNT - 1 );
-		tailRadii[ node ] = THREE.MathUtils.lerp( 0.052, 0.007, Math.pow( ratio, 0.72 ) );
-
-	}
+	const authoredTailRadii = tailVisualRig.metadata.tail_collision_node_radii;
+	const validTailRadii = Array.isArray( authoredTailRadii )
+		&& authoredTailRadii.length === PASSIVE_TAIL_NODE_COUNT
+		&& authoredTailRadii.every( ( radius ) => Number.isFinite( radius ) && radius > 0 );
+	const tailRadii = new Float32Array(
+		validTailRadii ? authoredTailRadii : TAIL_COLLISION_RADII_FALLBACK,
+	);
 	const tailPhysics = new PassiveTailPhysics( {
 		fixedDt: physics.fixedDt || 1 / 120,
 		maxSubsteps: 1,
@@ -1123,7 +1351,9 @@ export async function createHybridChameleon( {
 		bodyClearance: 0,
 	} );
 	const wholeBodyGait = new WholeBodyGaitModel( {
-		responseFrequency: 10,
+		// Fast enough to follow a 90 ms swing, but below the frequency at which a
+		// newly activated shoulder lane can move visibly in one 120 Hz tick.
+		responseFrequency: 8.5,
 		dampingRatio: 1.05,
 	} );
 	const suspension = new AnatomicalSuspensionModel( {
@@ -1149,7 +1379,6 @@ export async function createHybridChameleon( {
 	const previousFootNormals = new Float32Array( 12 );
 	const currentFootNormals = new Float32Array( 12 );
 	const renderFootPositions = new Float32Array( 12 );
-	const renderFootNormals = new Float32Array( 12 );
 	const nominalFootPositions = new Float32Array( 12 );
 	const suspensionSocketPositions = new Float32Array( 12 );
 	// Suspension measures socket-to-contact distances, so its authored reference
@@ -2334,15 +2563,13 @@ export async function createHybridChameleon( {
 	}
 	function updatePassiveTail() {
 
-		const position = readVector( body.translation(), tempPosition );
-		const rotation = readQuaternion( body.rotation(), tempQuaternion );
 		for ( let offset = 0; offset < tailKinematicAnchors.length; offset += 3 ) {
 
-			tailKinematicPoint.set(
-				tailKinematicBodyOffsets[ offset ],
-				tailKinematicBodyOffsets[ offset + 1 ],
-				tailKinematicBodyOffsets[ offset + 2 ],
-			).applyQuaternion( rotation ).add( position );
+			// The pelvis/spine pose is part of the fixed-step animation authority.
+			// Read the actual authored collar origins after that pose has been solved;
+			// rigid body offsets miss pelvis bob/roll and force the visual mapper to
+			// rotate the collision-safe rod afterwards, invalidating its contacts.
+			tailVisualRig.bones[ offset / 3 ].getWorldPosition( tailKinematicPoint );
 			tailKinematicAnchors[ offset ] = tailKinematicPoint.x;
 			tailKinematicAnchors[ offset + 1 ] = tailKinematicPoint.y;
 			tailKinematicAnchors[ offset + 2 ] = tailKinematicPoint.z;
@@ -2350,9 +2577,9 @@ export async function createHybridChameleon( {
 		}
 		tailPhysics.setKinematicAnchors( tailKinematicAnchors );
 		tailRootAnchor.fromArray( tailKinematicAnchors, 0 );
-		// The skin still protects the three-bone rump collar, while physics starts
-		// at tail_03 and visual compliance ramps over tail_03..05. This removes the
-		// former rigid/free hinge without ever pulling croup vertices into the rod.
+		// tail_01 forms the short rigid sacral collar. Physics starts at tail_02;
+		// the exported geodesic skin weights spread that freedom progressively over
+		// the rump instead of introducing another render-only hinge.
 		tailPhysics.gravityX = world.gravity.x * settings.tailGravity;
 		tailPhysics.gravityY = world.gravity.y * settings.tailGravity;
 		tailPhysics.gravityZ = world.gravity.z * settings.tailGravity;
@@ -2362,6 +2589,29 @@ export async function createHybridChameleon( {
 			THREE.MathUtils.clamp( settings.tailFlexibility, 0, 1 ) * 3.2,
 		);
 		tailPhysics.stepFixed( null, projectTailPoint );
+
+	}
+
+	function updateActiveRigPose( dt, snap = false ) {
+
+		const position = readVector( body.translation(), tempPosition );
+		const rotation = readQuaternion( body.rotation(), tempQuaternion );
+		visualRoot.position.copy( position );
+		visualRoot.quaternion.copy( rotation );
+		visualRoot.updateMatrixWorld( true );
+		rig.restoreActive();
+		rig.solve(
+			currentFootPositions,
+			currentFootNormals,
+			wholeBodyGait.getView().current,
+			settings.motorStrength > 0 && ! dragging
+				&& ! command.fullRagdoll && ! command.release ? 1 : 0,
+			suspension.getView().current,
+			dt,
+			settings.suspension,
+			landingCompression,
+		);
+		activeRigPose.commitSolvedPose( dt, snap );
 
 	}
 
@@ -2467,6 +2717,7 @@ export async function createHybridChameleon( {
 		updateBodyCollisionTransform();
 		updateCandidates();
 		updateGait( dt );
+		updateActiveRigPose( dt );
 		updatePassiveTail();
 		updatePassiveLimbs( dt );
 		applyRightingReflex();
@@ -2495,7 +2746,7 @@ export async function createHybridChameleon( {
 
 	}
 
-	function syncVisual( alpha = 1, renderDt = 1 / 120 ) {
+	function syncVisual( alpha = 1, _renderDt = 1 / 120 ) {
 
 		const t = THREE.MathUtils.clamp( alpha, 0, 1 );
 		renderPosition.lerpVectors( previousPosition, currentPosition, t );
@@ -2503,29 +2754,12 @@ export async function createHybridChameleon( {
 		visualRoot.position.copy( renderPosition );
 		visualRoot.quaternion.copy( renderQuaternion );
 		visualRoot.updateMatrixWorld( true );
-		for ( let index = 0; index < 12; index ++ ) {
+		for ( let index = 0; index < 12; index ++ )
 
 			renderFootPositions[ index ] = THREE.MathUtils.lerp(
 				previousFootPositions[ index ], currentFootPositions[ index ], t,
 			);
-			renderFootNormals[ index ] = THREE.MathUtils.lerp(
-				previousFootNormals[ index ], currentFootNormals[ index ], t,
-			);
-
-		}
-		rig.restore();
-		const ikWeight = settings.motorStrength > 0
-			&& ! dragging && ! command.fullRagdoll && ! command.release ? 1 : 0;
-		rig.solve(
-			renderFootPositions,
-			renderFootNormals,
-			wholeBodyGait.interpolate( t ),
-			ikWeight,
-			suspension.interpolate( t ),
-			renderDt,
-			settings.suspension,
-			landingCompression,
-		);
+		activeRigPose.applyInterpolated( t );
 		if ( passiveLimbBlend > 0 ) rig.applyPassive(
 			passiveLimbPhysics.interpolate( t ),
 			THREE.MathUtils.clamp( passiveLimbBlend, 0, 1 ),
@@ -2559,6 +2793,7 @@ export async function createHybridChameleon( {
 		visualRoot.updateMatrixWorld( true );
 		rig.restore();
 		rig.resetDynamics();
+		activeRigPose.resetFromRig();
 		rig.writePalmPositions( nominalFootPositions );
 		rig.writeSocketPositions( suspensionSocketPositions );
 		averageSupportNormal.copy( WORLD_UP );

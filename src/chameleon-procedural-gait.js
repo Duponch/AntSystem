@@ -40,6 +40,8 @@ const PAIR_A_0 = CHAMELEON_FOOT.FRONT_LEFT;
 const PAIR_A_1 = CHAMELEON_FOOT.HIND_RIGHT;
 const PAIR_B_0 = CHAMELEON_FOOT.FRONT_RIGHT;
 const PAIR_B_1 = CHAMELEON_FOOT.HIND_LEFT;
+const FRONT_SWING_CLEARANCE = 1.40;
+const HIND_SWING_CLEARANCE = 1.14;
 
 function clamp( value, minimum, maximum ) {
 
@@ -61,6 +63,22 @@ function smootherstep01( value ) {
 }
 
 /**
+ * C2 longitudinal stroke used by a swinging claw.
+ *
+ * The first part of the swing is deliberately reserved for toe-off: the limb
+ * folds and clears the support before it starts travelling forwards. The last
+ * part is similarly reserved for a quiet, almost vertical placement. Besides
+ * looking more deliberate, this prevents a claw from scraping convex terrain
+ * while the root is moving.
+ */
+export function swingAdvanceEnvelope( phase ) {
+
+	const p = clamp( finiteOr( phase, 0 ), 0, 1 );
+	return smootherstep01( ( p - 0.10 ) / 0.76 );
+
+}
+
+/**
  * C2 swing clearance with a quick toe-off and a deliberately softer landing.
  * Unlike the former quartic arch, the foot spends the useful middle portion
  * of the stride at full clearance instead of grazing the surface.
@@ -69,8 +87,8 @@ export function swingClearanceEnvelope( phase ) {
 
 	const p = clamp( finiteOr( phase, 0 ), 0, 1 );
 	return Math.min(
-		smootherstep01( p / 0.22 ),
-		smootherstep01( ( 1 - p ) / 0.30 ),
+		smootherstep01( p / 0.18 ),
+		smootherstep01( ( 1 - p ) / 0.26 ),
 	);
 
 }
@@ -622,13 +640,13 @@ export class ChameleonProceduralGait {
 		const phase = Math.min( 1, this.footPhase[ foot ] + dt / this._swingDuration );
 		this.footPhase[ foot ] = phase;
 
-		// Quintic translation and C2 clearance both have zero slope at their
-		// ends. The asymmetric clearance reaches its plateau quickly, keeps the
-		// toes away from the surface, then lowers them more gently for contact.
-		const phase2 = phase * phase;
-		const phase3 = phase2 * phase;
-		const blend = phase3 * ( phase * ( phase * 6 - 15 ) + 10 );
-		const lift = swingClearanceEnvelope( phase ) * this.stepHeight;
+		// Lift, travel and placement are separate C2 stages. The claw first rises
+		// almost vertically, advances while fully clear, then descends almost
+		// vertically. This creates a readable stride instead of a low diagonal
+		// shuffle and remains exactly still at both contacts.
+		const blend = swingAdvanceEnvelope( phase );
+		const lift = swingClearanceEnvelope( phase ) * this.stepHeight
+			* ( foot < 2 ? FRONT_SWING_CLEARANCE : HIND_SWING_CLEARANCE );
 
 		let normalX = this.footStartNormals[ offset ] +
 			( this.footTargetNormals[ offset ] - this.footStartNormals[ offset ] ) * blend;

@@ -19,15 +19,15 @@ La suite couvre notamment :
 - `BEE-SIM` : cycle de butinage complet, déterminisme, météo, démographie agrégée, cohortes et recyclage stables, continuité de phase par clip, ciblage borné, vues SoA, layout/GLB/VAT bornés, draws fixes et boucle chaude sans allocation ;
 - `BUTTERFLY-SIM` : cycle œuf→larve→chrysalide→adulte→œuf, immatures invisibles, activité adulte, météo indépendante du vieillissement, ciblage de quatre fleurs, SoA fixe, asset/clip/VAT, draw unique, chargement paresseux, perception bornée du caméléon et fuite continue ;
 - `CHAMELEON-SIM` : prédation complète, rig et langue, graphe global borné de terrain/rochers/souches/troncs/branches/arbres, transitions, clearance, corridors locaux continus, exploration déterministe sans A* de routine, repères de support et réglages UI ;
-- laboratoire physique du caméléon : route isolée, contrats de mesh `3.5.0` et
-  d’anatomie `2.1.0`, géométrie source exacte,
-  `original_tail_vertices = 7206`, aucun poids de queue sur le corps, pont sacré
-  `tail_01` à `tail_03`, dynamique à partir de `tail_04`, axes proximaux contenus
-  dans le volume fermé, corps dynamique Rapier unique, collider composé, quatre
-  appuis bornés, IK restaurée autour de la pose de repos, membres passifs à
-  faible tonus avec capsules corps et auto-collision segmentaire, monde à pas
-  fixe, interpolation, reset, plafond de rattrapage et rejet des valeurs non
-  finies ;
+- laboratoire physique du caméléon : route isolée, contrats de mesh/rig `3.6.0`
+  et d’anatomie `2.2.0`, géométrie source exacte,
+  `original_tail_vertices = 7206`, aucun poids de queue sur le corps, collet
+  rigide `tail_01`, dynamique à partir de `tail_02` avec feather géodésique
+  `0,18`, axes proximaux contenus dans le volume fermé, corps dynamique Rapier
+  unique, collider composé, quatre appuis bornés, démarche et IK résolues à
+  `120 Hz` puis interpolées, membres passifs à faible tonus avec capsules corps
+  et auto-collision segmentaire, reset, plafond de rattrapage et rejet des
+  valeurs non finies ;
 - `UNDERGROUND-VISUAL` : palette volumique configurable, plongée bornée au bloc, excavation visuelle indépendante, pools périodiques déterministes, suppression de la poussière, chargement unique des GLB, masque SDF propre et budgets fixes ;
 - `OBS` : intentions, arrêts attendus, détection d’immobilité, pause à vitesse nulle, distances monde, reset temporel, sélection faune bornée, menace, support, camouflage et volumes du seul individu suivi ;
 - réseau de corridors : déterminisme, routage, budget résiduel multi-arêtes, invariance au découpage temporel, continuité, profondeur, limites, croissance append-only et complexité structurelle ;
@@ -122,9 +122,10 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   mouvement du bassin et du thorax, regard cou/tête vivant au repos, semelles
   complètes à plat et absence de jitter distal ;
 - conservation exacte des 7 206 sommets de la queue originale, sans tube de
-  remplacement, avec pont sacré rigide, liberté graduelle à partir de `tail_03`, raccord
-  visuel continu au bassin, inertie, amortissement, contacts continus sur le
-  décor et sommeil sans micro-mouvement ;
+  remplacement, avec `tail_01` seul collet rigide, liberté graduelle à partir de
+  `tail_02`, feather de skin géodésique `0,18`, raccord visuel continu au bassin,
+  inertie, amortissement, contacts continus sur le décor et sommeil sans
+  micro-mouvement ;
 - membres souples mais conservant un faible tonus pendant la saisie ou le mode
   libre, sans pénétration du torse ni entrecroisement de segments, puis
   récupération bornée de la pose sans déchirure visuelle ;
@@ -142,17 +143,23 @@ Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
 `chameleon-lab-passive-tail`, `chameleon-lab-active-ragdoll`,
 `chameleon-lab-hybrid-controller-allocation` et
 `chameleon-physical-asset` protègent la structure, les commandes et les bornes.
-Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `019` sont l’autorité de
+Les identifiants hérités `CHAMELEON-LAB-RAGDOLL-001` à `020` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
 corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
 endormable, récupération d’impact et valeurs finies. Les preuves spécialisées
 des membres verrouillent le faible tonus configurable, les capsules du corps,
 l’auto-collision segmentaire et une seule projection de scène par nœud libre et
-par pas, indépendamment du nombre d’itérations XPBD. Les preuves d’asset
-verrouillent les contrats `3.5.0`/`2.1.0`, le mesh source exact,
-`original_tail_vertices = 7206`, l’absence de poids `tail_*` sur le corps, le
-garde cutané `tail_01` à `tail_03`, la racine physique graduelle `tail_03`, le rebase visuel
-et les axes de membres contenus dans le volume fermé. Les transitions
+par pas, indépendamment du nombre d’itérations XPBD. `RAGDOLL-020` verrouille
+l’amplitude de la brasse avant, la continuité de vitesse et d’accélération
+angulaires, l’idempotence du rendu
+et l’identité des poses à 60/240 Hz lorsque la démarche et l’IK avancent au pas
+fixe de 120 Hz. Les preuves d’asset verrouillent les contrats `3.6.0`/`2.2.0`, le
+mesh source exact, `original_tail_vertices = 7206`, l’absence de poids `tail_*`
+sur le corps, le collet cutané `tail_01`, la racine physique `tail_02`, le feather
+géodésique `0,18`, l’application directe de la courbe collisionnée et les axes de
+membres contenus dans le volume fermé. `PASSIVE-TAIL-021/022` empêchent qu’un
+plan de contact périmé freine la queue hors d’un support fini et qu’une correction
+de milieu de segment laisse une extrémité dans un collider voisin. Les transitions
 multi-surfaces complexes, la saisie visuelle, la silhouette cutanée de la queue
 et la sensation du pilotage exigent encore l’inspection runtime.
 
