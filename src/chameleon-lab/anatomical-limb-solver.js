@@ -34,45 +34,45 @@ function frozenPreset( preset ) {
 
 }
 
-// Mean of the mirrored .L/.R values published by ChameleonPhysical.glb 3.1.
+// Mean of the mirrored .L/.R values published by ChameleonPhysical.glb 3.4.
 // Order: girdle, upper arm/thigh, forearm/shin, palm/sole, inner and outer digit.
 export const CHAMELEON_LIMB_PRESETS = Object.freeze( {
 	front: frozenPreset( {
 		kind: 'front',
 		lengths: [
-			0.0908294991,
-			0.1172604114,
-			0.1752854735,
-			0.0304663079,
-			0.0951505489,
-			0.0386974979,
+			0.0943398029,
+			0.1473939940,
+			0.2054263651,
+			0.0306180362,
+			0.0962318815,
+			0.0380432159,
 		],
 		// Components in [ forward, up, outward ] body space.
-		restGirdle: [ -0.275239, -0.385334, 0.880764 ],
+		restGirdle: [ 0.423999, -0.317999, 0.847998 ],
 		girdleSwingLimit: 1.08,
-		minimumFlexion: 0.16,
+		minimumFlexion: 0.42,
 		maximumFlexion: 2.62,
 		palmYaw: 0.08,
 		toeSplay: 0.43,
-		preferredReach: 0.248,
+		preferredReach: 0.300,
 	} ),
 	hind: frozenPreset( {
 		kind: 'hind',
 		lengths: [
-			0.0935414433,
-			0.0951315053,
-			0.1411559656,
-			0.0927361995,
-			0.0985908285,
-			0.0399224274,
+			0.0944722071,
+			0.1822772250,
+			0.1304798871,
+			0.0923309363,
+			0.0985908210,
+			0.0399224292,
 		],
-		restGirdle: [ -0.320713, 0.267261, 0.908688 ],
+		restGirdle: [ -0.423405, 0.105851, 0.899735 ],
 		girdleSwingLimit: 1.12,
-		minimumFlexion: 0.18,
+		minimumFlexion: 0.68,
 		maximumFlexion: 2.66,
 		palmYaw: -0.06,
 		toeSplay: 0.46,
-		preferredReach: 0.202,
+		preferredReach: 0.235,
 	} ),
 } );
 
@@ -330,6 +330,9 @@ export class AnatomicalLimbSolver {
 		lengths = null,
 		contactOffset = null,
 		restGirdle = null,
+		palmAxisFrame = null,
+		innerAxisFrame = null,
+		outerAxisFrame = null,
 	} = {} ) {
 
 		if ( ! CHAMELEON_LIMB_PRESETS[ kind ] ) throw new RangeError( `unknown limb kind "${ kind }"` );
@@ -354,6 +357,27 @@ export class AnatomicalLimbSolver {
 			this.contactOffset[ 2 ] = finiteOr( component( contactOffset, 2, 0 ), 0 );
 
 		} else this.contactOffset[ 0 ] = this.lengths[ 3 ] * 0.5;
+		this.palmAxisFrame = new Float32Array( [ 1, 0, 0 ] );
+		if ( palmAxisFrame != null ) {
+
+			this.palmAxisFrame[ 0 ] = component( palmAxisFrame, 0, 1 );
+			this.palmAxisFrame[ 1 ] = component( palmAxisFrame, 1, 0 );
+			this.palmAxisFrame[ 2 ] = component( palmAxisFrame, 2, 0 );
+			normalize3( this.palmAxisFrame, 0, 1, 0, 0 );
+
+		}
+		this.innerAxisFrame = innerAxisFrame == null ? null : new Float32Array( [
+			component( innerAxisFrame, 0, 1 ),
+			component( innerAxisFrame, 1, 0 ),
+			component( innerAxisFrame, 2, 0 ),
+		] );
+		if ( this.innerAxisFrame ) normalize3( this.innerAxisFrame, 0, 1, 0, 0 );
+		this.outerAxisFrame = outerAxisFrame == null ? null : new Float32Array( [
+			component( outerAxisFrame, 0, 1 ),
+			component( outerAxisFrame, 1, 0 ),
+			component( outerAxisFrame, 2, 0 ),
+		] );
+		if ( this.outerAxisFrame ) normalize3( this.outerAxisFrame, 0, 1, 0, 0 );
 		this.restGirdle = new Float32Array( this.preset.restGirdle );
 		if ( restGirdle != null ) {
 
@@ -470,15 +494,15 @@ export class AnatomicalLimbSolver {
 		const palmYaw = finiteOr( input.palmYaw, this.preset.palmYaw ) * this.sideSign;
 		const yawCos = Math.cos( palmYaw );
 		const yawSin = Math.sin( palmYaw );
-		const palmX = tangent[ 0 ] * yawCos + binormal[ 0 ] * yawSin;
-		const palmY = tangent[ 1 ] * yawCos + binormal[ 1 ] * yawSin;
-		const palmZ = tangent[ 2 ] * yawCos + binormal[ 2 ] * yawSin;
+		const frameTangentX = tangent[ 0 ] * yawCos + binormal[ 0 ] * yawSin;
+		const frameTangentY = tangent[ 1 ] * yawCos + binormal[ 1 ] * yawSin;
+		const frameTangentZ = tangent[ 2 ] * yawCos + binormal[ 2 ] * yawSin;
 		// Rebuild the lateral axis after toe-in/toe-out.  Reusing `binormal`
 		// directly would make it non-orthogonal to the yawed palm and subtly
 		// stretch both digit chains.
-		let palmBinormalX = normal[ 1 ] * palmZ - normal[ 2 ] * palmY;
-		let palmBinormalY = normal[ 2 ] * palmX - normal[ 0 ] * palmZ;
-		let palmBinormalZ = normal[ 0 ] * palmY - normal[ 1 ] * palmX;
+		let palmBinormalX = normal[ 1 ] * frameTangentZ - normal[ 2 ] * frameTangentY;
+		let palmBinormalY = normal[ 2 ] * frameTangentX - normal[ 0 ] * frameTangentZ;
+		let palmBinormalZ = normal[ 0 ] * frameTangentY - normal[ 1 ] * frameTangentX;
 		const palmBinormalInverse = 1 / ( Math.hypot(
 			palmBinormalX, palmBinormalY, palmBinormalZ,
 		) || 1 );
@@ -486,15 +510,15 @@ export class AnatomicalLimbSolver {
 		palmBinormalY *= palmBinormalInverse;
 		palmBinormalZ *= palmBinormalInverse;
 		const contactOffset = this.contactOffset;
-		// contactOffset components are expressed in the palm frame:
-		// +Y (palm), sole normal, then +Y × sole-normal. `palmBinormal`
-		// above is normal × palm, hence the sign inversion on the third lane.
-		const contactOffsetX = palmX * contactOffset[ 0 ] + normal[ 0 ] * contactOffset[ 1 ]
-			- palmBinormalX * contactOffset[ 2 ];
-		const contactOffsetY = palmY * contactOffset[ 0 ] + normal[ 1 ] * contactOffset[ 1 ]
-			- palmBinormalY * contactOffset[ 2 ];
-		const contactOffsetZ = palmZ * contactOffset[ 0 ] + normal[ 2 ] * contactOffset[ 1 ]
-			- palmBinormalZ * contactOffset[ 2 ];
+		// Exact offsets are expressed in the orthonormal contact frame:
+		// surface tangent, support normal, then normal × tangent. This retains
+		// the authored wrist height even when the internal palm bone is sloped.
+		const contactOffsetX = frameTangentX * contactOffset[ 0 ] + normal[ 0 ] * contactOffset[ 1 ]
+			+ palmBinormalX * contactOffset[ 2 ];
+		const contactOffsetY = frameTangentY * contactOffset[ 0 ] + normal[ 1 ] * contactOffset[ 1 ]
+			+ palmBinormalY * contactOffset[ 2 ];
+		const contactOffsetZ = frameTangentZ * contactOffset[ 0 ] + normal[ 2 ] * contactOffset[ 1 ]
+			+ palmBinormalZ * contactOffset[ 2 ];
 		const requestedWristX = contactX - contactOffsetX;
 		const requestedWristY = contactY - contactOffsetY;
 		const requestedWristZ = contactZ - contactOffsetZ;
@@ -515,13 +539,14 @@ export class AnatomicalLimbSolver {
 		let reachInverse = 1 / ( Math.hypot( reachX, reachY, reachZ ) || 1 );
 		reachX *= reachInverse; reachY *= reachInverse; reachZ *= reachInverse;
 		const stride = clamp( finiteOr( input.stride, 0 ), -1, 1 );
-		const abduction = clamp( finiteOr( input.abduction, 0.55 ), 0, 1.4 );
+		const abduction = clamp( finiteOr( input.abduction, 0 ), 0, 1.4 );
+		const reachWeight = clamp( finiteOr( input.girdleReachWeight, 0 ), 0, 0.72 );
 		const girdle = this._candidate;
-		girdle[ 0 ] = rest[ 0 ] * 0.46 + reachX * 0.42
+		girdle[ 0 ] = rest[ 0 ] * ( 1 - reachWeight ) + reachX * reachWeight
 			+ tangent[ 0 ] * stride * 0.48 + bodyRight[ 0 ] * this.sideSign * abduction * 0.24;
-		girdle[ 1 ] = rest[ 1 ] * 0.46 + reachY * 0.42
+		girdle[ 1 ] = rest[ 1 ] * ( 1 - reachWeight ) + reachY * reachWeight
 			+ tangent[ 1 ] * stride * 0.48 + bodyRight[ 1 ] * this.sideSign * abduction * 0.24;
-		girdle[ 2 ] = rest[ 2 ] * 0.46 + reachZ * 0.42
+		girdle[ 2 ] = rest[ 2 ] * ( 1 - reachWeight ) + reachZ * reachWeight
 			+ tangent[ 2 ] * stride * 0.48 + bodyRight[ 2 ] * this.sideSign * abduction * 0.24;
 		normalize3( girdle, 0, rest[ 0 ], rest[ 1 ], rest[ 2 ] );
 		let restDot = clamp( girdle[ 0 ] * rest[ 0 ] + girdle[ 1 ] * rest[ 1 ] + girdle[ 2 ] * rest[ 2 ], -1, 1 );
@@ -625,24 +650,57 @@ export class AnatomicalLimbSolver {
 		positions[ 7 ] = positions[ 4 ] + targetY * upperProjection + this.poleDirection[ 1 ] * elbowHeight;
 		positions[ 8 ] = positions[ 5 ] + targetZ * upperProjection + this.poleDirection[ 2 ] * elbowHeight;
 
-		// The achieved palm remains a rigid, planar patch.  Digits splay around
-		// the palm end rather than being stretched independently to hit geometry.
+		// The exact authored distal frame remains rigid. The skin's exported sole
+		// normal, rather than a flattened bone axis, is what contacts the support.
 		positions[ 12 ] = positions[ 9 ] + contactOffsetX;
 		positions[ 13 ] = positions[ 10 ] + contactOffsetY;
 		positions[ 14 ] = positions[ 11 ] + contactOffsetZ;
-		positions[ 15 ] = positions[ 9 ] + palmX * palmLength;
-		positions[ 16 ] = positions[ 10 ] + palmY * palmLength;
-		positions[ 17 ] = positions[ 11 ] + palmZ * palmLength;
+		const palmAxisFrame = this.palmAxisFrame;
+		let palmAxisX = frameTangentX * palmAxisFrame[ 0 ] + normal[ 0 ] * palmAxisFrame[ 1 ]
+			+ palmBinormalX * palmAxisFrame[ 2 ];
+		let palmAxisY = frameTangentY * palmAxisFrame[ 0 ] + normal[ 1 ] * palmAxisFrame[ 1 ]
+			+ palmBinormalY * palmAxisFrame[ 2 ];
+		let palmAxisZ = frameTangentZ * palmAxisFrame[ 0 ] + normal[ 2 ] * palmAxisFrame[ 1 ]
+			+ palmBinormalZ * palmAxisFrame[ 2 ];
+		let directionInverse = 1 / ( Math.hypot( palmAxisX, palmAxisY, palmAxisZ ) || 1 );
+		palmAxisX *= directionInverse; palmAxisY *= directionInverse; palmAxisZ *= directionInverse;
+		positions[ 15 ] = positions[ 9 ] + palmAxisX * palmLength;
+		positions[ 16 ] = positions[ 10 ] + palmAxisY * palmLength;
+		positions[ 17 ] = positions[ 11 ] + palmAxisZ * palmLength;
 		const toeSplay = clamp( finiteOr( input.toeSplay, this.preset.toeSplay ), 0.08, 0.85 );
 		const toeCos = Math.cos( toeSplay );
 		const toeSin = Math.sin( toeSplay );
 		const innerSide = -this.sideSign;
-		positions[ 18 ] = positions[ 15 ] + ( palmX * toeCos + palmBinormalX * toeSin * innerSide ) * lengths[ 4 ];
-		positions[ 19 ] = positions[ 16 ] + ( palmY * toeCos + palmBinormalY * toeSin * innerSide ) * lengths[ 4 ];
-		positions[ 20 ] = positions[ 17 ] + ( palmZ * toeCos + palmBinormalZ * toeSin * innerSide ) * lengths[ 4 ];
-		positions[ 21 ] = positions[ 15 ] + ( palmX * toeCos - palmBinormalX * toeSin * innerSide ) * lengths[ 5 ];
-		positions[ 22 ] = positions[ 16 ] + ( palmY * toeCos - palmBinormalY * toeSin * innerSide ) * lengths[ 5 ];
-		positions[ 23 ] = positions[ 17 ] + ( palmZ * toeCos - palmBinormalZ * toeSin * innerSide ) * lengths[ 5 ];
+		const innerAxisFrame = this.innerAxisFrame;
+		let innerX = innerAxisFrame
+			? frameTangentX * innerAxisFrame[ 0 ] + normal[ 0 ] * innerAxisFrame[ 1 ] + palmBinormalX * innerAxisFrame[ 2 ]
+			: frameTangentX * toeCos + palmBinormalX * toeSin * innerSide;
+		let innerY = innerAxisFrame
+			? frameTangentY * innerAxisFrame[ 0 ] + normal[ 1 ] * innerAxisFrame[ 1 ] + palmBinormalY * innerAxisFrame[ 2 ]
+			: frameTangentY * toeCos + palmBinormalY * toeSin * innerSide;
+		let innerZ = innerAxisFrame
+			? frameTangentZ * innerAxisFrame[ 0 ] + normal[ 2 ] * innerAxisFrame[ 1 ] + palmBinormalZ * innerAxisFrame[ 2 ]
+			: frameTangentZ * toeCos + palmBinormalZ * toeSin * innerSide;
+		directionInverse = 1 / ( Math.hypot( innerX, innerY, innerZ ) || 1 );
+		innerX *= directionInverse; innerY *= directionInverse; innerZ *= directionInverse;
+		const outerAxisFrame = this.outerAxisFrame;
+		let outerX = outerAxisFrame
+			? frameTangentX * outerAxisFrame[ 0 ] + normal[ 0 ] * outerAxisFrame[ 1 ] + palmBinormalX * outerAxisFrame[ 2 ]
+			: frameTangentX * toeCos - palmBinormalX * toeSin * innerSide;
+		let outerY = outerAxisFrame
+			? frameTangentY * outerAxisFrame[ 0 ] + normal[ 1 ] * outerAxisFrame[ 1 ] + palmBinormalY * outerAxisFrame[ 2 ]
+			: frameTangentY * toeCos - palmBinormalY * toeSin * innerSide;
+		let outerZ = outerAxisFrame
+			? frameTangentZ * outerAxisFrame[ 0 ] + normal[ 2 ] * outerAxisFrame[ 1 ] + palmBinormalZ * outerAxisFrame[ 2 ]
+			: frameTangentZ * toeCos - palmBinormalZ * toeSin * innerSide;
+		directionInverse = 1 / ( Math.hypot( outerX, outerY, outerZ ) || 1 );
+		outerX *= directionInverse; outerY *= directionInverse; outerZ *= directionInverse;
+		positions[ 18 ] = positions[ 15 ] + innerX * lengths[ 4 ];
+		positions[ 19 ] = positions[ 16 ] + innerY * lengths[ 4 ];
+		positions[ 20 ] = positions[ 17 ] + innerZ * lengths[ 4 ];
+		positions[ 21 ] = positions[ 15 ] + outerX * lengths[ 5 ];
+		positions[ 22 ] = positions[ 16 ] + outerY * lengths[ 5 ];
+		positions[ 23 ] = positions[ 17 ] + outerZ * lengths[ 5 ];
 
 		writeSegmentFrame( positions, 0, 3, normal, this.frames, 0 );
 		writeSegmentFrame( positions, 3, 6, this.poleDirection, this.frames, 4 );
@@ -659,15 +717,11 @@ export class AnatomicalLimbSolver {
 			( upperX * lowerX + upperY * lowerY + upperZ * lowerZ ) / ( upperLength * lowerLength ),
 			-1, 1,
 		) );
-		let planeError = 0;
-		for ( let point = 9; point <= 21; point += 3 ) {
-
-			const offsetFromRequestedPlane = ( positions[ point ] - contactX ) * normal[ 0 ]
-				+ ( positions[ point + 1 ] - contactY ) * normal[ 1 ]
-				+ ( positions[ point + 2 ] - contactZ ) * normal[ 2 ];
-			planeError = Math.max( planeError, Math.abs( offsetFromRequestedPlane ) );
-
-		}
+		const planeError = Math.abs(
+			( positions[ 12 ] - contactX ) * normal[ 0 ]
+			+ ( positions[ 13 ] - contactY ) * normal[ 1 ]
+			+ ( positions[ 14 ] - contactZ ) * normal[ 2 ],
+		);
 		this.metrics[ ANATOMICAL_METRIC.REACH_RESIDUAL ] = requestedDistance - solvedDistance;
 		this.metrics[ ANATOMICAL_METRIC.FLEXION ] = flexion;
 		this.metrics[ ANATOMICAL_METRIC.GIRDLE_SWING ] = girdleSwing;

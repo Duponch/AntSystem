@@ -63,10 +63,10 @@ test( 'ANATOMICAL-LIMB-001 presets preserve the exact exported rig axes and segm
 	assert.deepEqual( CHAMELEON_RIG_AXES.right, [ 0, 0, 1 ] );
 	assert.equal( CHAMELEON_RIG_AXES.leftSideSign, -1 );
 	assert.equal( CHAMELEON_RIG_AXES.rightSideSign, 1 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 0 ] - 0.0908294991 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 2 ] - 0.1752854735 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 1 ] - 0.0951315053 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 3 ] - 0.0927361995 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 0 ] - 0.0943398029 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 2 ] - 0.2054263651 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 1 ] - 0.1822772250 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 3 ] - 0.0923309363 ) < 1e-10 );
 	assert.ok( CHAMELEON_LIMB_PRESETS.front.girdleSwingLimit > 1 );
 	assert.ok( CHAMELEON_LIMB_PRESETS.hind.girdleSwingLimit > 1 );
 
@@ -318,5 +318,57 @@ test( 'ANATOMICAL-LIMB-008 hot paths reuse all output buffers and expose unreach
 		contactNormals: new Float32Array( [ 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0 ] ),
 	} ), suspensionView );
 	assert.equal( suspension.interpolate( 0.5 ), suspensionView.render );
+
+} );
+
+test( 'ANATOMICAL-LIMB-009 exact asymmetric distal frame preserves wrist height and digit axes', () => {
+
+	const solver = new AnatomicalLimbSolver( {
+		kind: 'front',
+		side: 'L',
+		contactClearance: 0,
+		lengths: [ 0.1, 0.25, 0.25, 0.08, 0.1, 0.075 ],
+		contactOffset: [ 0.026, 0.019, -0.012 ],
+		palmAxisFrame: [ 0.82, 0.46, 0.34 ],
+		innerAxisFrame: [ 0.62, 0.28, -0.73 ],
+		outerAxisFrame: [ 0.55, 0.17, 0.82 ],
+	} );
+	const contact = [ -0.14, 0.05, -0.12 ];
+	const view = solver.solve( {
+		socket: [ 0, 0.24, 0 ],
+		contact,
+		contactNormal: [ 0, 1, 0 ],
+		palmDirection: [ -1, 0, 0 ],
+		palmYaw: 0,
+		bodyForward: [ -1, 0, 0 ],
+		bodyUp: [ 0, 1, 0 ],
+		minimumFlexion: 0.2,
+	} );
+	for ( let lane = 0; lane < 3; lane ++ ) assert.ok(
+		Math.abs( view.positions[ P.PALM_CENTER + lane ] - contact[ lane ] ) < 3e-6,
+	);
+	const assertFrameAxis = ( start, end, frame ) => {
+
+		const actual = [
+			view.positions[ end ] - view.positions[ start ],
+			view.positions[ end + 1 ] - view.positions[ start + 1 ],
+			view.positions[ end + 2 ] - view.positions[ start + 2 ],
+		];
+		const actualLength = Math.hypot( ...actual );
+		const expected = [
+			view.contactTangent[ 0 ] * frame[ 0 ] + view.contactNormal[ 0 ] * frame[ 1 ] + view.contactBinormal[ 0 ] * frame[ 2 ],
+			view.contactTangent[ 1 ] * frame[ 0 ] + view.contactNormal[ 1 ] * frame[ 1 ] + view.contactBinormal[ 1 ] * frame[ 2 ],
+			view.contactTangent[ 2 ] * frame[ 0 ] + view.contactNormal[ 2 ] * frame[ 1 ] + view.contactBinormal[ 2 ] * frame[ 2 ],
+		];
+		const expectedLength = Math.hypot( ...expected );
+		const alignment = actual.reduce(
+			( sum, value, lane ) => sum + value / actualLength * expected[ lane ] / expectedLength, 0,
+		);
+		assert.ok( alignment > 1 - 2e-6, `distal frame alignment ${ alignment }` );
+
+	};
+	assertFrameAxis( P.WRIST, P.PALM_END, solver.palmAxisFrame );
+	assertFrameAxis( P.PALM_END, P.DIGIT_INNER, solver.innerAxisFrame );
+	assertFrameAxis( P.PALM_END, P.DIGIT_OUTER, solver.outerAxisFrame );
 
 } );

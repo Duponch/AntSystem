@@ -36,7 +36,7 @@ TAIL_CENTERLINE_POINT_COUNT = TAIL_BONE_COUNT + 1
 TAIL_BONE_NAMES = tuple(f"tail_{index:02d}" for index in range(1, TAIL_BONE_COUNT + 1))
 TAIL_ROOT_BLEND_GEODESIC_FRACTION = 0.12
 TAIL_ROOT_BODY_BLEND_MAXIMUM = 0.72
-ANATOMY_CONTRACT_VERSION = "1.0.0"
+ANATOMY_CONTRACT_VERSION = "2.0.0"
 LIMB_ORDER = ("front.L", "front.R", "hind.L", "hind.R")
 LIMB_SURFACE_EXPANSION = {"front": 0.20, "hind": 0.22}
 LIMB_ENVELOPE_RADIUS = {
@@ -331,6 +331,124 @@ def limb_bone_names(limb_key: str) -> tuple[str, ...]:
         f"{limb}_{role}.{side}"
         for role in ("girdle", "upper", "lower", "palm", "digits_inner", "digits_outer")
     )
+
+
+def fit_proximal_anatomy(
+    armature: bpy.types.Object,
+) -> dict[str, list[list[float]]]:
+    """Author the flexed chameleon landmarks visible in the exact rest mesh.
+
+    The inherited rig was built around almost radial, extended limbs.  That
+    makes an IK line pass through the upper-arm/thigh silhouettes even though
+    the source animal is already crouched.  These landmarks were fitted in
+    orthographic side and dorsal views of the preserved 25,002-vertex surface;
+    they are offline authoring data, never a runtime heuristic.
+    """
+    landmarks = {
+        "front.L": (
+            Vector((-0.135, 0.060, 0.125)),
+            Vector((-0.175, 0.140, 0.095)),
+            Vector((-0.085, 0.225, 0.015)),
+            Vector((-0.135, 0.285, -0.175)),
+        ),
+        "front.R": (
+            Vector((-0.135, -0.060, 0.125)),
+            Vector((-0.175, -0.140, 0.095)),
+            Vector((-0.085, -0.225, 0.015)),
+            Vector((-0.135, -0.285, -0.175)),
+        ),
+        "hind.L": (
+            Vector((0.105, 0.060, 0.120)),
+            Vector((0.145, 0.145, 0.130)),
+            Vector((0.005, 0.225, 0.045)),
+            Vector((0.070, 0.305, -0.035)),
+        ),
+        "hind.R": (
+            Vector((0.105, -0.060, 0.120)),
+            Vector((0.145, -0.145, 0.130)),
+            Vector((0.005, -0.225, 0.045)),
+            Vector((0.070, -0.305, -0.035)),
+        ),
+    }
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for obj in bpy.context.scene.objects:
+        try:
+            obj.select_set(False)
+        except RuntimeError:
+            pass
+    armature.hide_viewport = False
+    armature.hide_render = False
+    try:
+        armature.hide_set(False)
+    except RuntimeError:
+        pass
+    armature.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    require(bpy.ops.object.mode_set(mode="EDIT") == {"FINISHED"},
+            "cannot enter edit mode for proximal anatomy fit")
+    try:
+        # Move the cervical hinge into the narrow neck and keep the skull axis
+        # centred through the head silhouette.  spine_02 stays continuous.
+        spine_02 = armature.data.edit_bones["spine_02"]
+        neck = armature.data.edit_bones["neck"]
+        head = armature.data.edit_bones["head"]
+        spine_02.tail = Vector((-0.155, 0.0, 0.145))
+        neck.head = spine_02.tail
+        neck.tail = Vector((-0.245, 0.0, 0.115))
+        head.head = neck.tail
+        head.tail = Vector((-0.455, 0.0, 0.075))
+        neck.use_connect = True
+        head.use_connect = True
+        for bone in (spine_02, neck, head):
+            bone.align_roll(Vector((0.0, 0.0, 1.0)))
+
+        for limb_key, points in landmarks.items():
+            limb, side = limb_key.split(".")
+            bones = [
+                armature.data.edit_bones[f"{limb}_{role}.{side}"]
+                for role in ("girdle", "upper", "lower")
+            ]
+            for index, bone in enumerate(bones):
+                bone.head = points[index]
+                bone.tail = points[index + 1]
+                bone.use_connect = index > 0
+                direction = (bone.tail - bone.head).normalized()
+                roll_reference = Vector((0.0, 0.0, 1.0))
+                if abs(direction.dot(roll_reference)) > 0.94:
+                    roll_reference = Vector((1.0, 0.0, 0.0))
+                bone.align_roll(roll_reference)
+            palm = armature.data.edit_bones[f"{limb}_palm.{side}"]
+            palm.head = points[3]
+            palm.use_connect = True
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    for limb_key, points in landmarks.items():
+        limb, side = limb_key.split(".")
+        bones = [
+            armature.data.bones[f"{limb}_{role}.{side}"]
+            for role in ("girdle", "upper", "lower")
+        ]
+        for index, bone in enumerate(bones):
+            require((bone.head_local - points[index]).length <= 1e-7,
+                    f"{limb_key} {bone.name} head missed its landmark")
+            require((bone.tail_local - points[index + 1]).length <= 1e-7,
+                    f"{limb_key} {bone.name} tail missed its landmark")
+        palm = armature.data.bones[f"{limb}_palm.{side}"]
+        require((palm.head_local - points[3]).length <= 1e-7,
+                f"{limb_key} palm is disconnected from its wrist")
+
+    require((armature.data.bones["neck"].head_local
+             - armature.data.bones["spine_02"].tail_local).length <= 1e-7,
+            "neck is disconnected from spine_02")
+    require((armature.data.bones["head"].head_local
+             - armature.data.bones["neck"].tail_local).length <= 1e-7,
+            "head is disconnected from neck")
+    return {
+        key: [list(point) for point in points]
+        for key, points in landmarks.items()
+    }
 
 
 def fit_distal_limb_anatomy(
@@ -931,6 +1049,7 @@ def build_exact_source_mesh(
     # non-exported dual-quaternion preserve-volume preview as authoring truth.
     modifier.use_deform_preserve_volume = False
 
+    proximal_fits = fit_proximal_anatomy(armature)
     anatomy_fits = fit_distal_limb_anatomy(exact_mesh, armature)
 
     groups_by_template_index: dict[int, bpy.types.VertexGroup] = {}
@@ -1016,7 +1135,7 @@ def build_exact_source_mesh(
     flattened_centerline = [coordinate for point in centerline for coordinate in point]
     rest_arc_length = sum(segment_lengths)
     exact_object["physics_ready"] = True
-    exact_object["mesh_contract_version"] = "3.3.0"
+    exact_object["mesh_contract_version"] = "3.4.0"
     exact_object["source_object"] = SOURCE_NAME
     exact_object["exact_source_geometry"] = True
     exact_object["source_vertex_count"] = EXPECTED_SOURCE_VERTICES
@@ -1045,7 +1164,16 @@ def build_exact_source_mesh(
     exact_object["deformation_gap_guard"] = "closed-shared-topology+coincident-weight-lock+double-sided"
     exact_object["anatomy_contract_version"] = ANATOMY_CONTRACT_VERSION
     exact_object["distal_anatomy_fit"] = "exact-surface-zygodactyl-fork-v1"
-    exact_object["proximal_joint_fit"] = "preserved-source-medial-centers-v1"
+    exact_object["proximal_joint_fit"] = "orthographic-surface-landmarks-flexed-v2"
+    exact_object["proximal_joint_order"] = ",".join(LIMB_ORDER)
+    exact_object["proximal_joint_points_rest"] = [
+        coordinate
+        for limb_key in LIMB_ORDER
+        for point in proximal_fits[limb_key]
+        for coordinate in point
+    ]
+    exact_object["tail_static_collar_bone"] = "tail_01"
+    exact_object["tail_dynamic_root_bone"] = "tail_02"
     exact_object["rest_deformation_contract"] = "inverse-bind-identity-lbs"
     exact_object["limb_weighting"] = "geodesic-component-envelope-v1"
     exact_object["limb_reweighted_vertices"] = limb_stats["limb_reweighted_vertices"]
@@ -1068,7 +1196,7 @@ def update_armature_contract(
     armature: bpy.types.Object,
     exact_object: bpy.types.Object,
 ) -> None:
-    armature["rig_version"] = "3.3.0"
+    armature["rig_version"] = "3.4.0"
     armature["physics_proxy_bodies"] = 1
     armature["runtime_controller"] = "hybrid-root-ik"
     armature["visual_bones"] = len(armature.data.bones)
@@ -1124,6 +1252,11 @@ def update_armature_contract(
         if bone.name in TAIL_BONE_NAMES:
             bone["tail_rest_index"] = TAIL_BONE_NAMES.index(bone.name)
             bone["tail_deformation_only"] = True
+            bone["tail_dynamic"] = bone.name != "tail_01"
+            if bone.name == "tail_01":
+                bone["anatomical_role"] = "sacral-tail-collar"
+            else:
+                bone["anatomical_role"] = "passive-tail-segment"
 
     for key in (
         "rest_mesh_position_topology_sha256",
@@ -1151,6 +1284,10 @@ def update_armature_contract(
         "anatomy_contract_version",
         "distal_anatomy_fit",
         "proximal_joint_fit",
+        "proximal_joint_order",
+        "proximal_joint_points_rest",
+        "tail_static_collar_bone",
+        "tail_dynamic_root_bone",
         "rest_deformation_contract",
         "limb_weighting",
         "limb_reweighted_vertices",

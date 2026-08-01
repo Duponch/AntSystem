@@ -7,6 +7,10 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 import { createHybridChameleon } from '../src/chameleon-lab/hybrid-chameleon.js';
 import {
+	ANATOMICAL_METRIC,
+	ANATOMICAL_POSITION,
+} from '../src/chameleon-lab/anatomical-limb-solver.js';
+import {
 	clampJointAngle,
 	criticalDampingGains,
 	HYBRID_FOOT_COUNT,
@@ -271,12 +275,33 @@ test( 'CHAMELEON-LAB-RAGDOLL-003 procedural IK never exceeds anatomical joint li
 test( 'CHAMELEON-LAB-RAGDOLL-004 idle hybrid remains stable during a twelve-second soak', async () => {
 
 	const fixture = await createGroundedHybrid();
-	const spawn = new THREE.Vector3( 0, 0.3, 0.75 );
+	runFrames( fixture, 120, 2, () => assertFiniteHybrid( fixture ) );
+	const settledTranslation = fixture.chameleon.pelvis.body.translation();
+	const settledRoot = new THREE.Vector3(
+		settledTranslation.x, settledTranslation.y, settledTranslation.z,
+	);
+	const settledDesiredRoot = fixture.chameleon.desiredRoot.clone();
+	let maximumRootDrift = 0;
+	let maximumDesiredRootError = 0;
+	let minimumContacts = HYBRID_FOOT_COUNT;
 	let lateLinearSpeed = 0;
 	let lateAngularSpeed = 0;
-	runFrames( fixture, 120, 12, ( _, fixedStep ) => {
+	runFrames( fixture, 120, 10, ( _, fixedStep ) => {
 
 		assertFiniteHybrid( fixture );
+		const translation = fixture.chameleon.pelvis.body.translation();
+		const position = new THREE.Vector3(
+			translation.x, translation.y, translation.z,
+		);
+		maximumRootDrift = Math.max(
+			maximumRootDrift,
+			position.distanceTo( settledRoot ),
+		);
+		maximumDesiredRootError = Math.max(
+			maximumDesiredRootError,
+			position.distanceTo( fixture.chameleon.desiredRoot ),
+		);
+		minimumContacts = Math.min( minimumContacts, fixture.chameleon.contactCount );
 		if ( fixedStep <= 960 ) return;
 		lateLinearSpeed = Math.max(
 			lateLinearSpeed,
@@ -289,12 +314,22 @@ test( 'CHAMELEON-LAB-RAGDOLL-004 idle hybrid remains stable during a twelve-seco
 
 	} );
 	const position = fixture.chameleon.pelvis.body.translation();
+	const finalRoot = new THREE.Vector3( position.x, position.y, position.z );
 	assert.ok(
-		spawn.distanceTo( new THREE.Vector3( position.x, position.y, position.z ) ) < 0.02,
-		`idle root drifted to ${ JSON.stringify( position ) }; contacts=${ fixture.chameleon.contactCount }; feet=${ fixture.chameleon.feet.map( ( foot ) => foot.surface?.kind ?? 'none' ) }`,
+		maximumRootDrift < 0.02,
+		`settled root drifted ${ maximumRootDrift } from ${ settledRoot.toArray() } to ${ finalRoot.toArray() }`,
 	);
+	assert.ok( settledRoot.y >= 0.16 && settledRoot.y <= 0.42,
+		`settled pelvis height ${ settledRoot.y } is outside the anatomical range` );
+	assert.ok( finalRoot.y >= 0.16 && finalRoot.y <= 0.42,
+		`final pelvis height ${ finalRoot.y } is outside the anatomical range` );
+	assert.ok( settledRoot.distanceTo( settledDesiredRoot ) < 0.025,
+		`warm equilibrium missed desiredRoot by ${ settledRoot.distanceTo( settledDesiredRoot ) }` );
+	assert.ok( maximumDesiredRootError < 0.025,
+		`pelvis diverged from desiredRoot by ${ maximumDesiredRootError }` );
 	assert.ok( lateLinearSpeed < 0.002, `late linear speed ${ lateLinearSpeed }` );
 	assert.ok( lateAngularSpeed < 0.01, `late angular speed ${ lateAngularSpeed }` );
+	assert.equal( minimumContacts, HYBRID_FOOT_COUNT );
 	assert.equal( fixture.chameleon.contactCount, HYBRID_FOOT_COUNT );
 	assertAnatomicalPose( fixture.chameleon );
 	assert.equal( fixture.physics.stats.totalSteps, 1_440 );
@@ -307,15 +342,20 @@ test( 'CHAMELEON-LAB-RAGDOLL-005 root recovers after an impulse while mouse cont
 	const fixture = await createGroundedHybrid();
 	const root = fixture.chameleon.pelvis.body;
 	runFrames( fixture, 120, 2 );
+	const equilibriumTranslation = root.translation();
+	const equilibriumRoot = new THREE.Vector3(
+		equilibriumTranslation.x, equilibriumTranslation.y, equilibriumTranslation.z,
+	);
 	fixture.chameleon.setDragging( true );
 	root.applyImpulse( { x: 0.65, y: 0.95, z: 0.3 }, true );
 	root.applyTorqueImpulse( { x: 0.08, y: 0.14, z: 0.22 }, true );
 	runFrames( fixture, 120, 0.4 );
 	const displaced = root.translation();
+	const displacement = new THREE.Vector3( displaced.x, displaced.y, displaced.z )
+		.distanceTo( equilibriumRoot );
 	assert.ok(
-		new THREE.Vector3( displaced.x, displaced.y, displaced.z )
-			.distanceTo( new THREE.Vector3( 0, 0.3, 0.75 ) ) > 0.15,
-		'the disturbance must actually displace the body',
+		displacement > 0.15,
+		`the disturbance only displaced the body by ${ displacement }`,
 	);
 
 	fixture.chameleon.setDragging( false );
@@ -338,8 +378,17 @@ test( 'CHAMELEON-LAB-RAGDOLL-005 root recovers after an impulse while mouse cont
 			recoveredRotation.x, recoveredRotation.y, recoveredRotation.z, recoveredRotation.w,
 		),
 	);
-	assert.ok( Math.abs( root.translation().y - 0.3 ) < 0.03,
-		`recovered y=${ root.translation().y }; target=${ fixture.chameleon.desiredRoot.toArray() }; contacts=${ fixture.chameleon.contactCount }; up=${ recoveredUp.toArray() }; anchors=${ fixture.chameleon.feet.map( ( foot ) => foot.anchor?.toArray() ) }` );
+	const recoveredTranslation = root.translation();
+	const recoveredRoot = new THREE.Vector3(
+		recoveredTranslation.x, recoveredTranslation.y, recoveredTranslation.z,
+	);
+	const recoveryError = recoveredRoot.distanceTo( fixture.chameleon.desiredRoot );
+	assert.ok( recoveryError < 0.035,
+		`recovered root missed current desiredRoot by ${ recoveryError }; body=${ recoveredRoot.toArray() }; target=${ fixture.chameleon.desiredRoot.toArray() }; contacts=${ fixture.chameleon.contactCount }; up=${ recoveredUp.toArray() }; anchors=${ fixture.chameleon.feet.map( ( foot ) => foot.anchor?.toArray() ) }` );
+	assert.ok( recoveredRoot.y >= 0.16 && recoveredRoot.y <= 0.42,
+		`recovered pelvis height ${ recoveredRoot.y } is outside the anatomical range` );
+	assert.ok( recoveredUp.dot( fixture.chameleon.supportNormal ) > 0.95,
+		`recovered up ${ recoveredUp.toArray() } does not follow support ${ fixture.chameleon.supportNormal.toArray() }` );
 	assert.ok( fixture.chameleon.contactCount >= 2,
 		`reset retained ${ fixture.chameleon.contactCount } contacts: ${ fixture.chameleon.feet.map( ( foot ) => `${ foot.state }/${ foot.surface?.kind ?? 'none' }` ) }` );
 	assertAnatomicalPose( fixture.chameleon );
@@ -530,7 +579,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 
 } );
 
-test( 'CHAMELEON-LAB-RAGDOLL-010 palms and both zygodactyl pads share the support plane', async () => {
+test( 'CHAMELEON-LAB-RAGDOLL-010 exact asymmetric soles close on their support anchors', async () => {
 
 	const fixture = await createGroundedHybrid();
 	fixture.chameleon.setCommand( { move: new THREE.Vector3( -0.75, 0, 0.18 ) } );
@@ -542,13 +591,22 @@ test( 'CHAMELEON-LAB-RAGDOLL-010 palms and both zygodactyl pads share the suppor
 
 		const leg = fixture.chameleon.rig.legs[ index ];
 		const normal = fixture.chameleon.feet[ index ].normal.clone().normalize();
-		for ( const bone of [ leg.palm, leg.inner, leg.outer ] ) {
+		const distal = [
+			[ leg.palm, ANATOMICAL_POSITION.WRIST, ANATOMICAL_POSITION.PALM_END ],
+			[ leg.inner, ANATOMICAL_POSITION.PALM_END, ANATOMICAL_POSITION.DIGIT_INNER ],
+			[ leg.outer, ANATOMICAL_POSITION.PALM_END, ANATOMICAL_POSITION.DIGIT_OUTER ],
+		];
+		for ( const [ bone, start, end ] of distal ) {
 
 			const axis = new THREE.Vector3( 0, 1, 0 )
-				.applyQuaternion( bone.getWorldQuaternion( new THREE.Quaternion() ) );
-			const tangentError = Math.abs( axis.dot( normal ) );
-			assert.ok( tangentError < 0.12,
-				`${ bone.name } is not tangent to its support plane (${ tangentError })` );
+				.applyQuaternion( bone.getWorldQuaternion( new THREE.Quaternion() ) ).normalize();
+			const solvedAxis = new THREE.Vector3(
+				leg.solver.positions[ end ] - leg.solver.positions[ start ],
+				leg.solver.positions[ end + 1 ] - leg.solver.positions[ start + 1 ],
+				leg.solver.positions[ end + 2 ] - leg.solver.positions[ start + 2 ],
+			).normalize();
+			assert.ok( axis.dot( solvedAxis ) > 0.995,
+				`${ bone.name } diverges from its asymmetric authored axis` );
 			const soleNormal = leg.contactNormalLocals.get( bone ).clone()
 				.applyQuaternion( bone.getWorldQuaternion( new THREE.Quaternion() ) );
 			assert.ok( soleNormal.dot( normal ) < -0.88,
@@ -565,8 +623,16 @@ test( 'CHAMELEON-LAB-RAGDOLL-010 palms and both zygodactyl pads share the suppor
 		);
 		assert.ok( solvedError < 0.003,
 			`${ leg.name } rendered contact patch diverged from its anatomical solve (${ solvedError }); deviations=${ deviations }` );
-		assert.ok( anchor && anchorError < 0.055,
+		assert.ok( anchor && anchorError < 0.015,
 			`${ leg.name } contact patch missed its stance anchor (${ anchorError }); metrics=${ [ ...leg.solver.metrics ] }; offset=${ [ ...leg.solver.contactOffset ] }; local=${ leg.contactPatchLocal.toArray() }; lengths=${ [ ...leg.solver.lengths ] }; socket=${ leg.girdle.getWorldPosition( new THREE.Vector3() ).toArray() }; anchor=${ anchor?.toArray() }; body=${ Object.values( fixture.chameleon.pelvis.body.translation() ) }; desired=${ fixture.chameleon.desiredRoot.toArray() }` );
+		if ( leg.kind === 'hind' ) {
+
+			assert.equal( leg.solver.metrics[ ANATOMICAL_METRIC.CLAMPED ], 0 );
+			assert.ok( Math.abs( leg.solver.metrics[ ANATOMICAL_METRIC.REACH_RESIDUAL ] ) < 0.003 );
+			assert.ok( leg.solver.metrics[ ANATOMICAL_METRIC.FLEXION ] >= 0.95,
+				`${ leg.name } flexion ${ leg.solver.metrics[ ANATOMICAL_METRIC.FLEXION ] }` );
+
+		}
 
 	}
 	assertFiniteHybrid( fixture );
@@ -866,5 +932,92 @@ test( 'CHAMELEON-LAB-RAGDOLL-015 post-jump impact reacquires wall and cylinder w
 		fixture.dispose();
 
 	}
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-016 idle limbs retain authored flexion while neck and head animate softly', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { chameleon } = fixture;
+	runFrames( fixture, 120, 2, () => assertFiniteHybrid( fixture ) );
+	const neck = chameleon.rig.byName.get( 'neck' );
+	const head = chameleon.rig.byName.get( 'head' );
+	assert.ok( neck && head, 'the physical rig must expose neck and head bones' );
+	const neckBaseline = neck.quaternion.clone();
+	const headBaseline = head.quaternion.clone();
+	let previousNeck = neckBaseline.clone();
+	let previousHead = headBaseline.clone();
+	let peakNeckExcursion = 0;
+	let peakHeadExcursion = 0;
+	let maximumNeckFrameDelta = 0;
+	let maximumHeadFrameDelta = 0;
+	const minimumFlexionRatio = new Float32Array( HYBRID_FOOT_COUNT ).fill( Infinity );
+	const maximumResidual = new Float32Array( HYBRID_FOOT_COUNT );
+	let clampSamples = 0;
+	runFrames( fixture, 120, 6, () => {
+
+		assertFiniteHybrid( fixture );
+		peakNeckExcursion = Math.max(
+			peakNeckExcursion, neckBaseline.angleTo( neck.quaternion ),
+		);
+		peakHeadExcursion = Math.max(
+			peakHeadExcursion, headBaseline.angleTo( head.quaternion ),
+		);
+		maximumNeckFrameDelta = Math.max(
+			maximumNeckFrameDelta, previousNeck.angleTo( neck.quaternion ),
+		);
+		maximumHeadFrameDelta = Math.max(
+			maximumHeadFrameDelta, previousHead.angleTo( head.quaternion ),
+		);
+		previousNeck.copy( neck.quaternion );
+		previousHead.copy( head.quaternion );
+		for ( let index = 0; index < chameleon.rig.legs.length; index ++ ) {
+
+			const leg = chameleon.rig.legs[ index ];
+			minimumFlexionRatio[ index ] = Math.min(
+				minimumFlexionRatio[ index ],
+				leg.solver.metrics[ ANATOMICAL_METRIC.FLEXION ] / leg.restFlexion,
+			);
+			maximumResidual[ index ] = Math.max(
+				maximumResidual[ index ],
+				Math.abs( leg.solver.metrics[ ANATOMICAL_METRIC.REACH_RESIDUAL ] ),
+			);
+			clampSamples += leg.solver.metrics[ ANATOMICAL_METRIC.CLAMPED ];
+
+		}
+
+	} );
+	for ( let index = 0; index < chameleon.rig.legs.length; index ++ ) {
+
+		const leg = chameleon.rig.legs[ index ];
+		assert.ok( minimumFlexionRatio[ index ] >= 0.72 - 1e-5,
+			`${ leg.name } flexion fell to ${ minimumFlexionRatio[ index ] * 100 }% of rest` );
+		assert.ok( maximumResidual[ index ] < 0.003,
+			`${ leg.name } reach residual ${ maximumResidual[ index ] }` );
+		const modelQuaternion = chameleon.model.getWorldQuaternion( new THREE.Quaternion() );
+		const expectedForward = new THREE.Vector3( -1, 0, 0 ).applyQuaternion( modelQuaternion );
+		const expectedUp = new THREE.Vector3( 0, 1, 0 ).applyQuaternion( modelQuaternion );
+		assert.ok( expectedForward.dot( new THREE.Vector3().fromArray( leg.solver._bodyForward ) ) > 0.97,
+			`${ leg.name } inherited a parent-bone axis instead of the model forward` );
+		assert.ok( expectedUp.dot( new THREE.Vector3().fromArray( leg.solver._bodyUp ) ) > 0.97,
+			`${ leg.name } inherited a parent-bone axis instead of the model up` );
+
+	}
+	assert.equal( clampSamples, 0, 'an idle anatomical solve must never clamp a limb' );
+	assert.ok( peakNeckExcursion > 0.015,
+		`neck animation was imperceptible (${ peakNeckExcursion })` );
+	assert.ok( peakHeadExcursion > 0.005,
+		`head animation was imperceptible (${ peakHeadExcursion })` );
+	assert.ok( peakNeckExcursion < 0.35,
+		`neck animation was excessive (${ peakNeckExcursion })` );
+	assert.ok( peakHeadExcursion < 0.25,
+		`head animation was excessive (${ peakHeadExcursion })` );
+	assert.ok( maximumNeckFrameDelta < 0.01,
+		`neck animation jumped by ${ maximumNeckFrameDelta } in one fixed step` );
+	assert.ok( maximumHeadFrameDelta < 0.01,
+		`head animation jumped by ${ maximumHeadFrameDelta } in one fixed step` );
+	assert.equal( chameleon.contactCount, HYBRID_FOOT_COUNT );
+	assertAnatomicalPose( chameleon );
+	fixture.dispose();
 
 } );

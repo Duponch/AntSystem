@@ -82,7 +82,7 @@ les os des pattes et ne crée aucune énergie dans le solveur physique.
 ## Contrat de l’asset et queue originale
 
 `public/assets/ChameleonPhysical.glb` exporte un unique mesh skinné à partir de
-la géométrie source préservée. Son contrat `mesh_contract_version = 3.3.0`
+la géométrie source préservée. Son contrat `mesh_contract_version = 3.4.0`
 verrouille notamment :
 
 - `exact_source_geometry = true` ;
@@ -91,6 +91,12 @@ verrouille notamment :
 - `original_tail_vertices = 7206` ;
 - `tail_deformation_mode = "surface-geodesic-bspline-12"` ;
 - `tail_physics_dofs = 0`.
+
+Le contrat anatomique `2.0.0` recale les pivots sur la pose source réellement
+fléchie : thorax/épaule/coude/poignet à l’avant, bassin/hanche/genou/cheville à
+l’arrière, puis cou et crâne. Il publie aussi le plan de flexion au repos de
+chaque membre. L’IK peut ainsi reproduire le rig exporté avant d’ajouter un pas,
+au lieu de supposer une patte droite puis de la forcer vers le support.
 
 Chaque os de membre publie aussi sa longueur de repos exacte. Chaque paume
 publie trois points de contact, leur centre et la normale extérieure de la
@@ -140,13 +146,20 @@ ce rappel. Rapier reste alors l’unique autorité du mouvement global.
 
 ## Pilotage troisième personne et saut physique
 
-Le déplacement clavier est échantillonné dans le pas physique. La pente de la
-caméra est supprimée avant de construire les axes avant/droite ; l’intention est
-ensuite reprojetée dans le plan du support. Un même lacet de caméra produit donc
-la même direction sur un sol, et regarder presque verticalement ne peut ni
-inverser ni annuler la commande. Sur un mur, une commande face au mur devient
-une direction de montée. Les changements d’orientation et d’accélération sont
-bornés et tous les objets de sortie sont réutilisés.
+Le déplacement clavier est échantillonné dans le pas physique. Un repère tangent
+persistant est transporté par rotation minimale d’une normale de support à la
+suivante (repère de Bishop), puis reçoit seulement le changement de lacet de la
+caméra. Cette continuité supprime la singularité de l’ancienne double projection
+sur un mur et la dérive accumulée autour d’un cylindre. Regarder presque
+verticalement ne peut ni inverser ni annuler la commande : « avancer » reste
+avant dans le repère de la surface, même pendant une transition sol/mur/branche.
+La normale qui a servi à construire la commande accompagne celle-ci jusqu’au
+contrôleur physique. Si les contacts découvrent une nouvelle normale pendant le
+même sous-pas, l’intention est transportée vers ce nouveau plan au lieu d’être
+simplement reprojetée : une couture abrupte ne peut donc pas créer une impulsion
+latérale d’une image.
+Les changements d’orientation et d’accélération sont bornés et tous les objets
+de sortie sont réutilisés.
 
 `Espace` ne déclenche plus une impulsion constante arbitraire. La vitesse de
 décollage est dérivée de la hauteur demandée et de la gravité courante. La
@@ -182,13 +195,23 @@ tête compense pour conserver un regard stable.
 À chaque rendu interpolé, le rig restaure sa pose de référence, applique cette
 pré-pose lissée puis résout chaque patte par une chaîne analytique à ceinture
 mobile : ceinture, segment supérieur, segment inférieur, paume et deux groupes
-de doigts zygodactyles. Les longueurs, directions de repos, pivots et centres de
-semelle viennent du GLB. L’épaule ou la hanche effectue une excursion ample ; le
+de doigts zygodactyles. Les longueurs, directions de repos, pivots, plans de
+flexion et centres de semelle viennent du GLB. À vitesse nulle, l’attraction de
+la ceinture vers le pied et le biais d’abduction valent exactement zéro : la
+pose fléchie exportée est donc la référence réelle. L’épaule ou la hanche effectue une excursion ample ; le
 coude ou genou adapte réellement son angle ; la paume entière reste tangente au
 support et n’est jamais étirée pour masquer une erreur proximale. Toutes les
 rotations restent bornées autour de la pose de repos. Une cible inaccessible ne
 peut donc ni accumuler une torsion, ni faire vibrer frénétiquement un poignet ou
 une cheville.
+
+Le repère avant/haut/côté n’est jamais déduit des axes locaux de `spine_02` ou
+du bassin, car ces axes suivent la chaîne exportée et ne coïncident pas avec ceux
+de l’animal. Le runtime retire l’orientation de repos du parent, puis transporte
+uniquement son delta anatomique courant. La suspension compare par ailleurs la
+même grandeur des deux côtés — attache de ceinture vers centre de semelle — et
+une correction de racine bornée conserve au moins 84 % de la flexion de repos
+visée lorsqu’un support aplati oblige les quatre pieds à changer de hauteur.
 
 Les normales propres à chaque pied orientent les paumes. Le corps utilise leur
 cadre agrégé, ce qui permet de tester un angle sol/mur ou un tronc sans imposer
@@ -199,7 +222,9 @@ paramètres indépendants exposés dans l’interface.
 ## Queue passive à géométrie originale
 
 La queue emploie une tige XPBD de taille constante : treize nœuds pour douze
-segments, dont la racine est cinématique et suit le bassin. Il n’existe aucun
+segments. Les deux premiers nœuds forment un collet sacré cinématique qui suit
+le bassin ; la dynamique commence à `tail_02`, après la croupe. Le mouvement de
+la queue ne peut donc plus entraîner visuellement les fesses. Il n’existe aucun
 moteur, pose cible ou couple musculaire dans ce prototype : gravité, inertie,
 amortissement, contraintes de longueur et de courbure déterminent seuls son
 mouvement secondaire. Le résultat interpolé oriente les douze os de la queue,
@@ -271,7 +296,9 @@ rendu](../chameleon-rendering-performance.md).
 
 Le contrôleur plateforme et la machine de saut ajoutent uniquement des
 opérations scalaires/vectorielles constantes par sous-pas, sans raycast ni
-allocation. L’overlay de rig est retiré de la scène lorsqu’il est masqué : son
+allocation. L’overlay trace chaque os selon son véritable axe local `+Y` et sa
+longueur exportée ; il n’invente plus de liaisons entre les origines de branches
+hiérarchiques disjointes. Il est retiré de la scène lorsqu’il est masqué : son
 coût est alors nul. Lorsqu’il est visible, un unique `LineSegments` met à jour
 les 42 liaisons et les axes terminaux des doigts, de la mâchoire et de
 `tail_12`, soit un seul draw call et environ 1,25 Kio de données dynamiques.
@@ -353,12 +380,13 @@ Les preuves automatiques actuelles sont :
 - `test/chameleon-lab-passive-limbs.test.js` protège le mode musculaire relâché,
   les ligaments, les contacts et la récupération ;
 - `test/chameleon-lab-active-ragdoll.test.js` : les identifiants historiques
-  `CHAMELEON-LAB-RAGDOLL-001` à `015` protègent le corps Rapier unique, les
+  `CHAMELEON-LAB-RAGDOLL-001` à `016` protègent le corps Rapier unique, les
   quatre appuis, les forces et angles bornés, le mode libre, les valeurs finies,
   les excursions proximales sans jitter distal, les semelles zygodactyles à
   plat, la queue sans pénétration, les membres passifs et l’accrochage après
   lancer sur mur ou cylindre, la suppression des prises périmées au décollage
-  et la reprise d’un support réel après impact ;
+  et la reprise d’un support réel après impact, ainsi que la flexion au repos,
+  le repère anatomique du modèle et le mouvement doux du cou et de la tête ;
 - `test/chameleon-physical-asset.test.js` protège le mesh source exact, le skin,
   les 7 206 sommets originaux, la ligne centrale courbe, les douze os et leurs
   poids géodésiques bornés.

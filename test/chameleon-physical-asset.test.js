@@ -266,7 +266,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.name, 'Chameleon_Physics_Body' );
 	assert.equal( meshNode.skin, 0, 'the original mesh must reference the rig skin' );
 	assert.equal( meshNode.extras?.physics_ready, true );
-	assert.equal( meshNode.extras?.mesh_contract_version, '3.3.0' );
+	assert.equal( meshNode.extras?.mesh_contract_version, '3.4.0' );
 	assert.equal( meshNode.extras?.source_object, 'Chameleon_Imported_Source' );
 	assert.equal( meshNode.extras?.exact_source_geometry, true );
 	assert.equal( meshNode.extras?.source_vertex_count, EXPECTED_SOURCE_VERTICES );
@@ -303,9 +303,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 		meshNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( meshNode.extras?.anatomy_contract_version, '1.0.0' );
+	assert.equal( meshNode.extras?.anatomy_contract_version, '2.0.0' );
 	assert.equal( meshNode.extras?.distal_anatomy_fit, 'exact-surface-zygodactyl-fork-v1' );
-	assert.equal( meshNode.extras?.proximal_joint_fit, 'preserved-source-medial-centers-v1' );
+	assert.equal( meshNode.extras?.proximal_joint_fit, 'orthographic-surface-landmarks-flexed-v2' );
+	assert.equal( meshNode.extras?.tail_static_collar_bone, 'tail_01' );
+	assert.equal( meshNode.extras?.tail_dynamic_root_bone, 'tail_02' );
 	assert.equal( meshNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( meshNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( meshNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -527,7 +529,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	const rigNodeIndex = nodeByName.get( 'Chameleon_Physics_Armature' );
 	assert.notEqual( rigNodeIndex, undefined, 'rig root node is missing' );
 	const rigNode = gltf.nodes[ rigNodeIndex ];
-	assert.equal( rigNode.extras?.rig_version, '3.3.0' );
+	assert.equal( rigNode.extras?.rig_version, '3.4.0' );
 	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail-root=\+X.*original-curled.*glTF Y-up/u );
 	assert.equal( rigNode.extras?.visual_bones, 43 );
 	assert.equal( rigNode.extras?.visual_deformation_bones, 42 );
@@ -551,9 +553,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		rigNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( rigNode.extras?.anatomy_contract_version, '1.0.0' );
+	assert.equal( rigNode.extras?.anatomy_contract_version, '2.0.0' );
 	assert.equal( rigNode.extras?.distal_anatomy_fit, 'exact-surface-zygodactyl-fork-v1' );
-	assert.equal( rigNode.extras?.proximal_joint_fit, 'preserved-source-medial-centers-v1' );
+	assert.equal( rigNode.extras?.proximal_joint_fit, 'orthographic-surface-landmarks-flexed-v2' );
+	assert.equal( rigNode.extras?.tail_static_collar_bone, 'tail_01' );
+	assert.equal( rigNode.extras?.tail_dynamic_root_bone, 'tail_02' );
 	assert.equal( rigNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( rigNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( rigNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -805,10 +809,10 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 
 	};
 	const proximal = {
-		'front.L': [ [ -0.13, 0.065, 0.11 ], [ -0.105, 0.145, 0.075 ], [ -0.11, 0.22, -0.015 ], [ -0.14, 0.285, -0.175 ] ],
-		'front.R': [ [ -0.13, -0.065, 0.11 ], [ -0.105, -0.145, 0.075 ], [ -0.11, -0.22, -0.015 ], [ -0.14, -0.285, -0.175 ] ],
-		'hind.L': [ [ 0.085, 0.07, 0.105 ], [ 0.115, 0.155, 0.13 ], [ 0.09, 0.235, 0.085 ], [ 0.065, 0.305, -0.035 ] ],
-		'hind.R': [ [ 0.085, -0.07, 0.105 ], [ 0.115, -0.155, 0.13 ], [ 0.09, -0.235, 0.085 ], [ 0.065, -0.305, -0.035 ] ],
+		'front.L': [ [ -0.135, 0.06, 0.125 ], [ -0.175, 0.14, 0.095 ], [ -0.085, 0.225, 0.015 ], [ -0.135, 0.285, -0.175 ] ],
+		'front.R': [ [ -0.135, -0.06, 0.125 ], [ -0.175, -0.14, 0.095 ], [ -0.085, -0.225, 0.015 ], [ -0.135, -0.285, -0.175 ] ],
+		'hind.L': [ [ 0.105, 0.06, 0.12 ], [ 0.145, 0.145, 0.13 ], [ 0.005, 0.225, 0.045 ], [ 0.07, 0.305, -0.035 ] ],
+		'hind.R': [ [ 0.105, -0.06, 0.12 ], [ 0.145, -0.145, 0.13 ], [ 0.005, -0.225, 0.045 ], [ 0.07, -0.305, -0.035 ] ],
 	};
 	const roleContract = {
 		front: [ 'thorax-to-shoulder', 'shoulder-to-elbow', 'elbow-to-wrist' ],
@@ -825,16 +829,32 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 			assert.equal( chain[ joint ].extras.anatomical_role, roleContract[ limb ][ joint ] );
 
 		}
+		const upper = points[ 2 ].map( ( value, lane ) => value - points[ 1 ][ lane ] );
+		const lower = points[ 3 ].map( ( value, lane ) => value - points[ 2 ][ lane ] );
+		const flexion = Math.acos( Math.max( -1, Math.min( 1,
+			upper.reduce( ( sum, value, lane ) => sum + value * lower[ lane ], 0 )
+			/ ( Math.hypot( ...upper ) * Math.hypot( ...lower ) ),
+		) ) );
+		assert.ok( flexion >= ( limb === 'front' ? 0.48 : 0.85 ),
+			`${ limbKey } rest flexion ${ flexion } is still too straight` );
 
 	}
-	assertClose( nodeByName.get( 'neck' ).extras.rest_head_local, [ -0.145, 0, 0.125 ] );
-	assertClose( nodeByName.get( 'neck' ).extras.rest_tail_local, [ -0.235, 0, 0.105 ] );
+	assertClose( nodeByName.get( 'neck' ).extras.rest_head_local, [ -0.155, 0, 0.145 ] );
+	assertClose( nodeByName.get( 'neck' ).extras.rest_tail_local, [ -0.245, 0, 0.115 ] );
 	assert.equal( nodeByName.get( 'neck' ).extras.anatomical_role, 'thorax-to-neck' );
-	assertClose( nodeByName.get( 'head' ).extras.rest_tail_local, [ -0.445, 0, 0.07 ] );
+	assertClose( nodeByName.get( 'head' ).extras.rest_tail_local, [ -0.455, 0, 0.075 ] );
 	assert.equal( nodeByName.get( 'head' ).extras.anatomical_role, 'neck-to-skull' );
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_head_local, [ -0.275, 0, 0.045 ] );
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_tail_local, [ -0.455, 0, -0.015 ] );
 	assert.equal( nodeByName.get( 'jaw' ).extras.anatomical_role, 'jaw-hinge-to-snout' );
+	assert.equal( nodeByName.get( 'tail_01' ).extras.anatomical_role, 'sacral-tail-collar' );
+	assert.equal( nodeByName.get( 'tail_01' ).extras.tail_dynamic, false );
+	assert.equal( nodeByName.get( 'tail_02' ).extras.tail_dynamic, true );
+	assertClose(
+		nodeByName.get( 'tail_02' ).extras.rest_head_local,
+		[ 0.32217520475387573, -0.06899616867303848, 0.056571055203676224 ],
+		2e-6,
+	);
 
 	const exportedPoints = [];
 	const exportedPointKeys = new Set();

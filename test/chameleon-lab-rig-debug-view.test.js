@@ -32,12 +32,15 @@ function createRigFixture() {
 	const root = new THREE.Bone();
 	root.name = 'pelvis';
 	root.position.set( 0.1, 0.2, 0.3 );
+	root.userData.rest_length = 0.18;
 	const spine = new THREE.Bone();
 	spine.name = 'spine';
 	spine.position.set( 0, 0.4, 0 );
+	spine.userData.rest_length = 0.31;
 	const head = new THREE.Bone();
 	head.name = 'head';
 	head.position.set( -0.2, 0.25, 0 );
+	head.userData.rest_length = 0.22;
 	root.add( spine );
 	spine.add( head );
 	model.add( root );
@@ -54,6 +57,18 @@ function worldPosition( bone ) {
 
 }
 
+function worldTip( bone ) {
+
+	const elements = bone.matrixWorld.elements;
+	const length = Number( bone.userData.rest_length );
+	return [
+		elements[ 12 ] + elements[ 4 ] * length,
+		elements[ 13 ] + elements[ 5 ] * length,
+		elements[ 14 ] + elements[ 6 ] * length,
+	];
+
+}
+
 function closeArray( actual, expected, epsilon = 1e-6 ) {
 
 	assert.equal( actual.length, expected.length );
@@ -63,7 +78,7 @@ function closeArray( actual, expected, epsilon = 1e-6 ) {
 
 }
 
-test( 'CHAMELEON-LAB-RIG-DEBUG-001 builds one reusable segment per parented bone', () => {
+test( 'CHAMELEON-LAB-RIG-DEBUG-001 builds one reusable segment per real bone axis', () => {
 
 	const fixture = createRigFixture();
 	const debug = createRigDebugView( {
@@ -72,9 +87,9 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-001 builds one reusable segment per parented bone
 	} );
 	const view = debug.getView();
 	assert.equal( view.boneCount, 3 );
-	assert.equal( view.segmentCount, 2 );
-	assert.equal( view.positions.length, 12 );
-	assert.equal( view.colors.length, 12 );
+	assert.equal( view.segmentCount, 3 );
+	assert.equal( view.positions.length, 18 );
+	assert.equal( view.colors.length, 18 );
 	assert.equal( debug.lines.parent, null );
 	assert.equal( view.visible, false );
 	assert.equal( view.updates, 0 );
@@ -93,8 +108,9 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-002 writes exact world-space joints through the s
 		visible: true,
 	} );
 	const expected = [
-		...worldPosition( fixture.root ), ...worldPosition( fixture.spine ),
-		...worldPosition( fixture.spine ), ...worldPosition( fixture.head ),
+		...worldPosition( fixture.root ), ...worldTip( fixture.root ),
+		...worldPosition( fixture.spine ), ...worldTip( fixture.spine ),
+		...worldPosition( fixture.head ), ...worldTip( fixture.head ),
 	];
 	closeArray( debug.positions, expected );
 	assert.equal( debug.lines.parent, fixture.scene );
@@ -157,8 +173,8 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-004 renderer hook refreshes matrices and toggling
 	debug.lines.onBeforeRender();
 	assert.equal( debug.getView().updates, before + 1 );
 	closeArray(
-		Array.from( debug.positions.slice( 9, 12 ) ),
-		worldPosition( fixture.head ),
+		Array.from( debug.positions.slice( 15, 18 ) ),
+		worldTip( fixture.head ),
 	);
 	debug.setVisible( false );
 	assert.equal( debug.lines.parent, null );
@@ -207,7 +223,7 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-006 rejects roots without an articulated skeleton
 	assert.throws( () => createRigDebugView( {
 		scene,
 		root: new THREE.Group(),
-	} ), /parented bone/u );
+	} ), /drawable bone/u );
 	assert.throws( () => createRigDebugView( {
 		scene: null,
 		root: new THREE.Group(),
@@ -227,16 +243,13 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-007 physical asset exposes every anatomical chain
 		if ( object.isBone ) bones.push( object );
 
 	} );
-	const terminalBones = bones.filter( ( bone ) =>
-		! bone.children.some( ( child ) => child.isBone )
-		&& Number.isFinite( Number( bone.userData?.rest_length ) ) );
+	const drawableBones = bones.filter( ( bone ) =>
+		Number.isFinite( Number( bone.userData?.rest_length ) )
+		&& Number( bone.userData.rest_length ) > 1e-5 );
 	assert.equal( debug.getView().boneCount, bones.length );
-	assert.equal( debug.getView().segmentCount, bones.length - 1 + terminalBones.length,
-		'the overlay must connect every joint and draw every terminal bone axis' );
-	const connected = new Set( [
-		...debug.edgeParents.map( ( bone ) => bone.name ),
-		...debug.edgeChildren.map( ( bone ) => bone.name ),
-	] );
+	assert.equal( debug.getView().segmentCount, drawableBones.length,
+		'the overlay must draw each exported bone axis exactly once' );
+	const connected = new Set( debug.bones.map( ( bone ) => bone.name ) );
 	const required = [
 		'neck', 'head', 'jaw',
 		...Array.from( { length: 12 }, ( _, index ) =>
@@ -262,16 +275,16 @@ test( 'CHAMELEON-LAB-RIG-DEBUG-007 physical asset exposes every anatomical chain
 	assert.equal( view.colors, colors );
 	assert.equal( debug.positionAttribute, positionAttribute );
 	assert.ok( positions.every( Number.isFinite ) );
-	for ( let leaf = 0; leaf < terminalBones.length; leaf ++ ) {
+	for ( let boneIndex = 0; boneIndex < drawableBones.length; boneIndex ++ ) {
 
-		const offset = ( debug.edgeCount + leaf ) * 6;
+		const offset = boneIndex * 6;
 		const length = Math.hypot(
 			positions[ offset + 3 ] - positions[ offset ],
 			positions[ offset + 4 ] - positions[ offset + 1 ],
 			positions[ offset + 5 ] - positions[ offset + 2 ],
 		);
-		assert.ok( length > 0.015,
-			`${ terminalBones[ leaf ].name } terminal axis is not visible` );
+		assert.ok( Math.abs( length - Number( drawableBones[ boneIndex ].userData.rest_length ) ) < 2e-5,
+			`${ drawableBones[ boneIndex ].name } axis differs from its exported rest length` );
 
 	}
 	debug.dispose();

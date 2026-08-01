@@ -3,29 +3,19 @@ import * as THREE from 'three/webgpu';
 const DEFAULT_ROOT_COLOR = 0xff5bc8;
 const DEFAULT_TIP_COLOR = 0x55f7ff;
 
-function collectBoneEdges( root ) {
+function collectDrawableBones( root ) {
 
-	const parents = [];
-	const children = [];
-	const leaves = [];
+	const bones = [];
 	let boneCount = 0;
 	root.traverse( ( object ) => {
 
 		if ( object.isBone !== true ) return;
 		boneCount ++;
-		if ( object.parent?.isBone === true ) {
-
-			parents.push( object.parent );
-			children.push( object );
-
-		}
-		const hasBoneChild = object.children.some( ( child ) => child.isBone === true );
 		const restLength = Number( object.userData?.rest_length );
-		if ( ! hasBoneChild && Number.isFinite( restLength ) && restLength > 1e-5 )
-			leaves.push( object );
+		if ( Number.isFinite( restLength ) && restLength > 1e-5 ) bones.push( object );
 
 	} );
-	return { parents, children, leaves, boneCount };
+	return { bones, boneCount };
 
 }
 
@@ -50,17 +40,14 @@ export class RigDebugView {
 
 		if ( ! scene?.isObject3D ) throw new TypeError( 'scene must be an Object3D' );
 		if ( ! root?.isObject3D ) throw new TypeError( 'root must be an Object3D' );
-		const edges = collectBoneEdges( root );
-		if ( edges.children.length === 0 )
-			throw new Error( 'rig debug view requires at least one parented bone' );
+		const skeleton = collectDrawableBones( root );
+		if ( skeleton.bones.length === 0 )
+			throw new Error( 'rig debug view requires at least one drawable bone axis' );
 
 		this.scene = scene;
 		this.root = root;
-		this.edgeParents = edges.parents;
-		this.edgeChildren = edges.children;
-		this.leafBones = edges.leaves;
-		this.edgeCount = edges.children.length;
-		this.segmentCount = this.edgeCount + edges.leaves.length;
+		this.bones = skeleton.bones;
+		this.segmentCount = skeleton.bones.length;
 		this.positions = new Float32Array( this.segmentCount * 6 );
 		this.colors = new Float32Array( this.segmentCount * 6 );
 		this.rootColor = new THREE.Color();
@@ -91,7 +78,7 @@ export class RigDebugView {
 		this.disposed = false;
 		this.view = Object.seal( {
 			visible: false,
-			boneCount: edges.boneCount,
+			boneCount: skeleton.boneCount,
 			segmentCount: this.segmentCount,
 			updates: 0,
 			positions: this.positions,
@@ -158,30 +145,18 @@ export class RigDebugView {
 
 		if ( ! this.enabled || this.disposed ) return this.view;
 		if ( updateMatrices ) this.root.updateWorldMatrix( true, true );
-		for ( let segment = 0; segment < this.edgeCount; segment ++ ) {
+		for ( let segment = 0; segment < this.bones.length; segment ++ ) {
 
-			const parentMatrix = this.edgeParents[ segment ].matrixWorld.elements;
-			const childMatrix = this.edgeChildren[ segment ].matrixWorld.elements;
-			const offset = segment * 6;
-			this.positions[ offset ] = parentMatrix[ 12 ];
-			this.positions[ offset + 1 ] = parentMatrix[ 13 ];
-			this.positions[ offset + 2 ] = parentMatrix[ 14 ];
-			this.positions[ offset + 3 ] = childMatrix[ 12 ];
-			this.positions[ offset + 4 ] = childMatrix[ 13 ];
-			this.positions[ offset + 5 ] = childMatrix[ 14 ];
-
-		}
-		for ( let leaf = 0; leaf < this.leafBones.length; leaf ++ ) {
-
-			const bone = this.leafBones[ leaf ];
+			const bone = this.bones[ segment ];
 			const matrix = bone.matrixWorld.elements;
 			const length = Number( bone.userData.rest_length );
-			const offset = ( this.edgeCount + leaf ) * 6;
+			const offset = segment * 6;
 			this.positions[ offset ] = matrix[ 12 ];
 			this.positions[ offset + 1 ] = matrix[ 13 ];
 			this.positions[ offset + 2 ] = matrix[ 14 ];
 			// Blender bones are exported along local +Y. Transforming that axis
-			// explicitly reveals terminal digits, jaw and the original tail tip.
+			// explicitly draws the real exported bone instead of inventing a line
+			// between the origins of two disconnected parent/child bones.
 			this.positions[ offset + 3 ] = matrix[ 12 ] + matrix[ 4 ] * length;
 			this.positions[ offset + 4 ] = matrix[ 13 ] + matrix[ 5 ] * length;
 			this.positions[ offset + 5 ] = matrix[ 14 ] + matrix[ 6 ] * length;

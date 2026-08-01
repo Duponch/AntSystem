@@ -145,6 +145,7 @@ test( 'CHAMELEON-LAB-GAIT-005 idle neck explores smoothly while the body only br
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.NECK_YAW ] ) < 0.15 );
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.HEAD_YAW ] ) < 0.06 );
 	assert.ok( Math.abs( later[ WHOLE_BODY_POSE.CHEST_PITCH ] ) < 0.005 );
+	assert.equal( later[ WHOLE_BODY_POSE.MOTION_WEIGHT ], 1 );
 	assert.deepEqual( later, repeated, 'idle attention must remain deterministic' );
 
 } );

@@ -32,6 +32,7 @@ import {
 	PASSIVE_LIMB_COMPONENT_COUNT,
 	PASSIVE_LIMB_NODE_COUNT,
 } from './passive-limb-ragdoll.js';
+import { parallelTransportTangent } from './platformer-control-model.js';
 
 const WORLD_UP = new THREE.Vector3( 0, 1, 0 );
 const LOCAL_FORWARD = new THREE.Vector3( -1, 0, 0 );
@@ -40,6 +41,7 @@ const LOCAL_SIDE = new THREE.Vector3( 0, 0, 1 );
 const ZERO = new THREE.Vector3();
 const IDENTITY_QUATERNION = new THREE.Quaternion();
 const BODY_COLLISION_GROUP = chameleonCollisionGroups();
+const REST_FLEXION_RETENTION = 0.84;
 
 const LEG_SPECS = Object.freeze( [
 	Object.freeze( { name: 'front.L', kind: 'front', side: 'L', girdle: 'front_girdleL', upper: 'front_upperL', lower: 'front_lowerL', palm: 'front_palmL', inner: 'front_digits_innerL', outer: 'front_digits_outerL' } ),
@@ -170,6 +172,7 @@ class StableVisualRig {
 			scale: bone.scale.clone(),
 		} ) );
 		const modelWorldQuaternion = model.getWorldQuaternion( new THREE.Quaternion() );
+		const inverseModelWorldQuaternion = modelWorldQuaternion.clone().invert();
 		this.legs = LEG_SPECS.map( ( spec ) => {
 
 			const girdle = this._require( spec.girdle );
@@ -190,6 +193,7 @@ class StableVisualRig {
 			const hasExactPatch = Array.isArray( patchCenter ) && patchCenter.length >= 3
 				&& Array.isArray( patchNormal ) && patchNormal.length >= 3;
 			const contactPatchLocal = new THREE.Vector3();
+			const contactPatchWorld = new THREE.Vector3();
 			const exactNormalWorld = new THREE.Vector3();
 			if ( hasExactPatch ) {
 
@@ -199,16 +203,18 @@ class StableVisualRig {
 				// later translated, rotated or scaled.
 				contactPatchLocal.set( patchCenter[ 0 ], patchCenter[ 2 ], -patchCenter[ 1 ] );
 				model.localToWorld( contactPatchLocal );
+				contactPatchWorld.copy( contactPatchLocal );
 				palm.worldToLocal( contactPatchLocal );
 				exactNormalWorld.set( patchNormal[ 0 ], patchNormal[ 2 ], -patchNormal[ 1 ] )
 					.applyQuaternion( modelWorldQuaternion ).normalize();
 
 			} else {
 
-				palm.getWorldPosition( contactPatchLocal );
+				palm.getWorldPosition( contactPatchWorld );
 				inner.getWorldPosition( new THREE.Vector3() ).add(
 					outer.getWorldPosition( new THREE.Vector3() ),
-				).multiplyScalar( 0.5 ).add( contactPatchLocal ).multiplyScalar( 0.5 );
+				).multiplyScalar( 0.5 ).add( contactPatchWorld ).multiplyScalar( 0.5 );
+				contactPatchLocal.copy( contactPatchWorld );
 				palm.worldToLocal( contactPatchLocal );
 
 			}
@@ -246,20 +252,39 @@ class StableVisualRig {
 			// surface points the other way, so the solver's contact-frame normal is
 			// the opposite vector (outsole down, ground normal up).
 			const palmSupportNormalLocal = palmNormalLocal.clone().multiplyScalar( -1 );
-			const palmBinormalLocal = new THREE.Vector3( 0, 1, 0 )
-				.cross( palmSupportNormalLocal ).normalize();
-			const contactOffset = hasExactPatch ? [
-				contactPatchLocal.y,
-				contactPatchLocal.dot( palmSupportNormalLocal ),
-				contactPatchLocal.dot( palmBinormalLocal ),
-			] : null;
-			const inverseModelWorld = modelWorldQuaternion.clone().invert();
+			const restParentWorldQuaternion = girdle.parent.getWorldQuaternion( new THREE.Quaternion() );
+			const inverseRestParentWorld = restParentWorldQuaternion.clone().invert();
+			const parentRestToModel = inverseModelWorldQuaternion.clone()
+				.multiply( restParentWorldQuaternion ).invert();
 			const restGirdleDirection = new THREE.Vector3( 0, 1, 0 )
 				.applyQuaternion( girdle.getWorldQuaternion( new THREE.Quaternion() ) )
-				.applyQuaternion( inverseModelWorld ).normalize();
+				.applyQuaternion( inverseModelWorldQuaternion ).normalize();
 			const restPalmDirection = new THREE.Vector3( 0, 1, 0 )
-				.applyQuaternion( palm.getWorldQuaternion( new THREE.Quaternion() ) )
-				.applyQuaternion( inverseModelWorld ).normalize();
+				.applyQuaternion( palm.getWorldQuaternion( new THREE.Quaternion() ) ).normalize();
+			const restSupportNormalWorld = palmSupportNormalLocal.clone()
+				.applyQuaternion( palm.getWorldQuaternion( new THREE.Quaternion() ) ).normalize();
+			const restPalmTangentWorld = restPalmDirection.clone()
+				.projectOnPlane( restSupportNormalWorld ).normalize();
+			const restPalmBinormalWorld = new THREE.Vector3()
+				.crossVectors( restSupportNormalWorld, restPalmTangentWorld ).normalize();
+			const frameComponents = ( vector ) => [
+				vector.dot( restPalmTangentWorld ),
+				vector.dot( restSupportNormalWorld ),
+				vector.dot( restPalmBinormalWorld ),
+			];
+			const wristWorld = palm.getWorldPosition( new THREE.Vector3() );
+			const contactOffset = frameComponents( contactPatchWorld.clone().sub( wristWorld ) );
+			const palmAxisFrame = frameComponents( restPalmDirection );
+			const innerAxisFrame = frameComponents(
+				new THREE.Vector3( 0, 1, 0 )
+					.applyQuaternion( inner.getWorldQuaternion( new THREE.Quaternion() ) ).normalize(),
+			);
+			const outerAxisFrame = frameComponents(
+				new THREE.Vector3( 0, 1, 0 )
+					.applyQuaternion( outer.getWorldQuaternion( new THREE.Quaternion() ) ).normalize(),
+			);
+			const restPalmTangentModel = restPalmTangentWorld.clone()
+				.applyQuaternion( inverseModelWorldQuaternion ).normalize();
 			const sideSign = spec.side === 'L' ? -1 : 1;
 			const restGirdle = [
 				-restGirdleDirection.x,
@@ -267,10 +292,29 @@ class StableVisualRig {
 				restGirdleDirection.z * sideSign,
 			];
 			const restPalm = [
-				-restPalmDirection.x,
-				restPalmDirection.y,
-				restPalmDirection.z * sideSign,
+				-restPalmTangentModel.x,
+				restPalmTangentModel.y,
+				restPalmTangentModel.z * sideSign,
 			];
+			// Preserve the exported flexion plane.  A generic "outward + up"
+			// pole makes the analytic IK look plausible in isolation but rotates
+			// the elbow/knee away from the actual bent mesh as soon as it runs.
+			const shoulderWorld = upper.getWorldPosition( new THREE.Vector3() );
+			const socketWorld = girdle.getWorldPosition( new THREE.Vector3() );
+			const elbowWorld = lower.getWorldPosition( new THREE.Vector3() );
+			const restReachDistance = shoulderWorld.distanceTo( wristWorld );
+			const restSupportReach = socketWorld.distanceTo( contactPatchWorld );
+			const restFlexion = elbowWorld.clone().sub( shoulderWorld ).normalize()
+				.angleTo( wristWorld.clone().sub( elbowWorld ).normalize() );
+			const restReach = wristWorld.clone().sub( shoulderWorld ).normalize();
+			const restPoleParentLocal = elbowWorld.clone().sub( shoulderWorld )
+				.addScaledVector(
+					restReach,
+					-elbowWorld.clone().sub( shoulderWorld ).dot( restReach ),
+				);
+			if ( restPoleParentLocal.lengthSq() < 1e-10 )
+				restPoleParentLocal.copy( restSupportNormalWorld ).cross( restReach );
+			restPoleParentLocal.normalize().applyQuaternion( inverseRestParentWorld );
 			return {
 				...spec,
 				girdle,
@@ -286,9 +330,18 @@ class StableVisualRig {
 					lengths: exactLengths,
 					contactOffset,
 					restGirdle,
+					palmAxisFrame,
+					innerAxisFrame,
+					outerAxisFrame,
 				} ),
 				contactPatchLocal,
 				restPalm,
+				restPalmTangentBody: restPalmTangentModel.clone(),
+				parentRestToModel,
+				restPoleParentLocal,
+				restReach: restReachDistance,
+				restSupportReach,
+				restFlexion,
 				joints: [ girdle, upper, lower ],
 				passiveBones: [ girdle, upper, lower, palm ],
 				contactNormalLocals,
@@ -317,12 +370,15 @@ class StableVisualRig {
 		this._desiredNormal = new THREE.Vector3();
 		this._soleTargetNormal = new THREE.Vector3();
 		this._modelWorldQuaternion = new THREE.Quaternion();
+		this._legFrameWorldQuaternion = new THREE.Quaternion();
+		this._legParentWorldQuaternion = new THREE.Quaternion();
 		this._axisWorld = new THREE.Vector3();
 		this._bodyCandidate = new THREE.Quaternion();
 		this._bodyForward = new THREE.Vector3();
 		this._bodyUp = new THREE.Vector3();
 		this._bodySide = new THREE.Vector3();
 		this._palmDirection = new THREE.Vector3();
+		this._poleVector = new THREE.Vector3();
 		this._segmentStart = new THREE.Vector3();
 		this._segmentEnd = new THREE.Vector3();
 		this._segmentDirection = new THREE.Vector3();
@@ -349,9 +405,12 @@ class StableVisualRig {
 			palmDirection: this._palmDirection,
 			bodyForward: this._bodyForward,
 			bodyUp: this._bodyUp,
+			poleVector: this._poleVector,
+			palmYaw: 0,
 			stride: 0,
-			abduction: 0.68,
-			minimumFlexion: 0.16,
+			abduction: 0,
+			girdleReachWeight: 0,
+			minimumFlexion: 0.42,
 			maximumFlexion: 2.62,
 			girdleSwingLimit: 1.08,
 			dt: 1 / 120,
@@ -410,7 +469,7 @@ class StableVisualRig {
 
 			this._rotateInModelSpace(
 				this.pelvis, LOCAL_SIDE,
-				suspensionPose[ SUSPENSION_OUTPUT.PITCH ] * 0.55 * suspensionInfluence,
+				-suspensionPose[ SUSPENSION_OUTPUT.PITCH ] * 0.55 * suspensionInfluence,
 			);
 			this._rotateInModelSpace(
 				this.pelvis, LOCAL_FORWARD,
@@ -659,17 +718,26 @@ class StableVisualRig {
 		this.applyWholeBodyPose(
 			wholeBodyPose, influence, suspensionPose, suspensionScale, landingCompression,
 		);
-		this.model.getWorldQuaternion( this._modelWorldQuaternion );
-		this._bodyForward.copy( LOCAL_FORWARD ).applyQuaternion( this._modelWorldQuaternion ).normalize();
-		this._bodyUp.copy( LOCAL_UP ).applyQuaternion( this._modelWorldQuaternion ).normalize();
-		this._bodySide.copy( LOCAL_SIDE ).applyQuaternion( this._modelWorldQuaternion ).normalize();
 		for ( let index = 0; index < this.legs.length; index ++ ) {
 
 			const offset = index * 3;
+			const leg = this.legs[ index ];
+			// Parent-bone axes follow the exported spine, not the animal's model
+			// axes. Remove that authored rest orientation before deriving the
+			// forward/up/right frame. At rest this is exactly the model frame; when
+			// the trunk bends it carries only the parent's anatomical delta.
+			leg.girdle.parent.getWorldQuaternion( this._legParentWorldQuaternion );
+			this._legFrameWorldQuaternion.copy( this._legParentWorldQuaternion )
+				.multiply( leg.parentRestToModel );
+			this._bodyForward.copy( LOCAL_FORWARD )
+				.applyQuaternion( this._legFrameWorldQuaternion ).normalize();
+			this._bodyUp.copy( LOCAL_UP )
+				.applyQuaternion( this._legFrameWorldQuaternion ).normalize();
+			this._bodySide.copy( LOCAL_SIDE )
+				.applyQuaternion( this._legFrameWorldQuaternion ).normalize();
 			this._target.set(
 				footTargets[ offset ], footTargets[ offset + 1 ], footTargets[ offset + 2 ],
 			);
-			const leg = this.legs[ index ];
 			this._desiredNormal.set(
 				footNormals[ offset ], footNormals[ offset + 1 ], footNormals[ offset + 2 ],
 			);
@@ -691,10 +759,17 @@ class StableVisualRig {
 			this._solveInput.stride = wholeBodyPose
 				? THREE.MathUtils.clamp( wholeBodyPose[ WHOLE_BODY_POSE.STRIDE_0 + index ] * 1.45, -1, 1 )
 				: 0;
-			this._solveInput.abduction = leg.kind === 'front' ? 0.74 : 0.82;
 			const flexionDrive = wholeBodyPose
 				? THREE.MathUtils.clamp( wholeBodyPose[ WHOLE_BODY_POSE.FLEX_0 + index ], 0, 1 )
 				: 0;
+			const strideDrive = Math.abs( this._solveInput.stride );
+			this._solveInput.abduction = strideDrive * ( leg.kind === 'front' ? 0.16 : 0.20 )
+				+ flexionDrive * 0.08;
+			this._solveInput.girdleReachWeight = THREE.MathUtils.clamp(
+				strideDrive * 0.22 + flexionDrive * 0.12, 0, 0.34,
+			);
+			this._poleVector.copy( leg.restPoleParentLocal )
+				.applyQuaternion( this._legParentWorldQuaternion ).normalize();
 			this._solveInput.minimumFlexion = leg.solver.preset.minimumFlexion
 				+ flexionDrive * ( leg.kind === 'front' ? 1.12 : 1.28 );
 			this._solveInput.maximumFlexion = leg.solver.preset.maximumFlexion;
@@ -837,6 +912,8 @@ export async function createHybridChameleon( {
 	visualRoot.position.copy( spawn );
 	visualRoot.updateMatrixWorld( true );
 	rig.restore();
+	for ( const leg of rig.legs ) leg.shoulderBodyOffset = leg.upper
+		.getWorldPosition( new THREE.Vector3() ).sub( spawn );
 	const tailVisualRig = new PassiveTailVisualRig( model );
 	const tailInitialPositions = tailVisualRig.captureRestWorldPositions();
 	const tailRootBodyOffset = new THREE.Vector3(
@@ -868,8 +945,11 @@ export async function createHybridChameleon( {
 		gravity: physics.world.gravity,
 		initialPositions: tailInitialPositions,
 		radii: tailRadii,
+		pinBaseSegment: true,
+		baseDirection: tailRootRestDirection,
+		baseMaxAngle: 0,
 	} );
-	for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+	for ( let node = tailPhysics.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 		const ratio = node / ( PASSIVE_TAIL_NODE_COUNT - 1 );
 		tailPhysics.inverseMasses[ node ] = THREE.MathUtils.lerp( 0.38, 1, ratio );
@@ -996,6 +1076,7 @@ export async function createHybridChameleon( {
 	};
 	const command = {
 		move: new THREE.Vector3(),
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
 		sprint: false,
 		release: false,
 		fullRagdoll: false,
@@ -1040,8 +1121,12 @@ export async function createHybridChameleon( {
 	const renderFootNormals = new Float32Array( 12 );
 	const nominalFootPositions = new Float32Array( 12 );
 	const suspensionSocketPositions = new Float32Array( 12 );
-	const preferredLimbReach = new Float32Array( rig.legs.map( ( leg ) =>
-		( leg.solver.lengths[ 1 ] + leg.solver.lengths[ 2 ] ) * 0.85 ) );
+	// Suspension measures socket-to-contact distances, so its authored reference
+	// must use that exact metric too. Mixing it with shoulder-to-wrist reach made
+	// the visual suspension saturate even on a perfectly flat authored stance.
+	const preferredLimbReach = new Float32Array(
+		rig.legs.map( ( leg ) => leg.restSupportReach ),
+	);
 	const activeContacts = new Uint8Array( 4 );
 	const candidateActiveContacts = new Uint8Array( 4 );
 	const wasFootSwinging = new Uint8Array( 4 );
@@ -1094,9 +1179,23 @@ export async function createHybridChameleon( {
 	const rootSuggestion = new THREE.Vector3();
 	const rootOffset = new THREE.Vector3();
 	const rootError = new THREE.Vector3();
+	const rootReachCorrection = new THREE.Vector3();
+	const rootReachShoulder = new THREE.Vector3();
+	const rootReachWrist = new THREE.Vector3();
+	const rootReachTangent = new THREE.Vector3();
+	const rootReachBinormal = new THREE.Vector3();
+	const rootReachContactOffset = new THREE.Vector3();
+	const rootReachVector = new THREE.Vector3();
+	const rootReachNormal = new THREE.Vector3();
 	const supportForce = new THREE.Vector3();
 	const gravityVector = new THREE.Vector3();
 	const desiredMovement = new THREE.Vector3();
+	const transportedMovement = new THREE.Vector3();
+	const surfaceTransportScratch = {
+		axis: new THREE.Vector3(),
+		firstCross: new THREE.Vector3(),
+		secondCross: new THREE.Vector3(),
+	};
 	const tangentVelocity = new THREE.Vector3();
 	const desiredRotation = new THREE.Quaternion();
 	const torqueCurrent = new THREE.Quaternion();
@@ -1569,7 +1668,11 @@ export async function createHybridChameleon( {
 		const rotation = readQuaternion( body.rotation(), tempQuaternion );
 		const preferredSupportNormal = supportReacquireSeconds > 0
 			? reacquireNormal : averageSupportNormal;
-		const movement = probeMovement.copy( command.move ).projectOnPlane( preferredSupportNormal );
+		const movement = probeMovement.set( 0, 0, 0 );
+		if ( command.move.lengthSq() > 1e-8 ) parallelTransportTangent(
+			movement, command.move, command.sourceNormal,
+			preferredSupportNormal, surfaceTransportScratch,
+		);
 		if ( movement.lengthSq() > 1e-8 ) movement.normalize();
 		candidateContactCount = 0;
 		for ( let foot = 0; foot < 4; foot ++ ) {
@@ -1783,6 +1886,69 @@ export async function createHybridChameleon( {
 		}
 		if ( suggestions > 0 ) desiredRoot.multiplyScalar( 1 / suggestions );
 		else desiredRoot.copy( position );
+		// The authored soles are not flat bone sticks: aligning their exported
+		// normals can lower a wrist relative to its patch. Solve the resulting
+		// crouch at the physical root so rear knees keep their flexion without
+		// sacrificing contact. Two fixed, allocation-free projection passes form
+		// a bounded minimax correction across mixed floor/wall/branch supports.
+		rootReachCorrection.set( 0, 0, 0 );
+		for ( let pass = 0; pass < 2; pass ++ ) for ( let foot = 0; foot < 4; foot ++ ) {
+
+			if ( ! activeContacts[ foot ] ) continue;
+			const leg = rig.legs[ foot ];
+			const offset = foot * 3;
+			rootReachNormal.set(
+				currentFootNormals[ offset ],
+				currentFootNormals[ offset + 1 ],
+				currentFootNormals[ offset + 2 ],
+			).normalize();
+			rootReachShoulder.copy( leg.shoulderBodyOffset ).applyQuaternion( rotation )
+				.add( desiredRoot ).add( rootReachCorrection );
+			rootReachTangent.copy( leg.restPalmTangentBody ).applyQuaternion( rotation )
+				.projectOnPlane( rootReachNormal );
+			if ( rootReachTangent.lengthSq() < 1e-8 )
+				rootReachTangent.copy( LOCAL_FORWARD ).applyQuaternion( rotation )
+					.projectOnPlane( rootReachNormal );
+			if ( rootReachTangent.lengthSq() < 1e-8 )
+				rootReachTangent.copy( LOCAL_UP ).applyQuaternion( rotation )
+					.projectOnPlane( rootReachNormal );
+			rootReachTangent.normalize();
+			rootReachBinormal.crossVectors( rootReachNormal, rootReachTangent ).normalize();
+			const contactOffset = leg.solver.contactOffset;
+			rootReachContactOffset.copy( rootReachTangent ).multiplyScalar( contactOffset[ 0 ] )
+				.addScaledVector( rootReachNormal, contactOffset[ 1 ] )
+				.addScaledVector( rootReachBinormal, contactOffset[ 2 ] );
+			rootReachWrist.set(
+				currentFootPositions[ offset ],
+				currentFootPositions[ offset + 1 ],
+				currentFootPositions[ offset + 2 ],
+			).addScaledVector( rootReachNormal, leg.solver.contactClearance )
+				.sub( rootReachContactOffset );
+			rootReachVector.subVectors( rootReachWrist, rootReachShoulder );
+			const normalDistance = rootReachVector.dot( rootReachNormal );
+			if ( normalDistance >= 0 ) continue;
+			const upperLength = leg.solver.lengths[ 1 ];
+			const lowerLength = leg.solver.lengths[ 2 ];
+			const desiredFlexion = Math.max(
+				leg.solver.preset.minimumFlexion,
+				leg.restFlexion * REST_FLEXION_RETENTION,
+			);
+			const desiredReachSquared = upperLength * upperLength + lowerLength * lowerLength
+				+ 2 * upperLength * lowerLength * Math.cos( desiredFlexion );
+			const tangentDistanceSquared = Math.max(
+				0, rootReachVector.lengthSq() - normalDistance * normalDistance,
+			);
+			if ( tangentDistanceSquared >= desiredReachSquared ) continue;
+			const requiredApproach = -Math.sqrt(
+				desiredReachSquared - tangentDistanceSquared,
+			) - normalDistance;
+			if ( requiredApproach > 0 ) rootReachCorrection.addScaledVector(
+				rootReachNormal, -Math.min( requiredApproach, 0.065 ),
+			);
+
+		}
+		clampVector( rootReachCorrection, 0.07 );
+		desiredRoot.add( rootReachCorrection );
 		const totalMass = Math.max( body.mass(), 0.1 );
 		rootError.subVectors( desiredRoot, position );
 		rootForceInput.mass = totalMass;
@@ -1796,7 +1962,12 @@ export async function createHybridChameleon( {
 		// surfaces. Cancelling only the normal component made wall attachment
 		// slide under gravity and eventually fall back to the floor.
 		supportForce.addScaledVector( gravityVector, -totalMass );
-		desiredMovement.copy( command.move ).projectOnPlane( averageSupportNormal );
+		transportedMovement.set( 0, 0, 0 );
+		if ( command.move.lengthSq() > 1e-8 ) parallelTransportTangent(
+			transportedMovement, command.move, command.sourceNormal,
+			averageSupportNormal, surfaceTransportScratch,
+		);
+		desiredMovement.copy( transportedMovement );
 		if ( desiredMovement.lengthSq() > 1e-8 ) {
 
 			desiredMovement.normalize().multiplyScalar(
@@ -1817,7 +1988,7 @@ export async function createHybridChameleon( {
 		appliedForceRecord.z = supportForce.z;
 		body.addForce( appliedForceRecord, true );
 		desiredBodyQuaternion(
-			rotation, averageSupportNormal, command.move, desiredRotation,
+			rotation, averageSupportNormal, transportedMovement, desiredRotation,
 			desiredUp, desiredForward, desiredXAxis, desiredZAxis, desiredMatrix,
 		);
 		const steepness = 1 - Math.abs( averageSupportNormal.dot( WORLD_UP ) );
@@ -2050,7 +2221,9 @@ export async function createHybridChameleon( {
 		const rotation = readQuaternion( body.rotation(), tempQuaternion );
 		tailRootAnchor.copy( tailRootBodyOffset ).applyQuaternion( rotation ).add( position );
 		tailRootDirection.copy( tailRootRestDirection ).applyQuaternion( rotation ).normalize();
-		tailPhysics.setBaseDirection( tailRootDirection, THREE.MathUtils.degToRad( 72 ) );
+		// tail_01 is the rigid sacral collar. The first physical articulation is
+		// tail_02, outside the rump, so large tail motion cannot drag the buttocks.
+		tailPhysics.setBaseDirection( tailRootDirection, 0 );
 		tailPhysics.gravityX = world.gravity.x * settings.tailGravity;
 		tailPhysics.gravityY = world.gravity.y * settings.tailGravity;
 		tailPhysics.gravityZ = world.gravity.z * settings.tailGravity;
@@ -2289,6 +2462,7 @@ export async function createHybridChameleon( {
 		landingCompression = 0;
 		wasSupportReleased = false;
 		command.release = false;
+		command.sourceNormal.copy( WORLD_UP );
 		reacquireSurface = null;
 		reacquireCollider = null;
 		body.setTranslation( vectorRecord( nextSpawn ), true );
@@ -2400,6 +2574,13 @@ export async function createHybridChameleon( {
 		setCommand( next ) {
 
 			if ( next.move ) command.move.copy( next.move );
+			if ( next.sourceNormal ) {
+
+				command.sourceNormal.copy( next.sourceNormal );
+				if ( command.sourceNormal.lengthSq() < 1e-8 ) command.sourceNormal.copy( WORLD_UP );
+				else command.sourceNormal.normalize();
+
+			}
 			if ( next.sprint !== undefined ) command.sprint = !! next.sprint;
 			if ( next.release !== undefined ) command.release = !! next.release;
 			if ( next.fullRagdoll !== undefined ) command.fullRagdoll = !! next.fullRagdoll;

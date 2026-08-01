@@ -120,6 +120,8 @@ export class PassiveTailPhysics {
 		this.baseConeCos = -1;
 		this.baseConeSin = 0;
 		this.baseConeEnabled = false;
+		this.pinBaseSegment = options.pinBaseSegment === true;
+		this.kinematicNodeCount = this.pinBaseSegment ? 2 : 1;
 		this._sleeping = false;
 		this._sleepCandidateSteps = 0;
 		this._sleepCount = 0;
@@ -145,6 +147,7 @@ export class PassiveTailPhysics {
 		this.bendLambdas = new Float64Array( PASSIVE_TAIL_BEND_CONSTRAINT_COUNT );
 		this.inverseMasses.fill( 1 );
 		this.inverseMasses[ 0 ] = 0;
+		if ( this.pinBaseSegment ) this.inverseMasses[ 1 ] = 0;
 		fillPositiveArray( 'radii', this.radii, options.radii ?? options.radius, 0.014 );
 		this._initializeRestShape( options );
 
@@ -172,6 +175,7 @@ export class PassiveTailPhysics {
 		this.view = Object.seal( {
 			nodeCount: PASSIVE_TAIL_NODE_COUNT,
 			segmentCount: PASSIVE_TAIL_SEGMENT_COUNT,
+			kinematicNodeCount: this.kinematicNodeCount,
 			positions: this.positions,
 			previousPositions: this.renderPreviousPositions,
 			interpolatedPositions: this.interpolatedPositions,
@@ -385,6 +389,16 @@ export class PassiveTailPhysics {
 		this.previousPositions[ 0 ] = this.rootX;
 		this.previousPositions[ 1 ] = this.rootY;
 		this.previousPositions[ 2 ] = this.rootZ;
+		if ( this.pinBaseSegment ) {
+
+			this.positions[ 3 ] = this.rootX + this.baseDirectionX * this.segmentLengths[ 0 ];
+			this.positions[ 4 ] = this.rootY + this.baseDirectionY * this.segmentLengths[ 0 ];
+			this.positions[ 5 ] = this.rootZ + this.baseDirectionZ * this.segmentLengths[ 0 ];
+			this.previousPositions[ 3 ] = this.positions[ 3 ];
+			this.previousPositions[ 4 ] = this.positions[ 4 ];
+			this.previousPositions[ 5 ] = this.positions[ 5 ];
+
+		}
 
 	}
 
@@ -516,7 +530,7 @@ export class PassiveTailPhysics {
 		rotationY *= inverseRotationAxisLength;
 		rotationZ *= inverseRotationAxisLength;
 		const oneMinusCosine = 1 - rotationCosine;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			for ( let state = 0; state < 2; state ++ ) {
@@ -577,7 +591,7 @@ export class PassiveTailPhysics {
 		const point = this._collisionPoint;
 		const projected = this._projectedPoint;
 		const normal = this._projectedNormal;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			point.x = this.positions[ offset ];
@@ -641,7 +655,7 @@ export class PassiveTailPhysics {
 	_limitVelocitiesAndRecover() {
 
 		const maximumDisplacement = this.maxSpeed * this.fixedDt;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			if ( ! Number.isFinite( this.positions[ offset ] + this.positions[ offset + 1 ]
@@ -683,7 +697,7 @@ export class PassiveTailPhysics {
 		let maximumSpeed = 0;
 		let maximumDisplacement = 0;
 		const inverseDt = 1 / this.fixedDt;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			maximumSpeed = Math.max( maximumSpeed, Math.hypot(
@@ -745,7 +759,7 @@ export class PassiveTailPhysics {
 		}
 		const velocityRetention = Math.exp( -this.damping * this.fixedDt );
 		const gravityScale = this.fixedDt * this.fixedDt;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			const x = this.positions[ offset ];
@@ -805,6 +819,7 @@ export class PassiveTailPhysics {
 		this._pinRoot();
 		this._solveBaseCone();
 		this._solveBaseChainLengths();
+		this._pinRoot();
 		this._limitVelocitiesAndRecover();
 		this._updateSleepState();
 		this._totalSteps ++;
@@ -847,7 +862,7 @@ export class PassiveTailPhysics {
 
 	applyImpulse( nodeIndex, impulse ) {
 
-		if ( ! Number.isInteger( nodeIndex ) || nodeIndex <= 0
+		if ( ! Number.isInteger( nodeIndex ) || nodeIndex < this.kinematicNodeCount
 			|| nodeIndex >= PASSIVE_TAIL_NODE_COUNT )
 			throw new RangeError( 'nodeIndex must identify a passive node' );
 		const impulseX = vectorComponent( 'impulse', impulse, 'x' );
@@ -885,7 +900,7 @@ export class PassiveTailPhysics {
 
 		const inverseDt = 1 / this.fixedDt;
 		let energy = 0;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			const vx = ( this.positions[ offset ] - this.previousPositions[ offset ] ) * inverseDt;
@@ -901,7 +916,8 @@ export class PassiveTailPhysics {
 
 	maximumKineticEnergy() {
 
-		return 0.5 * ( PASSIVE_TAIL_NODE_COUNT - 1 ) * this.maxSpeed * this.maxSpeed;
+		return 0.5 * ( PASSIVE_TAIL_NODE_COUNT - this.kinematicNodeCount )
+			* this.maxSpeed * this.maxSpeed;
 
 	}
 
@@ -909,7 +925,7 @@ export class PassiveTailPhysics {
 
 		const inverseDt = 1 / this.fixedDt;
 		let maximum = 0;
-		for ( let node = 1; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 			const offset = node * 3;
 			maximum = Math.max( maximum, Math.hypot(

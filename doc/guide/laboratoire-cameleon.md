@@ -50,7 +50,11 @@ sans interface.
 - `R` : remettre l’animal dans sa pose de départ.
 
 Le déplacement suit le support courant. Sur un mur ou un plan incliné, avancer
-ne signifie donc pas revenir horizontalement vers le sol.
+ne signifie donc pas revenir horizontalement vers le sol. Le cap est transporté
+continûment le long des courbes : une branche cylindrique ou un raccord sol/mur
+ne peut plus transformer « avancer » en dérive latérale. Même si les appuis
+découvrent le mur pendant le sous-pas courant, la commande déjà émise est
+transportée vers ce nouveau support au lieu d’être rabattue de côté.
 
 Le saut suit lui aussi le support : depuis un mur ou un cylindre, il sépare
 d’abord le corps de la surface puis le projette vers le haut. Les anciennes
@@ -69,11 +73,14 @@ ou le genou et anime bassin, thorax, cou et tête ; une IK à angles limités fe
 ensuite précisément le contact du pied. Les appuis peuvent avoir des normales
 différentes, par exemple dans un angle entre le sol et un mur.
 
-Le talon, la paume et les deux groupes de doigts forment maintenant une seule
+Le squelette de référence reprend la flexion visible du modèle : épaules,
+hanches, coudes et genoux sont placés dans les volumes anatomiques correspondants
+et non sur une hypothétique patte droite. Le talon, la paume et les deux groupes de doigts forment maintenant une seule
 semelle exportée avec le modèle. Une main ou un pied doit donc reposer à plat :
 le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la
 tête conservent de petits mouvements de regard au repos, sans provoquer de pas
-ni de vibration des appuis.
+ni de vibration des appuis. Quand le bassin ou le thorax oscillent, le repère de
+marche reste celui du corps entier et non l’axe local incliné d’un os de colonne.
 
 ### Physique libre
 
@@ -165,8 +172,9 @@ impossible à agripper.
 - **Collision** agrandit ou réduit le rayon de contact des treize nœuds ;
 - **Gravité queue** dose son poids sans modifier la gravité du corps.
 
-La racine de la queue suit le bassin ; ses douze segments restants sont passifs.
-Ils conservent leur longueur, répondent à l’inertie et sont projetés hors du sol,
+Le court collet de la queue suit rigidement le bassin jusqu’après la croupe ; la
+partie passive commence au second os. Les onze segments dynamiques et leur
+extrémité conservent leur longueur, répondent à l’inertie et sont projetés hors du sol,
 des murs, des rochers et des troncs. La queue n’est pas préhensile dans ce
 prototype. Quand elle est réellement au repos, elle passe en sommeil : sa pose
 reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un nouveau

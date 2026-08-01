@@ -210,6 +210,66 @@ function rotateAroundAxis( target, vector, axis, angle ) {
 
 }
 
+export function parallelTransportTangent( target, vector, fromNormal, toNormal, scratch ) {
+
+	const axis = scratch.axis;
+	const firstCross = scratch.firstCross;
+	const secondCross = scratch.secondCross;
+	cross( axis, fromNormal, toNormal );
+	const axisLengthSquared = lengthSquared( axis );
+	const cosine = Math.max( -1, Math.min( 1,
+		fromNormal.x * toNormal.x + fromNormal.y * toNormal.y + fromNormal.z * toNormal.z,
+	) );
+	if ( axisLengthSquared > EPSILON && cosine > -1 + 1e-7 ) {
+
+		cross( firstCross, axis, vector );
+		cross( secondCross, axis, firstCross );
+		const inverse = 1 / ( 1 + cosine );
+		target.x = vector.x + firstCross.x + secondCross.x * inverse;
+		target.y = vector.y + firstCross.y + secondCross.y * inverse;
+		target.z = vector.z + firstCross.z + secondCross.z * inverse;
+
+	} else setVector( target, vector );
+	projectOnPlane( target, target, toNormal );
+	if ( lengthSquared( target ) <= EPSILON ) orthogonal( target, toNormal );
+	else normalize( target );
+	return target;
+
+}
+
+function horizontalHeading( target, cameraForward, worldUp, fallback ) {
+
+	projectOnPlane( target, cameraForward, worldUp );
+	if ( lengthSquared( target ) <= 1e-7 ) setVector( target, fallback );
+	projectOnPlane( target, target, worldUp );
+	if ( lengthSquared( target ) <= EPSILON ) orthogonal( target, worldUp );
+	else normalize( target );
+	return target;
+
+}
+
+function applyHeadingDelta( target, previousCamera, currentCamera, supportNormal, worldUp, scratch ) {
+
+	const yawCross = scratch.yawCross;
+	cross( yawCross, previousCamera, currentCamera );
+	const sine = yawCross.x * worldUp.x + yawCross.y * worldUp.y + yawCross.z * worldUp.z;
+	const cosine = Math.max( -1, Math.min( 1,
+		previousCamera.x * currentCamera.x
+		+ previousCamera.y * currentCamera.y + previousCamera.z * currentCamera.z,
+	) );
+	const supportCross = scratch.supportCross;
+	cross( supportCross, supportNormal, target );
+	const x = target.x * cosine + supportCross.x * sine;
+	const y = target.y * cosine + supportCross.y * sine;
+	const z = target.z * cosine + supportCross.z * sine;
+	target.x = x;
+	target.y = y;
+	target.z = z;
+	projectOnPlane( target, target, supportNormal );
+	return normalize( target );
+
+}
+
 /** Allocation-free fixed-step intent/orientation model. */
 export class PlatformerControlModel {
 
@@ -236,27 +296,27 @@ export class PlatformerControlModel {
 		this.acceleration = { x: 0, y: 0, z: 0 };
 		this._axis = { x: 0, y: 0 };
 		this._normal = { x: 0, y: 1, z: 0 };
+		this._worldUp = { x: 0, y: 1, z: 0 };
+		this._previousNormal = { x: 0, y: 1, z: 0 };
+		this.surfaceForward = { x: 0, y: 0, z: -1 };
+		this._cameraHeading = { x: 0, y: 0, z: -1 };
+		this._cameraCandidate = { x: 0, y: 0, z: -1 };
+		this._cameraHeadingValid = false;
 		this._from = { x: 0, y: 0, z: - 1 };
 		this._cross = { x: 0, y: 0, z: 0 };
+		this._surfaceRight = { x: 1, y: 0, z: 0 };
+		this._transportScratch = {
+			axis: { x: 0, y: 0, z: 0 },
+			firstCross: { x: 0, y: 0, z: 0 },
+			secondCross: { x: 0, y: 0, z: 0 },
+			yawCross: { x: 0, y: 0, z: 0 },
+			supportCross: { x: 0, y: 0, z: 0 },
+		};
 		this._tangentVelocity = { x: 0, y: 0, z: 0 };
-		this._directionScratch = {
-			axis: { x: 0, y: 0 },
-			up: { x: 0, y: 1, z: 0 },
-			normal: { x: 0, y: 1, z: 0 },
-			camera: { x: 0, y: 0, z: - 1 },
-			forward: { x: 0, y: 0, z: - 1 },
-			right: { x: 1, y: 0, z: 0 },
-			intent: { x: 0, y: 0, z: 0 },
-		};
-		this._directionOptions = {
-			worldUp: DEFAULT_UP,
-			supportNormal: this._normal,
-			fallbackFacing: this.facing,
-			scratch: this._directionScratch,
-		};
 		this.view = {
 			direction: this.direction,
 			facing: this.facing,
+			supportNormal: this._normal,
 			desiredVelocity: this.desiredVelocity,
 			acceleration: this.acceleration,
 			magnitude: 0,
@@ -271,9 +331,15 @@ export class PlatformerControlModel {
 
 		setVector( this._normal, supportNormal, DEFAULT_UP );
 		normalize( this._normal, DEFAULT_UP );
+		setVector( this._previousNormal, this._normal );
 		projectOnPlane( this.facing, facing, this._normal );
 		if ( lengthSquared( this.facing ) <= EPSILON ) orthogonal( this.facing, this._normal );
 		else normalize( this.facing );
+		setVector( this.surfaceForward, this.facing );
+		projectOnPlane( this._cameraHeading, facing, DEFAULT_UP );
+		if ( lengthSquared( this._cameraHeading ) <= EPSILON ) setVector( this._cameraHeading, DEFAULT_FORWARD );
+		else normalize( this._cameraHeading );
+		this._cameraHeadingValid = false;
 		this.direction.x = this.direction.y = this.direction.z = 0;
 		this.desiredVelocity.x = this.desiredVelocity.y = this.desiredVelocity.z = 0;
 		this.acceleration.x = this.acceleration.y = this.acceleration.z = 0;
@@ -298,19 +364,52 @@ export class PlatformerControlModel {
 
 		dt = Math.max( 0, Math.min( 0.1, finiteOr( dt, 0 ) ) );
 		const magnitude = clampAxes( axes, this._axis );
-		setVector( this._normal, supported ? supportNormal : worldUp, DEFAULT_UP );
-		normalize( this._normal, DEFAULT_UP );
-		this._directionOptions.worldUp = worldUp;
-		this._directionOptions.supportNormal = this._normal;
-		this._directionOptions.fallbackFacing = facing;
-		cameraRelativePlatformerDirection(
-			this._axis, cameraForward, this._directionOptions, this.direction,
+		const normalizedWorldUp = normalize(
+			setVector( this._worldUp, worldUp, DEFAULT_UP ), DEFAULT_UP,
 		);
+		setVector( this._normal, supported ? supportNormal : normalizedWorldUp, DEFAULT_UP );
+		normalize( this._normal, DEFAULT_UP );
+		parallelTransportTangent(
+			this._from, facing,
+			this._previousNormal, this._normal, this._transportScratch,
+		);
+		horizontalHeading(
+			this._cameraCandidate, cameraForward, normalizedWorldUp, this._cameraHeading,
+		);
+		if ( this._cameraHeadingValid ) {
 
-		projectOnPlane( this._from, facing, this._normal );
-		if ( lengthSquared( this._from ) <= EPSILON ) setVector( this._from, this.facing );
-		if ( lengthSquared( this._from ) <= EPSILON ) orthogonal( this._from, this._normal );
-		else normalize( this._from );
+			parallelTransportTangent(
+				this.surfaceForward, this.surfaceForward,
+				this._previousNormal, this._normal, this._transportScratch,
+			);
+			applyHeadingDelta(
+				this.surfaceForward, this._cameraHeading, this._cameraCandidate,
+				this._normal, normalizedWorldUp, this._transportScratch,
+			);
+
+		} else {
+
+			// Lift the initial camera yaw from the horizontal plane onto the
+			// support with the same minimal-rotation transport used afterwards.
+			// Unlike projection, this is continuous when the camera faces a wall.
+			parallelTransportTangent(
+				this.surfaceForward, this._cameraCandidate,
+				normalizedWorldUp, this._normal, this._transportScratch,
+			);
+
+		}
+		setVector( this._cameraHeading, this._cameraCandidate );
+		this._cameraHeadingValid = true;
+		setVector( this._previousNormal, this._normal );
+		cross( this._surfaceRight, this.surfaceForward, this._normal );
+		normalize( this._surfaceRight );
+		this.direction.x = this.surfaceForward.x * this._axis.y + this._surfaceRight.x * this._axis.x;
+		this.direction.y = this.surfaceForward.y * this._axis.y + this._surfaceRight.y * this._axis.x;
+		this.direction.z = this.surfaceForward.z * this._axis.y + this._surfaceRight.z * this._axis.x;
+		if ( magnitude > EPSILON ) normalize( this.direction );
+		this.direction.x *= magnitude;
+		this.direction.y *= magnitude;
+		this.direction.z *= magnitude;
 		let turnDelta = 0;
 		if ( magnitude > EPSILON ) {
 

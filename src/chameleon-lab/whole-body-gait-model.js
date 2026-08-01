@@ -143,7 +143,10 @@ export function writeWholeBodyTarget( {
 	target[ WHOLE_BODY_POSE.HEAD_YAW ] = diagonal * 0.025 * body + idleHeadYaw;
 	target[ WHOLE_BODY_POSE.HEAD_PITCH ] = swingEnvelope * 0.012 * body + idleHeadPitch;
 	target[ WHOLE_BODY_POSE.SUPPORT_SHIFT ] = -diagonal * 0.012 * body;
-	target[ WHOLE_BODY_POSE.MOTION_WEIGHT ] = Math.max( moving, idle * 0.35 );
+	// Individual locomotor lanes are already attenuated by `moving`, while the
+	// idle neck/head lanes are deliberately subtle.  Keeping a second 0.35
+	// multiplier here made the cervical joints nearly static in the final rig.
+	target[ WHOLE_BODY_POSE.MOTION_WEIGHT ] = 1;
 	return target;
 
 }

@@ -603,3 +603,37 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-013 sleep and wake remain fixed-step invariant
 	assertBuffersFinite( fast );
 
 } );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 sacral collar stays rigid and dynamics begin at tail two', () => {
+
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0.2, y: 0.5, z: -0.1 },
+		segmentLength: 0.08,
+		gravity: { x: 0, y: -9.81, z: 0 },
+		pinBaseSegment: true,
+		baseDirection: { x: 1, y: 0, z: 0 },
+	} );
+	assert.equal( tail.getView().kinematicNodeCount, 2 );
+	assert.equal( tail.inverseMasses[ 0 ], 0 );
+	assert.equal( tail.inverseMasses[ 1 ], 0 );
+	assert.throws( () => tail.applyImpulse( 1, { x: 1, y: 0, z: 0 } ), /passive node/u );
+	for ( let step = 0; step < 360; step ++ ) {
+
+		const angle = step * 0.002;
+		const root = { x: 0.2 + step * 0.0001, y: 0.5, z: -0.1 };
+		const direction = { x: Math.cos( angle ), y: 0, z: Math.sin( angle ) };
+		tail.setBaseDirection( direction, 0 );
+		tail.stepFixed( root );
+		assert.ok( Math.abs( tail.positions[ 3 ] - ( root.x + direction.x * 0.08 ) ) < 2e-6 );
+		assert.ok( Math.abs( tail.positions[ 4 ] - root.y ) < 2e-6 );
+		assert.ok( Math.abs( tail.positions[ 5 ] - ( root.z + direction.z * 0.08 ) ) < 2e-6 );
+		assert.deepEqual(
+			Array.from( tail.previousPositions.slice( 3, 6 ) ),
+			Array.from( tail.positions.slice( 3, 6 ) ),
+		);
+
+	}
+	assert.ok( tail.maxSegmentError() < 2e-4 );
+	assertBuffersFinite( tail );
+
+} );

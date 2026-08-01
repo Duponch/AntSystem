@@ -152,6 +152,11 @@ test( 'CHAMELEON-LAB-PLATFORMER-INTEGRATION-003 all platformer body forces run a
 		'platformer control direction must feed the hybrid command',
 	);
 	assert.match(
+		fixed,
+		new RegExp( `sourceNormal:\\s*${ escapeRegExp( controlView ) }\\.supportNormal`, 'u' ),
+		'the hybrid command must retain the support frame that produced its direction',
+	);
+	assert.match(
 		fixed.slice( hybridIndex ),
 		new RegExp( `${ escapeRegExp( jumpView ) }\\.jumped[\\s\\S]*?applyImpulse`, 'u' ),
 	);

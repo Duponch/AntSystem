@@ -295,6 +295,7 @@ async function main() {
 				ragdoll.setLandingCompression( platformerJumpView.landingCompression );
 				ragdoll.setCommand( {
 					move,
+					sourceNormal: platformerControlView.supportNormal,
 					sprint: input.sprint,
 					release: platformerJumpView.releaseSupport,
 					fullRagdoll: state.fullRagdoll,
