@@ -542,7 +542,10 @@ test( 'CHAMELEON-LAB-RAGDOLL-009 passive original tail settles on the ground wit
 	chameleon.syncVisual( 1 );
 	const positions = chameleon.tailPhysics.getView().positions;
 	const radii = chameleon.tailPhysics.getView().radii;
-	for ( let node = 1; node < chameleon.tail.nodeCount; node ++ ) {
+	// The first four nodes belong to the rigid sacral bridge inside the body
+	// envelope. Ground projection starts at the first genuinely passive sample.
+	for ( let node = chameleon.tailPhysics.kinematicNodeCount;
+		node < chameleon.tail.nodeCount; node ++ ) {
 
 		assert.ok(
 			positions[ node * 3 + 1 ] >= radii[ node ] * chameleon.settings.tailCollisionScale - 0.006,
@@ -609,8 +612,9 @@ test( 'CHAMELEON-LAB-RAGDOLL-010 exact asymmetric soles close on their support a
 				`${ bone.name } diverges from its asymmetric authored axis` );
 			const soleNormal = leg.contactNormalLocals.get( bone ).clone()
 				.applyQuaternion( bone.getWorldQuaternion( new THREE.Quaternion() ) );
-			assert.ok( soleNormal.dot( normal ) < -0.88,
-				`${ bone.name } sole does not face its support` );
+			const soleAlignment = soleNormal.dot( normal );
+			assert.ok( soleAlignment < -0.88,
+				`${ bone.name } sole does not face its support (${ soleAlignment })` );
 
 		}
 		const patchCentre = leg.palm.localToWorld( leg.contactPatchLocal.clone() );
@@ -651,8 +655,29 @@ test( 'CHAMELEON-LAB-RAGDOLL-011 held limbs become passive articulated chains th
 	fixture.chameleon.pelvis.body.applyTorqueImpulse( { x: 0.06, y: -0.08, z: 0.07 }, true );
 	runFrames( fixture, 120, 0.55 );
 	assert.ok( fixture.chameleon.passiveLimbPhysics.stats.steps >= 60 );
+	const passive = fixture.chameleon.passiveLimbPhysics;
+	let worstSegment = '';
+	let worstError = -1;
+	for ( let limb = 0; limb < 4; limb ++ ) for ( let segment = 0; segment < 4; segment ++ ) {
+
+		const first = ( limb * 5 + segment ) * 3;
+		const second = first + 3;
+		const length = Math.hypot(
+			passive.positions[ second ] - passive.positions[ first ],
+			passive.positions[ second + 1 ] - passive.positions[ first + 1 ],
+			passive.positions[ second + 2 ] - passive.positions[ first + 2 ],
+		);
+		const error = Math.abs( length - passive.segmentLengths[ limb * 4 + segment ] );
+		if ( error > worstError ) {
+
+			worstError = error;
+			worstSegment = `${ limb }:${ segment } (${ length } vs ${ passive.segmentLengths[ limb * 4 + segment ] })`;
+
+		}
+
+	}
 	assert.ok( fixture.chameleon.passiveLimbPhysics.maxSegmentError() < 0.008,
-		`passive limb error ${ fixture.chameleon.passiveLimbPhysics.maxSegmentError() }` );
+		`passive limb error ${ fixture.chameleon.passiveLimbPhysics.maxSegmentError() }; worst=${ worstSegment }` );
 	let passiveBones = 0;
 	let boneIndex = 0;
 	for ( const leg of fixture.chameleon.rig.legs ) for ( const bone of leg.passiveBones ) {

@@ -34,9 +34,14 @@ MAPPING_TOLERANCE = 1e-6
 TAIL_BONE_COUNT = 12
 TAIL_CENTERLINE_POINT_COUNT = TAIL_BONE_COUNT + 1
 TAIL_BONE_NAMES = tuple(f"tail_{index:02d}" for index in range(1, TAIL_BONE_COUNT + 1))
-TAIL_ROOT_BLEND_GEODESIC_FRACTION = 0.12
-TAIL_ROOT_BODY_BLEND_MAXIMUM = 0.72
-ANATOMY_CONTRACT_VERSION = "2.0.0"
+TAIL_ROOT_BLEND_GEODESIC_FRACTION = 0.28
+TAIL_ROOT_BODY_BLEND_MAXIMUM = 1.0
+TAIL_STATIC_BONE_COUNT = 3
+TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION = 0.25
+TAIL_DYNAMIC_WEIGHT_FEATHER_FRACTION = 0.08
+TAIL_BODY_RIGID_DISTANCE = 0.06
+TAIL_BODY_GUARD_DISTANCE = 0.12
+ANATOMY_CONTRACT_VERSION = "2.1.0"
 LIMB_ORDER = ("front.L", "front.R", "hind.L", "hind.R")
 LIMB_SURFACE_EXPANSION = {"front": 0.20, "hind": 0.22}
 LIMB_ENVELOPE_RADIUS = {
@@ -348,26 +353,26 @@ def fit_proximal_anatomy(
         "front.L": (
             Vector((-0.135, 0.060, 0.125)),
             Vector((-0.175, 0.140, 0.095)),
-            Vector((-0.085, 0.225, 0.015)),
-            Vector((-0.135, 0.285, -0.175)),
+            Vector((-0.110, 0.172, 0.015)),
+            Vector((-0.142, 0.195, -0.175)),
         ),
         "front.R": (
             Vector((-0.135, -0.060, 0.125)),
             Vector((-0.175, -0.140, 0.095)),
-            Vector((-0.085, -0.225, 0.015)),
-            Vector((-0.135, -0.285, -0.175)),
+            Vector((-0.110, -0.172, 0.015)),
+            Vector((-0.140, -0.195, -0.175)),
         ),
         "hind.L": (
             Vector((0.105, 0.060, 0.120)),
-            Vector((0.145, 0.145, 0.130)),
-            Vector((0.005, 0.225, 0.045)),
-            Vector((0.070, 0.305, -0.035)),
+            Vector((0.135, 0.145, 0.125)),
+            Vector((0.030, 0.225, 0.075)),
+            Vector((0.075, 0.270, -0.035)),
         ),
         "hind.R": (
             Vector((0.105, -0.060, 0.120)),
-            Vector((0.145, -0.145, 0.130)),
-            Vector((0.005, -0.225, 0.045)),
-            Vector((0.070, -0.305, -0.035)),
+            Vector((0.135, -0.145, 0.125)),
+            Vector((0.030, -0.225, 0.075)),
+            Vector((0.075, -0.270, -0.035)),
         ),
     }
     if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
@@ -463,6 +468,31 @@ def fit_distal_limb_anatomy(
     derived from deterministic extrema of the exact rest surface, while every
     proximal joint remains untouched.
     """
+    # Bone endpoints are medial, not surface extrema.  Keeping the deform axis
+    # a few millimetres under the closed skin prevents a straight digit bone
+    # from cutting across the air beside a curved zygodactyl branch.
+    medial_axes = {
+        "front.L": (
+            Vector((-0.144, 0.210, -0.170)),
+            Vector((-0.204, 0.236, -0.248)),
+            Vector((-0.138, 0.310, -0.206)),
+        ),
+        "front.R": (
+            Vector((-0.138, -0.210, -0.170)),
+            Vector((-0.194, -0.244, -0.238)),
+            Vector((-0.130, -0.310, -0.210)),
+        ),
+        "hind.L": (
+            Vector((0.068, 0.310, -0.076)),
+            Vector((0.004, 0.330, -0.134)),
+            Vector((0.068, 0.348, -0.098)),
+        ),
+        "hind.R": (
+            Vector((0.080, -0.310, -0.072)),
+            Vector((0.016, -0.322, -0.122)),
+            Vector((0.070, -0.348, -0.098)),
+        ),
+    }
     fits: dict[str, dict[str, object]] = {}
     unchanged = {
         bone.name: (bone.head_local.copy(), bone.tail_local.copy())
@@ -518,6 +548,8 @@ def fit_distal_limb_anatomy(
         require(len(outer_shell) >= 4, f"{limb_key} outer digit tip is undersampled")
         inner_tip = sum(inner_shell, Vector()) / len(inner_shell)
         outer_tip = sum(outer_shell, Vector()) / len(outer_shell)
+        if limb_key in medial_axes:
+            root, inner_tip, outer_tip = medial_axes[limb_key]
         require((inner_tip - root).length >= 0.035,
                 f"{limb_key} inner digit is anatomically degenerate")
         require((outer_tip - root).length >= 0.018,
@@ -672,7 +704,8 @@ def bind_original_tail_smoothly(
     interface_owner: list[int],
     interface_vertices: set[int],
     maximum_distance: float,
-) -> int:
+    mapped_source_indices: set[int],
+) -> dict[str, int]:
     """Bind the exact curled tail while keeping its body junction strain-safe.
 
     A pure tail-chain assignment makes the first tail ring move almost wholly
@@ -682,11 +715,12 @@ def bind_original_tail_smoothly(
     large tail angles.  Blender's preserve-volume preview cannot fix that in
     glTF because dual-quaternion skinning is not exported.
 
-    The proximal geodesic band therefore inherits the nearest interface's
-    existing body profile and feathers it into the cubic tail B-spline.  Rest
-    positions, polygons and the original curled silhouette remain bit-exact;
-    only the deformation weights change, with the glTF four-influence budget
-    enforced after the merge.
+    The proximal geodesic band and a narrow body-side guard both converge to
+    the pelvis transform at the welded interface.  The first three tail bones
+    remain a rigid sacral collar; dynamic weights are only feathered in after
+    the visible rump.  Rest positions, polygons and the original curled
+    silhouette remain bit-exact; only deformation weights change, with the
+    glTF four-influence budget enforced after the merge.
     """
     tail_groups = []
     for name in TAIL_BONE_NAMES:
@@ -694,34 +728,111 @@ def bind_original_tail_smoothly(
         require(group is not None, f"tail vertex group {name} is missing")
         tail_groups.append(group)
 
-    interface_profiles: dict[int, dict[str, float]] = {
-        vertex_index: {} for vertex_index in interface_vertices
-    }
+    pelvis_group = groups_by_name.get("pelvis")
+    require(pelvis_group is not None, "pelvis vertex group is missing")
+    body_interface_vertices: set[int] = set()
     for edge in exact_object.data.edges:
         first, second = edge.vertices
         if first in interface_vertices and second not in tail_indices:
-            tail_vertex, body_vertex = first, second
+            body_interface_vertices.add(second)
         elif second in interface_vertices and first not in tail_indices:
-            tail_vertex, body_vertex = second, first
-        else:
-            continue
-        profile = interface_profiles[tail_vertex]
-        for membership in exact_object.data.vertices[body_vertex].groups:
-            if membership.weight <= 1e-9:
-                continue
-            name = exact_object.vertex_groups[membership.group].name
-            profile[name] = profile.get(name, 0.0) + membership.weight
+            body_interface_vertices.add(first)
+    require(body_interface_vertices, "tail interface has no body-side vertices")
 
-    for vertex_index, profile in interface_profiles.items():
-        total = sum(profile.values())
-        require(total > 1e-9, f"tail interface vertex {vertex_index} has no body profile")
-        for name in tuple(profile):
-            profile[name] /= total
+    adjacency: list[list[tuple[int, float]]] = [[] for _ in exact_object.data.vertices]
+    for edge in exact_object.data.edges:
+        first, second = edge.vertices
+        length = (exact_object.data.vertices[first].co - exact_object.data.vertices[second].co).length
+        adjacency[first].append((second, length))
+        adjacency[second].append((first, length))
+
+    body_distances = [math.inf] * len(exact_object.data.vertices)
+    pending: list[tuple[float, int]] = []
+    for vertex_index in body_interface_vertices:
+        body_distances[vertex_index] = 0.0
+        heapq.heappush(pending, (0.0, vertex_index))
+    while pending:
+        distance, current = heapq.heappop(pending)
+        if distance != body_distances[current] or distance >= TAIL_BODY_GUARD_DISTANCE:
+            continue
+        for neighbour, edge_length in adjacency[current]:
+            if neighbour not in mapped_source_indices:
+                continue
+            candidate = distance + edge_length
+            if candidate < body_distances[neighbour] and candidate <= TAIL_BODY_GUARD_DISTANCE:
+                body_distances[neighbour] = candidate
+                heapq.heappush(pending, (candidate, neighbour))
+
+    # The legacy body template still contains tail-chain weights around the
+    # rump.  A dynamic tail bone must never deform any of the 17,796 body
+    # vertices: remove those stale memberships globally, then normalize the
+    # retained torso/limb profile before authoring the local sacral guard.
+    for vertex_index in sorted(mapped_source_indices):
+        vertex = exact_object.data.vertices[vertex_index]
+        retained = {
+            exact_object.vertex_groups[item.group].name: item.weight
+            for item in vertex.groups
+            if item.weight > 1e-9
+            and exact_object.vertex_groups[item.group].name not in TAIL_BONE_NAMES
+        }
+        total = sum(retained.values())
+        require(total > 1e-9,
+                f"body vertex {vertex_index} only inherited tail-chain weights")
+        for group_index in [item.group for item in vertex.groups]:
+            exact_object.vertex_groups[group_index].remove([vertex_index])
+        for name, weight in retained.items():
+            groups_by_name[name].add([vertex_index], weight / total, "REPLACE")
+
+    body_guard_vertices = 0
+    for vertex_index in sorted(mapped_source_indices):
+        distance = body_distances[vertex_index]
+        if not math.isfinite(distance):
+            continue
+        vertex = exact_object.data.vertices[vertex_index]
+        original = {
+            exact_object.vertex_groups[item.group].name: item.weight
+            for item in vertex.groups if item.weight > 1e-9
+        }
+        coordinate = max(0.0, min(1.0, 1.0 - distance / TAIL_BODY_GUARD_DISTANCE))
+        strength = coordinate * coordinate * (3.0 - 2.0 * coordinate)
+        combined = {
+            name: weight * (1.0 - strength)
+            for name, weight in original.items()
+        }
+        combined["pelvis"] = combined.get("pelvis", 0.0) + strength
+        strongest = sorted(combined.items(), key=lambda item: (-item[1], item[0]))[:4]
+        total = sum(weight for _, weight in strongest)
+        require(total > 1e-9, f"body guard vertex {vertex_index} lost all influences")
+        for group_index in [item.group for item in vertex.groups]:
+            exact_object.vertex_groups[group_index].remove([vertex_index])
+        for name, weight in strongest:
+            if weight > 1e-9:
+                groups_by_name[name].add([vertex_index], weight / total, "REPLACE")
+        body_guard_vertices += 1
 
     blended_vertices = 0
     for vertex_index in sorted(tail_indices):
         parameter = distances[vertex_index] / maximum_distance
         spline_weights = cubic_bspline_tail_weights(parameter)
+        dynamic_coordinate = max(0.0, min(
+            1.0,
+            (parameter - TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION)
+            / TAIL_DYNAMIC_WEIGHT_FEATHER_FRACTION,
+        ))
+        dynamic_fade = dynamic_coordinate * dynamic_coordinate * (3.0 - 2.0 * dynamic_coordinate)
+        protected_weights = [
+            (bone_index, weight * (
+                1.0 if bone_index < TAIL_STATIC_BONE_COUNT else dynamic_fade
+            ))
+            for bone_index, weight in spline_weights
+        ]
+        protected_total = sum(weight for _, weight in protected_weights)
+        require(protected_total > 1e-9,
+                f"tail vertex {vertex_index} lost its protected spline support")
+        spline_weights = [
+            (bone_index, weight / protected_total)
+            for bone_index, weight in protected_weights if weight > 1e-9
+        ]
         fade_coordinate = max(
             0.0,
             min(1.0, 1.0 - parameter / TAIL_ROOT_BLEND_GEODESIC_FRACTION),
@@ -734,9 +845,7 @@ def bind_original_tail_smoothly(
             contributions[name] = contributions.get(name, 0.0) + weight * (1.0 - body_blend)
         if body_blend > 1e-9:
             blended_vertices += 1
-            profile = interface_profiles[interface_owner[vertex_index]]
-            for name, weight in profile.items():
-                contributions[name] = contributions.get(name, 0.0) + weight * body_blend
+            contributions["pelvis"] = contributions.get("pelvis", 0.0) + body_blend
 
         strongest = sorted(
             contributions.items(),
@@ -747,8 +856,9 @@ def bind_original_tail_smoothly(
         weights = [(name, weight / total) for name, weight in strongest if weight > 1e-9]
         require(1 <= len(weights) <= 4,
                 f"tail vertex {vertex_index} has {len(weights)} retained influences")
-        require(any(name in TAIL_BONE_NAMES for name, _ in weights),
-                f"tail vertex {vertex_index} lost all tail-chain influence")
+        if distances[vertex_index] > 1e-9:
+            require(any(name in TAIL_BONE_NAMES for name, _ in weights),
+                    f"tail vertex {vertex_index} lost all tail-chain influence")
         for name, weight in weights:
             group = groups_by_name.get(name)
             require(group is not None, f"tail blend references missing group {name}")
@@ -762,14 +872,28 @@ def bind_original_tail_smoothly(
         ]
         require(1 <= len(memberships) <= 4,
                 f"tail vertex {vertex_index} has an invalid influence count")
-        require(any(name in TAIL_BONE_NAMES for name, _ in memberships),
-                f"tail vertex {vertex_index} lost the visual tail chain")
+        if distances[vertex_index] > 1e-9:
+            require(any(name in TAIL_BONE_NAMES for name, _ in memberships),
+                    f"tail vertex {vertex_index} lost the visual tail chain")
         require(abs(sum(weight for _, weight in memberships) - 1.0) <= 2e-4,
                 f"tail vertex {vertex_index} weights are not normalized")
 
     require(blended_vertices >= len(interface_vertices),
             "tail root blend must include every body-interface vertex")
-    return blended_vertices
+    rigid_tail_vertices = sum(
+        1 for vertex_index in tail_indices
+        if distances[vertex_index] / maximum_distance
+        <= TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION + 1e-9
+    )
+    rigid_body_vertices = sum(
+        1 for vertex_index in mapped_source_indices
+        if body_distances[vertex_index] <= TAIL_BODY_RIGID_DISTANCE + 1e-9
+    )
+    return {
+        "tail_body_blend_vertices": blended_vertices,
+        "tail_body_guard_vertices": body_guard_vertices,
+        "tail_rigid_guard_vertices": rigid_tail_vertices + rigid_body_vertices,
+    }
 
 
 def point_segment_distance(point: Vector, start: Vector, end: Vector) -> float:
@@ -1115,7 +1239,7 @@ def build_exact_source_mesh(
         build_tail_geodesic_contract(exact_mesh, tail_indices)
     )
     reposition_tail_rest_bones(armature, centerline)
-    tail_body_blend_vertices = bind_original_tail_smoothly(
+    tail_guard_stats = bind_original_tail_smoothly(
         exact_object,
         groups_by_name,
         tail_indices,
@@ -1123,7 +1247,32 @@ def build_exact_source_mesh(
         interface_owner,
         interface_vertices,
         surface_geodesic_length,
+        mapped_source_indices,
     )
+
+    dynamic_tail_names = set(TAIL_BONE_NAMES[TAIL_STATIC_BONE_COUNT:])
+    body_tail_weight_vertices = 0
+    for vertex_index in mapped_source_indices:
+        names = {
+            exact_object.vertex_groups[item.group].name
+            for item in exact_mesh.vertices[vertex_index].groups
+            if item.weight > 1e-9
+        }
+        if names & set(TAIL_BONE_NAMES):
+            body_tail_weight_vertices += 1
+    interface_dynamic_weight_vertices = 0
+    for vertex_index in interface_vertices:
+        names = {
+            exact_object.vertex_groups[item.group].name
+            for item in exact_mesh.vertices[vertex_index].groups
+            if item.weight > 1e-9
+        }
+        if names & dynamic_tail_names:
+            interface_dynamic_weight_vertices += 1
+    require(body_tail_weight_vertices == 0,
+            f"{body_tail_weight_vertices} body vertices retain a tail-chain influence")
+    require(interface_dynamic_weight_vertices == 0,
+            f"{interface_dynamic_weight_vertices} interface vertices retain a dynamic tail influence")
 
     # Verify the final skin contract directly on Blender's authoritative data.
     for vertex in exact_mesh.vertices:
@@ -1135,7 +1284,7 @@ def build_exact_source_mesh(
     flattened_centerline = [coordinate for point in centerline for coordinate in point]
     rest_arc_length = sum(segment_lengths)
     exact_object["physics_ready"] = True
-    exact_object["mesh_contract_version"] = "3.4.0"
+    exact_object["mesh_contract_version"] = "3.5.0"
     exact_object["source_object"] = SOURCE_NAME
     exact_object["exact_source_geometry"] = True
     exact_object["source_vertex_count"] = EXPECTED_SOURCE_VERTICES
@@ -1144,15 +1293,25 @@ def build_exact_source_mesh(
     exact_object["original_tail_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["original_tail_rest_position_sha256"] = tail_mesh_hash
     exact_object["tail_deformation_mode"] = "surface-geodesic-bspline-12"
-    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline+body-interface-feather"
+    exact_object["tail_weighting"] = "surface-geodesic-cubic-bspline+rigid-sacral-guard-v2"
     exact_object["tail_weighted_vertices"] = EXPECTED_TAIL_VERTICES
     exact_object["tail_weight_bones"] = TAIL_BONE_COUNT
     exact_object["tail_weight_max_influences"] = 4
     exact_object["tail_centerline_samples"] = TAIL_CENTERLINE_POINT_COUNT
     exact_object["tail_interface_vertices"] = len(interface_vertices)
-    exact_object["tail_body_blend_vertices"] = tail_body_blend_vertices
+    exact_object["tail_body_blend_vertices"] = tail_guard_stats["tail_body_blend_vertices"]
+    exact_object["tail_body_guard_vertices"] = tail_guard_stats["tail_body_guard_vertices"]
+    exact_object["tail_rigid_guard_vertices"] = tail_guard_stats["tail_rigid_guard_vertices"]
+    exact_object["body_tail_weight_vertices"] = body_tail_weight_vertices
+    exact_object["tail_interface_dynamic_weight_vertices"] = interface_dynamic_weight_vertices
     exact_object["tail_body_blend_geodesic_fraction"] = TAIL_ROOT_BLEND_GEODESIC_FRACTION
     exact_object["tail_body_blend_maximum"] = TAIL_ROOT_BODY_BLEND_MAXIMUM
+    exact_object["tail_static_collar_bones"] = ",".join(
+        TAIL_BONE_NAMES[:TAIL_STATIC_BONE_COUNT]
+    )
+    exact_object["tail_dynamic_weight_start_geodesic_fraction"] = (
+        TAIL_DYNAMIC_WEIGHT_START_GEODESIC_FRACTION
+    )
     exact_object["tail_surface_geodesic_length"] = surface_geodesic_length
     exact_object["tail_rest_arc_length"] = rest_arc_length
     exact_object["tail_rest_centerline"] = flattened_centerline
@@ -1163,8 +1322,8 @@ def build_exact_source_mesh(
     exact_object["skinning_model"] = "linear-blend-gltf"
     exact_object["deformation_gap_guard"] = "closed-shared-topology+coincident-weight-lock+double-sided"
     exact_object["anatomy_contract_version"] = ANATOMY_CONTRACT_VERSION
-    exact_object["distal_anatomy_fit"] = "exact-surface-zygodactyl-fork-v1"
-    exact_object["proximal_joint_fit"] = "orthographic-surface-landmarks-flexed-v2"
+    exact_object["distal_anatomy_fit"] = "closed-volume-zygodactyl-medial-axis-v2"
+    exact_object["proximal_joint_fit"] = "surface-medial-flexed-v3"
     exact_object["proximal_joint_order"] = ",".join(LIMB_ORDER)
     exact_object["proximal_joint_points_rest"] = [
         coordinate
@@ -1172,8 +1331,8 @@ def build_exact_source_mesh(
         for point in proximal_fits[limb_key]
         for coordinate in point
     ]
-    exact_object["tail_static_collar_bone"] = "tail_01"
-    exact_object["tail_dynamic_root_bone"] = "tail_02"
+    exact_object["tail_static_collar_bone"] = TAIL_BONE_NAMES[TAIL_STATIC_BONE_COUNT - 1]
+    exact_object["tail_dynamic_root_bone"] = TAIL_BONE_NAMES[TAIL_STATIC_BONE_COUNT]
     exact_object["rest_deformation_contract"] = "inverse-bind-identity-lbs"
     exact_object["limb_weighting"] = "geodesic-component-envelope-v1"
     exact_object["limb_reweighted_vertices"] = limb_stats["limb_reweighted_vertices"]
@@ -1196,7 +1355,7 @@ def update_armature_contract(
     armature: bpy.types.Object,
     exact_object: bpy.types.Object,
 ) -> None:
-    armature["rig_version"] = "3.4.0"
+    armature["rig_version"] = "3.5.0"
     armature["physics_proxy_bodies"] = 1
     armature["runtime_controller"] = "hybrid-root-ik"
     armature["visual_bones"] = len(armature.data.bones)
@@ -1250,10 +1409,11 @@ def update_armature_contract(
         elif bone.name == "jaw":
             bone["anatomical_role"] = "jaw-hinge-to-snout"
         if bone.name in TAIL_BONE_NAMES:
-            bone["tail_rest_index"] = TAIL_BONE_NAMES.index(bone.name)
+            tail_index = TAIL_BONE_NAMES.index(bone.name)
+            bone["tail_rest_index"] = tail_index
             bone["tail_deformation_only"] = True
-            bone["tail_dynamic"] = bone.name != "tail_01"
-            if bone.name == "tail_01":
+            bone["tail_dynamic"] = tail_index >= TAIL_STATIC_BONE_COUNT
+            if tail_index < TAIL_STATIC_BONE_COUNT:
                 bone["anatomical_role"] = "sacral-tail-collar"
             else:
                 bone["anatomical_role"] = "passive-tail-segment"
@@ -1270,8 +1430,14 @@ def update_armature_contract(
         "tail_centerline_samples",
         "tail_interface_vertices",
         "tail_body_blend_vertices",
+        "tail_body_guard_vertices",
+        "tail_rigid_guard_vertices",
+        "body_tail_weight_vertices",
+        "tail_interface_dynamic_weight_vertices",
         "tail_body_blend_geodesic_fraction",
         "tail_body_blend_maximum",
+        "tail_static_collar_bones",
+        "tail_dynamic_weight_start_geodesic_fraction",
         "tail_surface_geodesic_length",
         "tail_rest_arc_length",
         "tail_rest_centerline",

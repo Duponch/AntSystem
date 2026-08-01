@@ -42,6 +42,7 @@ const ZERO = new THREE.Vector3();
 const IDENTITY_QUATERNION = new THREE.Quaternion();
 const BODY_COLLISION_GROUP = chameleonCollisionGroups();
 const REST_FLEXION_RETENTION = 0.84;
+const MINIMUM_REST_FLEXION_RETENTION = 0.72;
 
 const LEG_SPECS = Object.freeze( [
 	Object.freeze( { name: 'front.L', kind: 'front', side: 'L', girdle: 'front_girdleL', upper: 'front_upperL', lower: 'front_lowerL', palm: 'front_palmL', inner: 'front_digits_innerL', outer: 'front_digits_outerL' } ),
@@ -225,9 +226,11 @@ class StableVisualRig {
 				if ( hasExactPatch ) {
 
 					const localNormal = exactNormalWorld.clone().applyQuaternion( worldQuaternion.invert() );
-					// Every deform chain advances along local +Y.  Removing numerical
-					// leakage on that axis guarantees a flat palm and flat digit pads.
-					localNormal.y = 0;
+					// Keep the complete authored outsole direction.  The irregular
+					// zygodactyl digits descend towards their pads, therefore the true
+					// contact normal legitimately contains a component along the bone's
+					// local +Y axis.  Erasing it made the distal pads stand on an edge as
+					// soon as their medial axes were recentered inside the actual mesh.
 					if ( localNormal.lengthSq() < 1e-8 ) localNormal.set( 0, 0, 1 );
 					contactNormalLocals.set( bone, localNormal.normalize() );
 
@@ -766,11 +769,14 @@ class StableVisualRig {
 			this._solveInput.abduction = strideDrive * ( leg.kind === 'front' ? 0.16 : 0.20 )
 				+ flexionDrive * 0.08;
 			this._solveInput.girdleReachWeight = THREE.MathUtils.clamp(
-				strideDrive * 0.22 + flexionDrive * 0.12, 0, 0.34,
+				0.10 + strideDrive * 0.18 + flexionDrive * 0.12, 0, 0.34,
 			);
 			this._poleVector.copy( leg.restPoleParentLocal )
 				.applyQuaternion( this._legParentWorldQuaternion ).normalize();
-			this._solveInput.minimumFlexion = leg.solver.preset.minimumFlexion
+			this._solveInput.minimumFlexion = Math.max(
+				leg.solver.preset.minimumFlexion,
+				leg.restFlexion * MINIMUM_REST_FLEXION_RETENTION,
+			)
 				+ flexionDrive * ( leg.kind === 'front' ? 1.12 : 1.28 );
 			this._solveInput.maximumFlexion = leg.solver.preset.maximumFlexion;
 			this._solveInput.girdleSwingLimit = leg.solver.preset.girdleSwingLimit;
@@ -921,11 +927,16 @@ export async function createHybridChameleon( {
 		tailInitialPositions[ 1 ] - spawn.y,
 		tailInitialPositions[ 2 ] - spawn.z,
 	);
-	const tailRootRestDirection = new THREE.Vector3(
-		tailInitialPositions[ 3 ] - tailInitialPositions[ 0 ],
-		tailInitialPositions[ 4 ] - tailInitialPositions[ 1 ],
-		tailInitialPositions[ 5 ] - tailInitialPositions[ 2 ],
-	).normalize();
+	const tailKinematicBodyOffsets = new Float32Array(
+		( tailVisualRig.staticBoneCount + 1 ) * 3,
+	);
+	for ( let index = 0; index < tailKinematicBodyOffsets.length; index += 3 ) {
+
+		tailKinematicBodyOffsets[ index ] = tailInitialPositions[ index ] - spawn.x;
+		tailKinematicBodyOffsets[ index + 1 ] = tailInitialPositions[ index + 1 ] - spawn.y;
+		tailKinematicBodyOffsets[ index + 2 ] = tailInitialPositions[ index + 2 ] - spawn.z;
+
+	}
 	const tailRadii = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
 	for ( let node = 0; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
@@ -945,10 +956,9 @@ export async function createHybridChameleon( {
 		gravity: physics.world.gravity,
 		initialPositions: tailInitialPositions,
 		radii: tailRadii,
-		pinBaseSegment: true,
-		baseDirection: tailRootRestDirection,
-		baseMaxAngle: 0,
+		kinematicSegmentCount: tailVisualRig.staticBoneCount,
 	} );
+	const tailKinematicAnchors = new Float32Array( tailPhysics.kinematicNodeCount * 3 );
 	for ( let node = tailPhysics.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
 		const ratio = node / ( PASSIVE_TAIL_NODE_COUNT - 1 );
@@ -957,6 +967,21 @@ export async function createHybridChameleon( {
 	}
 	const passiveLimbInitialPositions = new Float32Array( PASSIVE_LIMB_COMPONENT_COUNT );
 	rig.writePassiveLimbPositions( passiveLimbInitialPositions );
+	const passiveLimbBodyOffsets = new Float32Array( PASSIVE_LIMB_COMPONENT_COUNT );
+	const passiveLimbMuscleTargets = new Float32Array( PASSIVE_LIMB_COMPONENT_COUNT );
+	for ( let offset = 0; offset < PASSIVE_LIMB_COMPONENT_COUNT; offset += 3 ) {
+
+		passiveLimbBodyOffsets[ offset ] = passiveLimbInitialPositions[ offset ] - spawn.x;
+		passiveLimbBodyOffsets[ offset + 1 ] = passiveLimbInitialPositions[ offset + 1 ] - spawn.y;
+		passiveLimbBodyOffsets[ offset + 2 ] = passiveLimbInitialPositions[ offset + 2 ] - spawn.z;
+
+	}
+	const passiveLimbBodyCapsules = new Float32Array( [
+		spawn.x - 0.3, spawn.y + 0.04, spawn.z,
+		spawn.x + 0.14, spawn.y + 0.04, spawn.z, 0.16,
+		spawn.x - 0.38, spawn.y + 0.055, spawn.z,
+		spawn.x - 0.38, spawn.y + 0.055, spawn.z, 0.18,
+	] );
 	const passiveLimbPhysics = new PassiveLimbRagdoll( {
 		fixedDt: physics.fixedDt || 1 / 120,
 		// Evaluated only for the selected/held animal: the added local accuracy
@@ -971,16 +996,10 @@ export async function createHybridChameleon( {
 		initialPositions: passiveLimbInitialPositions,
 		minimumBend: 0.1,
 		maximumBend: 2.52,
-	} );
-	const passiveLimbRootBodyOffsets = Array.from( { length: 4 }, ( _, limb ) => {
-
-		const offset = limb * PASSIVE_LIMB_NODE_COUNT * 3;
-		return new THREE.Vector3(
-			passiveLimbInitialPositions[ offset ] - spawn.x,
-			passiveLimbInitialPositions[ offset + 1 ] - spawn.y,
-			passiveLimbInitialPositions[ offset + 2 ] - spawn.z,
-		);
-
+		muscleTone: 0.18,
+		bodyCapsules: passiveLimbBodyCapsules,
+		selfCollision: true,
+		selfCollisionMargin: 0.004,
 	} );
 	const passiveLimbRootAnchors = new Float32Array( 12 );
 
@@ -1069,6 +1088,7 @@ export async function createHybridChameleon( {
 		jointFlex: 0.7,
 		bodyMotion: 1,
 		suspension: 1,
+		limbMuscleTone: 0.18,
 		tailDamping: 2.1,
 		tailFlexibility: 0.46,
 		tailCollisionScale: 1,
@@ -1225,9 +1245,11 @@ export async function createHybridChameleon( {
 		maximumAcceleration: 30,
 	};
 	const tailRootAnchor = new THREE.Vector3();
-	const tailRootDirection = new THREE.Vector3();
+	const tailKinematicPoint = new THREE.Vector3();
 	const tailCollisionNormalFallback = new THREE.Vector3();
 	const passiveLimbRootPoint = new THREE.Vector3();
+	const passiveLimbMusclePoint = new THREE.Vector3();
+	const passiveLimbCapsulePoint = new THREE.Vector3();
 	const collisionBodyPosition = new THREE.Vector3();
 	const collisionBodyQuaternion = new THREE.Quaternion();
 	const collisionBodyInverse = new THREE.Quaternion();
@@ -2200,11 +2222,10 @@ export async function createHybridChameleon( {
 
 	function projectLimbPoint( point, radius, outPoint, outNormal, _limb, node ) {
 
-		// The proximal two nodes belong to the shoulder/hip socket envelope.
-		// Projecting the second one out of the torso fights the exact distance
-		// constraints and creates artificial elastic limbs.
-		if ( node === 0 ) return false;
-		return projectCollisionPoint( point, radius, outPoint, outNormal, 1, node >= 2 );
+		// The fixed-buffer capsule solver owns torso/self collisions. This callback
+		// therefore performs only one bounded environment query per free node.
+		if ( node <= 1 ) return false;
+		return projectCollisionPoint( point, radius, outPoint, outNormal, 1, false );
 
 	}
 
@@ -2219,11 +2240,22 @@ export async function createHybridChameleon( {
 
 		const position = readVector( body.translation(), tempPosition );
 		const rotation = readQuaternion( body.rotation(), tempQuaternion );
-		tailRootAnchor.copy( tailRootBodyOffset ).applyQuaternion( rotation ).add( position );
-		tailRootDirection.copy( tailRootRestDirection ).applyQuaternion( rotation ).normalize();
-		// tail_01 is the rigid sacral collar. The first physical articulation is
-		// tail_02, outside the rump, so large tail motion cannot drag the buttocks.
-		tailPhysics.setBaseDirection( tailRootDirection, 0 );
+		for ( let offset = 0; offset < tailKinematicAnchors.length; offset += 3 ) {
+
+			tailKinematicPoint.set(
+				tailKinematicBodyOffsets[ offset ],
+				tailKinematicBodyOffsets[ offset + 1 ],
+				tailKinematicBodyOffsets[ offset + 2 ],
+			).applyQuaternion( rotation ).add( position );
+			tailKinematicAnchors[ offset ] = tailKinematicPoint.x;
+			tailKinematicAnchors[ offset + 1 ] = tailKinematicPoint.y;
+			tailKinematicAnchors[ offset + 2 ] = tailKinematicPoint.z;
+
+		}
+		tailPhysics.setKinematicAnchors( tailKinematicAnchors );
+		tailRootAnchor.fromArray( tailKinematicAnchors, 0 );
+		// The exact rump is carried by three rigid collar bones. The first free
+		// articulation is tail_04, beyond every protected croup vertex.
 		tailPhysics.gravityX = world.gravity.x * settings.tailGravity;
 		tailPhysics.gravityY = world.gravity.y * settings.tailGravity;
 		tailPhysics.gravityZ = world.gravity.z * settings.tailGravity;
@@ -2232,7 +2264,7 @@ export async function createHybridChameleon( {
 			10,
 			THREE.MathUtils.clamp( settings.tailFlexibility, 0, 1 ) * 3.2,
 		);
-		tailPhysics.stepFixed( tailRootAnchor, projectTailPoint );
+		tailPhysics.stepFixed( null, projectTailPoint );
 
 	}
 
@@ -2240,15 +2272,16 @@ export async function createHybridChameleon( {
 
 		rig.writePassiveLimbPositions( passiveLimbInitialPositions );
 		passiveLimbPhysics.resetPositions( passiveLimbInitialPositions );
-		for ( let limb = 0; limb < 4; limb ++ ) {
+		for ( let offset = 0; offset < PASSIVE_LIMB_COMPONENT_COUNT; offset += 3 ) {
 
-			const offset = limb * PASSIVE_LIMB_NODE_COUNT * 3;
 			passiveLimbRootPoint.set(
 				passiveLimbInitialPositions[ offset ],
 				passiveLimbInitialPositions[ offset + 1 ],
 				passiveLimbInitialPositions[ offset + 2 ],
 			).sub( collisionBodyPosition ).applyQuaternion( collisionBodyInverse );
-			passiveLimbRootBodyOffsets[ limb ].copy( passiveLimbRootPoint );
+			passiveLimbBodyOffsets[ offset ] = passiveLimbRootPoint.x;
+			passiveLimbBodyOffsets[ offset + 1 ] = passiveLimbRootPoint.y;
+			passiveLimbBodyOffsets[ offset + 2 ] = passiveLimbRootPoint.z;
 
 		}
 		passiveLimbActive = true;
@@ -2267,16 +2300,41 @@ export async function createHybridChameleon( {
 			return;
 
 		}
-		for ( let limb = 0; limb < 4; limb ++ ) {
+		for ( let offset = 0; offset < PASSIVE_LIMB_COMPONENT_COUNT; offset += 3 ) {
 
-			const offset = limb * 3;
-			passiveLimbRootPoint.copy( passiveLimbRootBodyOffsets[ limb ] )
+			passiveLimbMusclePoint.fromArray( passiveLimbBodyOffsets, offset )
 				.applyQuaternion( collisionBodyQuaternion ).add( collisionBodyPosition );
-			passiveLimbRootAnchors[ offset ] = passiveLimbRootPoint.x;
-			passiveLimbRootAnchors[ offset + 1 ] = passiveLimbRootPoint.y;
-			passiveLimbRootAnchors[ offset + 2 ] = passiveLimbRootPoint.z;
+			passiveLimbMuscleTargets[ offset ] = passiveLimbMusclePoint.x;
+			passiveLimbMuscleTargets[ offset + 1 ] = passiveLimbMusclePoint.y;
+			passiveLimbMuscleTargets[ offset + 2 ] = passiveLimbMusclePoint.z;
 
 		}
+		for ( let limb = 0; limb < 4; limb ++ ) {
+
+			const source = limb * PASSIVE_LIMB_NODE_COUNT * 3;
+			const target = limb * 3;
+			passiveLimbRootAnchors[ target ] = passiveLimbMuscleTargets[ source ];
+			passiveLimbRootAnchors[ target + 1 ] = passiveLimbMuscleTargets[ source + 1 ];
+			passiveLimbRootAnchors[ target + 2 ] = passiveLimbMuscleTargets[ source + 2 ];
+
+		}
+		passiveLimbCapsulePoint.set( -0.3, 0.04, 0 )
+			.applyQuaternion( collisionBodyQuaternion ).add( collisionBodyPosition )
+			.toArray( passiveLimbBodyCapsules, 0 );
+		passiveLimbCapsulePoint.set( 0.14, 0.04, 0 )
+			.applyQuaternion( collisionBodyQuaternion ).add( collisionBodyPosition )
+			.toArray( passiveLimbBodyCapsules, 3 );
+		passiveLimbBodyCapsules[ 6 ] = 0.16;
+		passiveLimbCapsulePoint.set( -0.38, 0.055, 0 )
+			.applyQuaternion( collisionBodyQuaternion ).add( collisionBodyPosition )
+			.toArray( passiveLimbBodyCapsules, 7 );
+		passiveLimbCapsulePoint.toArray( passiveLimbBodyCapsules, 10 );
+		passiveLimbBodyCapsules[ 13 ] = 0.18;
+		passiveLimbPhysics.setMuscleTargets( passiveLimbMuscleTargets );
+		passiveLimbPhysics.setMuscleTone(
+			THREE.MathUtils.clamp( settings.limbMuscleTone, 0, 1 ),
+		);
+		passiveLimbPhysics.setBodyCapsules( passiveLimbBodyCapsules );
 		passiveLimbPhysics.gravityX = world.gravity.x;
 		passiveLimbPhysics.gravityY = world.gravity.y;
 		passiveLimbPhysics.gravityZ = world.gravity.z;
@@ -2359,7 +2417,7 @@ export async function createHybridChameleon( {
 		if ( passiveLimbBlend > 0 ) rig.applyPassive(
 			passiveLimbPhysics.interpolate( t ),
 			THREE.MathUtils.clamp( passiveLimbBlend, 0, 1 ),
-			! passiveLimbActive,
+			true,
 		);
 		tailVisualRig.applyPositions( tailPhysics.interpolate( t ) );
 		debug.bodyRoot.position.copy( renderPosition );
@@ -2416,16 +2474,21 @@ export async function createHybridChameleon( {
 		suspension.reset();
 		tailRootAnchor.copy( tailRootBodyOffset ).add( nextSpawn );
 		tailPhysics.reset( tailRootAnchor );
+		for ( let offset = 0; offset < tailKinematicAnchors.length; offset += 3 ) {
+
+			tailKinematicAnchors[ offset ] = nextSpawn.x + tailKinematicBodyOffsets[ offset ];
+			tailKinematicAnchors[ offset + 1 ] = nextSpawn.y + tailKinematicBodyOffsets[ offset + 1 ];
+			tailKinematicAnchors[ offset + 2 ] = nextSpawn.z + tailKinematicBodyOffsets[ offset + 2 ];
+
+		}
+		tailPhysics.setKinematicAnchors( tailKinematicAnchors );
 		rig.writePassiveLimbPositions( passiveLimbInitialPositions );
 		passiveLimbPhysics.resetPositions( passiveLimbInitialPositions );
-		for ( let limb = 0; limb < 4; limb ++ ) {
+		for ( let offset = 0; offset < PASSIVE_LIMB_COMPONENT_COUNT; offset += 3 ) {
 
-			const offset = limb * PASSIVE_LIMB_NODE_COUNT * 3;
-			passiveLimbRootBodyOffsets[ limb ].set(
-				passiveLimbInitialPositions[ offset ] - nextSpawn.x,
-				passiveLimbInitialPositions[ offset + 1 ] - nextSpawn.y,
-				passiveLimbInitialPositions[ offset + 2 ] - nextSpawn.z,
-			);
+			passiveLimbBodyOffsets[ offset ] = passiveLimbInitialPositions[ offset ] - nextSpawn.x;
+			passiveLimbBodyOffsets[ offset + 1 ] = passiveLimbInitialPositions[ offset + 1 ] - nextSpawn.y;
+			passiveLimbBodyOffsets[ offset + 2 ] = passiveLimbInitialPositions[ offset + 2 ] - nextSpawn.z;
 
 		}
 		passiveLimbActive = false;

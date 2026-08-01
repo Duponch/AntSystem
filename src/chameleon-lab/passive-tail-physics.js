@@ -86,6 +86,9 @@ export class PassiveTailPhysics {
 			'bendCompliance', options.bendCompliance ?? 2e-5,
 		);
 		this.damping = nonNegativeNumber( 'damping', options.damping ?? 1.35 );
+		this.kinematicDamping = nonNegativeNumber(
+			'kinematicDamping', options.kinematicDamping ?? 20,
+		);
 		this.collisionFriction = Math.min( 1, nonNegativeNumber(
 			'collisionFriction', options.collisionFriction ?? 0.18,
 		) );
@@ -120,8 +123,16 @@ export class PassiveTailPhysics {
 		this.baseConeCos = -1;
 		this.baseConeSin = 0;
 		this.baseConeEnabled = false;
-		this.pinBaseSegment = options.pinBaseSegment === true;
-		this.kinematicNodeCount = this.pinBaseSegment ? 2 : 1;
+		const legacyKinematicSegments = options.pinBaseSegment === true ? 1 : 0;
+		this.kinematicSegmentCount = options.kinematicSegmentCount ?? legacyKinematicSegments;
+		if ( ! Number.isInteger( this.kinematicSegmentCount )
+			|| this.kinematicSegmentCount < 0
+			|| this.kinematicSegmentCount >= PASSIVE_TAIL_SEGMENT_COUNT )
+			throw new RangeError(
+				'kinematicSegmentCount must leave at least one passive tail segment',
+			);
+		this.pinBaseSegment = this.kinematicSegmentCount >= 1;
+		this.kinematicNodeCount = this.kinematicSegmentCount + 1;
 		this._sleeping = false;
 		this._sleepCandidateSteps = 0;
 		this._sleepCount = 0;
@@ -139,6 +150,8 @@ export class PassiveTailPhysics {
 		this.renderPreviousPositions = new Float32Array( COMPONENT_COUNT );
 		this.interpolatedPositions = new Float32Array( COMPONENT_COUNT );
 		this.restOffsets = new Float32Array( COMPONENT_COUNT );
+		this.kinematicAnchors = new Float32Array( this.kinematicNodeCount * 3 );
+		this._sleepKinematicAnchors = new Float32Array( this.kinematicAnchors.length );
 		this.segmentLengths = new Float32Array( PASSIVE_TAIL_SEGMENT_COUNT );
 		this.bendLengths = new Float32Array( PASSIVE_TAIL_BEND_CONSTRAINT_COUNT );
 		this.radii = new Float32Array( PASSIVE_TAIL_NODE_COUNT );
@@ -146,14 +159,16 @@ export class PassiveTailPhysics {
 		this.segmentLambdas = new Float64Array( PASSIVE_TAIL_SEGMENT_COUNT );
 		this.bendLambdas = new Float64Array( PASSIVE_TAIL_BEND_CONSTRAINT_COUNT );
 		this.inverseMasses.fill( 1 );
-		this.inverseMasses[ 0 ] = 0;
-		if ( this.pinBaseSegment ) this.inverseMasses[ 1 ] = 0;
+		for ( let node = 0; node < this.kinematicNodeCount; node ++ )
+			this.inverseMasses[ node ] = 0;
 		fillPositiveArray( 'radii', this.radii, options.radii ?? options.radius, 0.014 );
 		this._initializeRestShape( options );
 
 		this._collisionPoint = Object.seal( { x: 0, y: 0, z: 0 } );
 		this._projectedPoint = Object.seal( { x: 0, y: 0, z: 0 } );
 		this._projectedNormal = Object.seal( { x: 0, y: 1, z: 0 } );
+		this._collisionActive = new Uint8Array( PASSIVE_TAIL_NODE_COUNT );
+		this._collisionPlanes = new Float32Array( COMPONENT_COUNT * 2 );
 		this._accumulator = 0;
 		this._totalSteps = 0;
 		this._invalidCorrections = 0;
@@ -176,6 +191,7 @@ export class PassiveTailPhysics {
 			nodeCount: PASSIVE_TAIL_NODE_COUNT,
 			segmentCount: PASSIVE_TAIL_SEGMENT_COUNT,
 			kinematicNodeCount: this.kinematicNodeCount,
+			kinematicAnchors: this.kinematicAnchors,
 			positions: this.positions,
 			previousPositions: this.renderPreviousPositions,
 			interpolatedPositions: this.interpolatedPositions,
@@ -284,9 +300,54 @@ export class PassiveTailPhysics {
 		const dz = z - referenceZ;
 		if ( dx * dx + dy * dy + dz * dz
 			> this.sleepRootThreshold * this.sleepRootThreshold ) this.wake();
+		const shiftX = x - this.rootX;
+		const shiftY = y - this.rootY;
+		const shiftZ = z - this.rootZ;
 		this.rootX = x;
 		this.rootY = y;
 		this.rootZ = z;
+		for ( let node = 0; node < this.kinematicNodeCount; node ++ ) {
+
+			const offset = node * 3;
+			this.kinematicAnchors[ offset ] += shiftX;
+			this.kinematicAnchors[ offset + 1 ] += shiftY;
+			this.kinematicAnchors[ offset + 2 ] += shiftZ;
+
+		}
+		return this;
+
+	}
+
+	setKinematicAnchors( anchors ) {
+
+		if ( ! anchors || anchors.length < this.kinematicAnchors.length )
+			throw new TypeError(
+				'kinematicAnchors must contain ' + this.kinematicAnchors.length + ' values',
+			);
+		let maximumDisplacementSquared = 0;
+		for ( let index = 0; index < this.kinematicAnchors.length; index += 3 ) {
+
+			const x = finiteNumber( 'kinematicAnchors.x', anchors[ index ] );
+			const y = finiteNumber( 'kinematicAnchors.y', anchors[ index + 1 ] );
+			const z = finiteNumber( 'kinematicAnchors.z', anchors[ index + 2 ] );
+			const reference = this._sleeping
+				? this._sleepKinematicAnchors : this.kinematicAnchors;
+			const dx = x - reference[ index ];
+			const dy = y - reference[ index + 1 ];
+			const dz = z - reference[ index + 2 ];
+			maximumDisplacementSquared = Math.max(
+				maximumDisplacementSquared, dx * dx + dy * dy + dz * dz,
+			);
+			this.kinematicAnchors[ index ] = x;
+			this.kinematicAnchors[ index + 1 ] = y;
+			this.kinematicAnchors[ index + 2 ] = z;
+
+		}
+		if ( maximumDisplacementSquared
+			> this.sleepRootThreshold * this.sleepRootThreshold ) this.wake();
+		this.rootX = this.kinematicAnchors[ 0 ];
+		this.rootY = this.kinematicAnchors[ 1 ];
+		this.rootZ = this.kinematicAnchors[ 2 ];
 		return this;
 
 	}
@@ -344,6 +405,15 @@ export class PassiveTailPhysics {
 			this.positions[ offset + 2 ] = this.rootZ + this.restOffsets[ offset + 2 ];
 
 		}
+		for ( let node = 0; node < this.kinematicNodeCount; node ++ ) {
+
+			const offset = node * 3;
+			this.kinematicAnchors[ offset ] = this.positions[ offset ];
+			this.kinematicAnchors[ offset + 1 ] = this.positions[ offset + 1 ];
+			this.kinematicAnchors[ offset + 2 ] = this.positions[ offset + 2 ];
+
+		}
+		this._sleepKinematicAnchors.set( this.kinematicAnchors );
 		this.previousPositions.set( this.positions );
 		this.renderPreviousPositions.set( this.positions );
 		this.interpolatedPositions.set( this.positions );
@@ -383,20 +453,25 @@ export class PassiveTailPhysics {
 
 	_pinRoot() {
 
-		this.positions[ 0 ] = this.rootX;
-		this.positions[ 1 ] = this.rootY;
-		this.positions[ 2 ] = this.rootZ;
-		this.previousPositions[ 0 ] = this.rootX;
-		this.previousPositions[ 1 ] = this.rootY;
-		this.previousPositions[ 2 ] = this.rootZ;
-		if ( this.pinBaseSegment ) {
+		if ( this.pinBaseSegment && this.kinematicSegmentCount === 1 ) {
 
-			this.positions[ 3 ] = this.rootX + this.baseDirectionX * this.segmentLengths[ 0 ];
-			this.positions[ 4 ] = this.rootY + this.baseDirectionY * this.segmentLengths[ 0 ];
-			this.positions[ 5 ] = this.rootZ + this.baseDirectionZ * this.segmentLengths[ 0 ];
-			this.previousPositions[ 3 ] = this.positions[ 3 ];
-			this.previousPositions[ 4 ] = this.positions[ 4 ];
-			this.previousPositions[ 5 ] = this.positions[ 5 ];
+			this.kinematicAnchors[ 3 ] = this.rootX
+				+ this.baseDirectionX * this.segmentLengths[ 0 ];
+			this.kinematicAnchors[ 4 ] = this.rootY
+				+ this.baseDirectionY * this.segmentLengths[ 0 ];
+			this.kinematicAnchors[ 5 ] = this.rootZ
+				+ this.baseDirectionZ * this.segmentLengths[ 0 ];
+
+		}
+		for ( let node = 0; node < this.kinematicNodeCount; node ++ ) {
+
+			const offset = node * 3;
+			this.positions[ offset ] = this.kinematicAnchors[ offset ];
+			this.positions[ offset + 1 ] = this.kinematicAnchors[ offset + 1 ];
+			this.positions[ offset + 2 ] = this.kinematicAnchors[ offset + 2 ];
+			this.previousPositions[ offset ] = this.positions[ offset ];
+			this.previousPositions[ offset + 1 ] = this.positions[ offset + 1 ];
+			this.previousPositions[ offset + 2 ] = this.positions[ offset + 2 ];
 
 		}
 
@@ -577,6 +652,40 @@ export class PassiveTailPhysics {
 
 			}
 			const scale = this.segmentLengths[ segment ] / Math.max( length, EPSILON );
+			const nextX = this.positions[ first ] + dx * scale;
+			const nextY = this.positions[ first + 1 ] + dy * scale;
+			const nextZ = this.positions[ first + 2 ] + dz * scale;
+			this.previousPositions[ second ] += nextX - this.positions[ second ];
+			this.previousPositions[ second + 1 ] += nextY - this.positions[ second + 1 ];
+			this.previousPositions[ second + 2 ] += nextZ - this.positions[ second + 2 ];
+			this.positions[ second ] = nextX;
+			this.positions[ second + 1 ] = nextY;
+			this.positions[ second + 2 ] = nextZ;
+
+		}
+
+	}
+
+	_projectPassiveChainLengthsForward() {
+
+		for ( let segment = this.kinematicNodeCount - 1;
+			segment < PASSIVE_TAIL_SEGMENT_COUNT; segment ++ ) {
+
+			const first = segment * 3;
+			const second = first + 3;
+			let dx = this.positions[ second ] - this.positions[ first ];
+			let dy = this.positions[ second + 1 ] - this.positions[ first + 1 ];
+			let dz = this.positions[ second + 2 ] - this.positions[ first + 2 ];
+			let length = Math.hypot( dx, dy, dz );
+			if ( length <= EPSILON ) {
+
+				dx = this.restOffsets[ second ] - this.restOffsets[ first ];
+				dy = this.restOffsets[ second + 1 ] - this.restOffsets[ first + 1 ];
+				dz = this.restOffsets[ second + 2 ] - this.restOffsets[ first + 2 ];
+				length = Math.hypot( dx, dy, dz );
+
+			}
+			const scale = this.segmentLengths[ segment ] / Math.max( length, EPSILON );
 			this.positions[ second ] = this.positions[ first ] + dx * scale;
 			this.positions[ second + 1 ] = this.positions[ first + 1 ] + dy * scale;
 			this.positions[ second + 2 ] = this.positions[ first + 2 ] + dz * scale;
@@ -587,6 +696,7 @@ export class PassiveTailPhysics {
 
 	_projectCollisions( projectPoint ) {
 
+		this._collisionActive.fill( 0 );
 		if ( typeof projectPoint !== 'function' ) return;
 		const point = this._collisionPoint;
 		const projected = this._projectedPoint;
@@ -619,6 +729,14 @@ export class PassiveTailPhysics {
 			const correctionX = projected.x - point.x;
 			const correctionY = projected.y - point.y;
 			const correctionZ = projected.z - point.z;
+			const planeOffset = offset;
+			this._collisionActive[ node ] = 1;
+			this._collisionPlanes[ planeOffset ] = projected.x;
+			this._collisionPlanes[ planeOffset + 1 ] = projected.y;
+			this._collisionPlanes[ planeOffset + 2 ] = projected.z;
+			this._collisionPlanes[ COMPONENT_COUNT + planeOffset ] = nx;
+			this._collisionPlanes[ COMPONENT_COUNT + planeOffset + 1 ] = ny;
+			this._collisionPlanes[ COMPONENT_COUNT + planeOffset + 2 ] = nz;
 			this.positions[ offset ] = projected.x;
 			this.positions[ offset + 1 ] = projected.y;
 			this.positions[ offset + 2 ] = projected.z;
@@ -647,6 +765,35 @@ export class PassiveTailPhysics {
 			this.previousPositions[ offset ] += tangentX * this.collisionFriction;
 			this.previousPositions[ offset + 1 ] += tangentY * this.collisionFriction;
 			this.previousPositions[ offset + 2 ] += tangentZ * this.collisionFriction;
+
+		}
+
+	}
+
+	_projectCachedCollisions() {
+
+		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			if ( this._collisionActive[ node ] === 0 ) continue;
+			const offset = node * 3;
+			const normalOffset = COMPONENT_COUNT + offset;
+			const nx = this._collisionPlanes[ normalOffset ];
+			const ny = this._collisionPlanes[ normalOffset + 1 ];
+			const nz = this._collisionPlanes[ normalOffset + 2 ];
+			const signedDistance =
+				( this.positions[ offset ] - this._collisionPlanes[ offset ] ) * nx
+				+ ( this.positions[ offset + 1 ] - this._collisionPlanes[ offset + 1 ] ) * ny
+				+ ( this.positions[ offset + 2 ] - this._collisionPlanes[ offset + 2 ] ) * nz;
+			if ( signedDistance >= 0 ) continue;
+			const correctionX = -signedDistance * nx;
+			const correctionY = -signedDistance * ny;
+			const correctionZ = -signedDistance * nz;
+			this.positions[ offset ] += correctionX;
+			this.positions[ offset + 1 ] += correctionY;
+			this.positions[ offset + 2 ] += correctionZ;
+			this.previousPositions[ offset ] += correctionX;
+			this.previousPositions[ offset + 1 ] += correctionY;
+			this.previousPositions[ offset + 2 ] += correctionZ;
 
 		}
 
@@ -728,6 +875,7 @@ export class PassiveTailPhysics {
 				this._sleepDirectionY = this.baseDirectionY;
 				this._sleepDirectionZ = this.baseDirectionZ;
 				this._sleepMaxAngle = this.baseConeMaxAngle;
+				this._sleepKinematicAnchors.set( this.kinematicAnchors );
 				this.previousPositions.set( this.positions );
 				this.renderPreviousPositions.set( this.positions );
 				this.interpolatedPositions.set( this.positions );
@@ -757,7 +905,9 @@ export class PassiveTailPhysics {
 			return this.view;
 
 		}
-		const velocityRetention = Math.exp( -this.damping * this.fixedDt );
+		const velocityRetention = Math.exp( -(
+			this.damping + ( this.kinematicSegmentCount > 1 ? this.kinematicDamping : 0 )
+		) * this.fixedDt );
 		const gravityScale = this.fixedDt * this.fixedDt;
 		for ( let node = this.kinematicNodeCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
 
@@ -781,6 +931,7 @@ export class PassiveTailPhysics {
 		this.bendLambdas.fill( 0 );
 		const stretchAlpha = this.stretchCompliance / ( this.fixedDt * this.fixedDt );
 		const bendAlpha = this.bendCompliance / ( this.fixedDt * this.fixedDt );
+		const collisionIteration = Math.floor( this.solverIterations * 0.5 );
 		for ( let iteration = 0; iteration < this.solverIterations; iteration ++ ) {
 
 			if ( iteration % 2 === 0 ) {
@@ -812,13 +963,16 @@ export class PassiveTailPhysics {
 			}
 			this._pinRoot();
 			this._solveBaseCone();
-			this._projectCollisions( projectPoint );
-			this._solveBaseCone();
+			if ( iteration === collisionIteration ) this._projectCollisions( projectPoint );
+			else if ( iteration > collisionIteration ) this._projectCachedCollisions();
 
 		}
 		this._pinRoot();
 		this._solveBaseCone();
 		this._solveBaseChainLengths();
+		this._pinRoot();
+		if ( this.kinematicSegmentCount > 1 ) this._projectPassiveChainLengthsForward();
+		this._projectCachedCollisions();
 		this._pinRoot();
 		this._limitVelocitiesAndRecover();
 		this._updateSleepState();

@@ -266,7 +266,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.name, 'Chameleon_Physics_Body' );
 	assert.equal( meshNode.skin, 0, 'the original mesh must reference the rig skin' );
 	assert.equal( meshNode.extras?.physics_ready, true );
-	assert.equal( meshNode.extras?.mesh_contract_version, '3.4.0' );
+	assert.equal( meshNode.extras?.mesh_contract_version, '3.5.0' );
 	assert.equal( meshNode.extras?.source_object, 'Chameleon_Imported_Source' );
 	assert.equal( meshNode.extras?.exact_source_geometry, true );
 	assert.equal( meshNode.extras?.source_vertex_count, EXPECTED_SOURCE_VERTICES );
@@ -275,15 +275,20 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 	assert.equal( meshNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( meshNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
 	assert.equal( meshNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
-	assert.equal( meshNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+body-interface-feather' );
+	assert.equal( meshNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+rigid-sacral-guard-v2' );
 	assert.equal( meshNode.extras?.tail_weighted_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( meshNode.extras?.tail_weight_bones, TAIL_BONE_NAMES.length );
 	assert.equal( meshNode.extras?.tail_weight_max_influences, 4 );
 	assert.equal( meshNode.extras?.tail_centerline_samples, TAIL_BONE_NAMES.length + 1 );
 	assert.equal( meshNode.extras?.tail_interface_vertices, 107 );
-	assert.equal( meshNode.extras?.tail_body_blend_vertices, 1184 );
-	assert.equal( meshNode.extras?.tail_body_blend_geodesic_fraction, 0.12 );
-	assert.equal( meshNode.extras?.tail_body_blend_maximum, 0.72 );
+	assert.equal( meshNode.extras?.tail_body_blend_vertices, 2410 );
+	assert.equal( meshNode.extras?.tail_body_blend_geodesic_fraction, 0.28 );
+	assert.equal( meshNode.extras?.tail_body_blend_maximum, 1 );
+	assert.equal( meshNode.extras?.tail_static_collar_bones, 'tail_01,tail_02,tail_03' );
+	assert.equal( meshNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.25 );
+	assert.ok( meshNode.extras?.tail_rigid_guard_vertices >= meshNode.extras?.tail_interface_vertices );
+	assert.equal( meshNode.extras?.body_tail_weight_vertices, 0 );
+	assert.equal( meshNode.extras?.tail_interface_dynamic_weight_vertices, 0 );
 	assert.ok( meshNode.extras?.tail_surface_geodesic_length > 1.16 );
 	assert.ok( meshNode.extras?.tail_surface_geodesic_length < 1.18 );
 	assert.ok( meshNode.extras?.tail_rest_arc_length > 1.13 );
@@ -303,11 +308,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-001 GLB is self-contained, bounded and structura
 		meshNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( meshNode.extras?.anatomy_contract_version, '2.0.0' );
-	assert.equal( meshNode.extras?.distal_anatomy_fit, 'exact-surface-zygodactyl-fork-v1' );
-	assert.equal( meshNode.extras?.proximal_joint_fit, 'orthographic-surface-landmarks-flexed-v2' );
-	assert.equal( meshNode.extras?.tail_static_collar_bone, 'tail_01' );
-	assert.equal( meshNode.extras?.tail_dynamic_root_bone, 'tail_02' );
+	assert.equal( meshNode.extras?.anatomy_contract_version, '2.1.0' );
+	assert.equal( meshNode.extras?.distal_anatomy_fit, 'closed-volume-zygodactyl-medial-axis-v2' );
+	assert.equal( meshNode.extras?.proximal_joint_fit, 'surface-medial-flexed-v3' );
+	assert.equal( meshNode.extras?.tail_static_collar_bone, 'tail_03' );
+	assert.equal( meshNode.extras?.tail_dynamic_root_bone, 'tail_04' );
 	assert.equal( meshNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( meshNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( meshNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -529,7 +534,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	const rigNodeIndex = nodeByName.get( 'Chameleon_Physics_Armature' );
 	assert.notEqual( rigNodeIndex, undefined, 'rig root node is missing' );
 	const rigNode = gltf.nodes[ rigNodeIndex ];
-	assert.equal( rigNode.extras?.rig_version, '3.4.0' );
+	assert.equal( rigNode.extras?.rig_version, '3.5.0' );
 	assert.match( rigNode.extras?.coordinate_contract ?? '', /head=-X.*tail-root=\+X.*original-curled.*glTF Y-up/u );
 	assert.equal( rigNode.extras?.visual_bones, 43 );
 	assert.equal( rigNode.extras?.visual_deformation_bones, 42 );
@@ -542,10 +547,15 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 	assert.equal( rigNode.extras?.original_tail_vertices, EXPECTED_ORIGINAL_TAIL_VERTICES );
 	assert.equal( rigNode.extras?.original_tail_rest_position_sha256, EXPECTED_TAIL_REST_SHA256 );
 	assert.equal( rigNode.extras?.tail_deformation_mode, 'surface-geodesic-bspline-12' );
-	assert.equal( rigNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+body-interface-feather' );
-	assert.equal( rigNode.extras?.tail_body_blend_vertices, 1184 );
-	assert.equal( rigNode.extras?.tail_body_blend_geodesic_fraction, 0.12 );
-	assert.equal( rigNode.extras?.tail_body_blend_maximum, 0.72 );
+	assert.equal( rigNode.extras?.tail_weighting, 'surface-geodesic-cubic-bspline+rigid-sacral-guard-v2' );
+	assert.equal( rigNode.extras?.tail_body_blend_vertices, 2410 );
+	assert.equal( rigNode.extras?.tail_body_blend_geodesic_fraction, 0.28 );
+	assert.equal( rigNode.extras?.tail_body_blend_maximum, 1 );
+	assert.equal( rigNode.extras?.tail_static_collar_bones, 'tail_01,tail_02,tail_03' );
+	assert.equal( rigNode.extras?.tail_dynamic_weight_start_geodesic_fraction, 0.25 );
+	assert.ok( rigNode.extras?.tail_rigid_guard_vertices >= rigNode.extras?.tail_interface_vertices );
+	assert.equal( rigNode.extras?.body_tail_weight_vertices, 0 );
+	assert.equal( rigNode.extras?.tail_interface_dynamic_weight_vertices, 0 );
 	assert.equal( rigNode.extras?.tail_rest_bone_axis, 'local +Y' );
 	assert.equal( rigNode.extras?.tail_physics_dofs, 0 );
 	assert.equal( rigNode.extras?.skinning_model, 'linear-blend-gltf' );
@@ -553,11 +563,11 @@ test( 'CHAMELEON-PHYSICAL-ASSET-002 skin weights and anatomical hierarchy satisf
 		rigNode.extras?.deformation_gap_guard,
 		'closed-shared-topology+coincident-weight-lock+double-sided',
 	);
-	assert.equal( rigNode.extras?.anatomy_contract_version, '2.0.0' );
-	assert.equal( rigNode.extras?.distal_anatomy_fit, 'exact-surface-zygodactyl-fork-v1' );
-	assert.equal( rigNode.extras?.proximal_joint_fit, 'orthographic-surface-landmarks-flexed-v2' );
-	assert.equal( rigNode.extras?.tail_static_collar_bone, 'tail_01' );
-	assert.equal( rigNode.extras?.tail_dynamic_root_bone, 'tail_02' );
+	assert.equal( rigNode.extras?.anatomy_contract_version, '2.1.0' );
+	assert.equal( rigNode.extras?.distal_anatomy_fit, 'closed-volume-zygodactyl-medial-axis-v2' );
+	assert.equal( rigNode.extras?.proximal_joint_fit, 'surface-medial-flexed-v3' );
+	assert.equal( rigNode.extras?.tail_static_collar_bone, 'tail_03' );
+	assert.equal( rigNode.extras?.tail_dynamic_root_bone, 'tail_04' );
 	assert.equal( rigNode.extras?.rest_deformation_contract, 'inverse-bind-identity-lbs' );
 	assert.equal( rigNode.extras?.limb_weighting, 'geodesic-component-envelope-v1' );
 	assert.equal( rigNode.extras?.limb_reweighted_vertices, 10_125 );
@@ -791,6 +801,7 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 	const { gltf, binary } = parseGlb( assetBytes );
 	const primitive = gltf.meshes[ 0 ].primitives[ 0 ];
 	const positions = createAccessorReader( gltf, binary, primitive.attributes.POSITION );
+	const indices = createAccessorReader( gltf, binary, primitive.indices );
 	const joints = createAccessorReader( gltf, binary, primitive.attributes.JOINTS_0 );
 	const weights = createAccessorReader( gltf, binary, primitive.attributes.WEIGHTS_0 );
 	const skinJointNames = gltf.skins[ 0 ].joints.map( ( nodeIndex ) => gltf.nodes[ nodeIndex ].name );
@@ -808,11 +819,78 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 		}
 
 	};
+	const triangleCoordinates = new Float32Array( indices.accessor.count * 3 );
+	for ( let corner = 0; corner < indices.accessor.count; corner ++ ) {
+
+		const vertex = indices.read( corner, 0 );
+		for ( let lane = 0; lane < 3; lane ++ )
+			triangleCoordinates[ corner * 3 + lane ] = positions.read( vertex, lane );
+
+	}
+	const rayDirections = [
+		[ 0.913372, 0.287913, 0.287271 ],
+		[ 0.231729, 0.947321, 0.220492 ],
+		[ 0.307822, 0.191283, 0.932021 ],
+	];
+	const insideClosedMesh = point => {
+
+		let insideVotes = 0;
+		for ( const rayDirection of rayDirections ) {
+
+			const intersections = [];
+			for ( let triangle = 0; triangle < indices.accessor.count; triangle += 3 ) {
+
+			const first = triangle * 3;
+			const second = first + 3;
+			const third = first + 6;
+			const e1x = triangleCoordinates[ second ] - triangleCoordinates[ first ];
+			const e1y = triangleCoordinates[ second + 1 ] - triangleCoordinates[ first + 1 ];
+			const e1z = triangleCoordinates[ second + 2 ] - triangleCoordinates[ first + 2 ];
+			const e2x = triangleCoordinates[ third ] - triangleCoordinates[ first ];
+			const e2y = triangleCoordinates[ third + 1 ] - triangleCoordinates[ first + 1 ];
+			const e2z = triangleCoordinates[ third + 2 ] - triangleCoordinates[ first + 2 ];
+			const hx = rayDirection[ 1 ] * e2z - rayDirection[ 2 ] * e2y;
+			const hy = rayDirection[ 2 ] * e2x - rayDirection[ 0 ] * e2z;
+			const hz = rayDirection[ 0 ] * e2y - rayDirection[ 1 ] * e2x;
+			const determinant = e1x * hx + e1y * hy + e1z * hz;
+			if ( Math.abs( determinant ) < 1e-10 ) continue;
+			const inverse = 1 / determinant;
+			const sx = point[ 0 ] - triangleCoordinates[ first ];
+			const sy = point[ 1 ] - triangleCoordinates[ first + 1 ];
+			const sz = point[ 2 ] - triangleCoordinates[ first + 2 ];
+			const u = inverse * ( sx * hx + sy * hy + sz * hz );
+			if ( u < -1e-8 || u > 1 + 1e-8 ) continue;
+			const qx = sy * e1z - sz * e1y;
+			const qy = sz * e1x - sx * e1z;
+			const qz = sx * e1y - sy * e1x;
+			const v = inverse * (
+				rayDirection[ 0 ] * qx + rayDirection[ 1 ] * qy + rayDirection[ 2 ] * qz
+			);
+			if ( v < -1e-8 || u + v > 1 + 1e-8 ) continue;
+			const rayDistance = inverse * ( e2x * qx + e2y * qy + e2z * qz );
+			if ( rayDistance > 1e-7 ) intersections.push( rayDistance );
+
+			}
+			intersections.sort( ( first, second ) => first - second );
+			let distinct = 0;
+			let previous = -Infinity;
+			for ( const intersection of intersections ) {
+
+				if ( Math.abs( intersection - previous ) <= 1e-6 ) continue;
+				distinct ++;
+				previous = intersection;
+
+			}
+			if ( ( distinct & 1 ) === 1 ) insideVotes ++;
+		}
+		return insideVotes >= 2;
+
+	};
 	const proximal = {
-		'front.L': [ [ -0.135, 0.06, 0.125 ], [ -0.175, 0.14, 0.095 ], [ -0.085, 0.225, 0.015 ], [ -0.135, 0.285, -0.175 ] ],
-		'front.R': [ [ -0.135, -0.06, 0.125 ], [ -0.175, -0.14, 0.095 ], [ -0.085, -0.225, 0.015 ], [ -0.135, -0.285, -0.175 ] ],
-		'hind.L': [ [ 0.105, 0.06, 0.12 ], [ 0.145, 0.145, 0.13 ], [ 0.005, 0.225, 0.045 ], [ 0.07, 0.305, -0.035 ] ],
-		'hind.R': [ [ 0.105, -0.06, 0.12 ], [ 0.145, -0.145, 0.13 ], [ 0.005, -0.225, 0.045 ], [ 0.07, -0.305, -0.035 ] ],
+		'front.L': [ [ -0.135, 0.06, 0.125 ], [ -0.175, 0.14, 0.095 ], [ -0.11, 0.172, 0.015 ], [ -0.142, 0.195, -0.175 ] ],
+		'front.R': [ [ -0.135, -0.06, 0.125 ], [ -0.175, -0.14, 0.095 ], [ -0.11, -0.172, 0.015 ], [ -0.14, -0.195, -0.175 ] ],
+		'hind.L': [ [ 0.105, 0.06, 0.12 ], [ 0.135, 0.145, 0.125 ], [ 0.03, 0.225, 0.075 ], [ 0.075, 0.27, -0.035 ] ],
+		'hind.R': [ [ 0.105, -0.06, 0.12 ], [ 0.135, -0.145, 0.125 ], [ 0.03, -0.225, 0.075 ], [ 0.075, -0.27, -0.035 ] ],
 	};
 	const roleContract = {
 		front: [ 'thorax-to-shoulder', 'shoulder-to-elbow', 'elbow-to-wrist' ],
@@ -827,6 +905,22 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 
 			assertClose( chain[ joint ].extras.rest_tail_local, points[ joint + 1 ] );
 			assert.equal( chain[ joint ].extras.anatomical_role, roleContract[ limb ][ joint ] );
+
+		}
+		for ( let segment = 0; segment < points.length - 1; segment ++ ) {
+
+			for ( let sample = 1; sample <= 39; sample ++ ) {
+
+				const ratio = sample / 40;
+				const blenderPoint = points[ segment ].map( ( value, lane ) =>
+					value + ( points[ segment + 1 ][ lane ] - value ) * ratio );
+				const gltfPoint = [ blenderPoint[ 0 ], blenderPoint[ 2 ], -blenderPoint[ 1 ] ];
+				assert.ok(
+					insideClosedMesh( gltfPoint ),
+					`${ limbKey } segment ${ segment } exits the closed skin at sample ${ sample }/40`,
+				);
+
+			}
 
 		}
 		const upper = points[ 2 ].map( ( value, lane ) => value - points[ 1 ][ lane ] );
@@ -847,12 +941,16 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_head_local, [ -0.275, 0, 0.045 ] );
 	assertClose( nodeByName.get( 'jaw' ).extras.rest_tail_local, [ -0.455, 0, -0.015 ] );
 	assert.equal( nodeByName.get( 'jaw' ).extras.anatomical_role, 'jaw-hinge-to-snout' );
-	assert.equal( nodeByName.get( 'tail_01' ).extras.anatomical_role, 'sacral-tail-collar' );
-	assert.equal( nodeByName.get( 'tail_01' ).extras.tail_dynamic, false );
-	assert.equal( nodeByName.get( 'tail_02' ).extras.tail_dynamic, true );
+	for ( const name of [ 'tail_01', 'tail_02', 'tail_03' ] ) {
+
+		assert.equal( nodeByName.get( name ).extras.anatomical_role, 'sacral-tail-collar' );
+		assert.equal( nodeByName.get( name ).extras.tail_dynamic, false );
+
+	}
+	assert.equal( nodeByName.get( 'tail_04' ).extras.tail_dynamic, true );
 	assertClose(
-		nodeByName.get( 'tail_02' ).extras.rest_head_local,
-		[ 0.32217520475387573, -0.06899616867303848, 0.056571055203676224 ],
+		nodeByName.get( 'tail_04' ).extras.rest_head_local,
+		[ 0.3975178003311157, -0.1793597936630249, -0.1213325709104538 ],
 		2e-6,
 	);
 
@@ -918,9 +1016,10 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 		assert.equal( outer.extras.anatomical_role, 'opposed-digit-outer' );
 		assert.equal( inner.extras.tip_medial_surface_fit, true );
 		assert.equal( outer.extras.tip_medial_surface_fit, true );
-		assert.ok( inner.extras.rest_length >= 0.09 && inner.extras.rest_length <= 0.11 );
-		assert.ok( outer.extras.rest_length >= 0.03 && outer.extras.rest_length <= 0.05 );
-		assert.ok( innerTip[ 0 ] < root[ 0 ] - 0.06, `${ limbKey } inner branch must oppose X` );
+		assert.ok( inner.extras.rest_length >= 0.08 && inner.extras.rest_length <= 0.11 );
+		assert.ok( outer.extras.rest_length >= ( limb === 'front' ? 0.10 : 0.03 )
+			&& outer.extras.rest_length <= ( limb === 'front' ? 0.125 : 0.05 ) );
+		assert.ok( innerTip[ 0 ] < root[ 0 ] - 0.05, `${ limbKey } inner branch must oppose X` );
 		const sideSign = side === 'L' ? 1 : -1;
 		assert.ok( ( outerTip[ 1 ] - root[ 1 ] ) * sideSign > 0.02,
 			`${ limbKey } outer branch must extend laterally` );
@@ -931,6 +1030,22 @@ test( 'CHAMELEON-PHYSICAL-ASSET-004 anatomical pivots, zygodactyl forks and dist
 		assert.ok( forkAngle >= 35 * Math.PI / 180, `${ limbKey } fork angle is ${ forkAngle }` );
 		assert.ok( nearestExported( innerTip ).distance < 0.02 );
 		assert.ok( nearestExported( outerTip ).distance < 0.02 );
+		for ( const [ label, start, end ] of [
+			[ 'palm', palm.extras.rest_head_local, root ],
+			[ 'inner digit', root, innerTip ],
+			[ 'outer digit', root, outerTip ],
+		] ) for ( let sample = 1; sample <= 39; sample ++ ) {
+
+			const ratio = sample / 40;
+			const blenderPoint = start.map(
+				( value, lane ) => value + ( end[ lane ] - value ) * ratio,
+			);
+			assert.ok(
+				insideClosedMesh( blenderToGltf( blenderPoint ) ),
+				`${ limbKey } ${ label } exits the closed skin at sample ${ sample }/40`,
+			);
+
+		}
 
 		const patch = contactContract.slice( footIndex * 9, footIndex * 9 + 9 );
 		assert.deepEqual( palm.extras.contact_patch_points_rest, patch );

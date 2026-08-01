@@ -34,18 +34,18 @@ function frozenPreset( preset ) {
 
 }
 
-// Mean of the mirrored .L/.R values published by ChameleonPhysical.glb 3.4.
+// Mean of the mirrored .L/.R values published by ChameleonPhysical.glb 3.5.
 // Order: girdle, upper arm/thigh, forearm/shin, palm/sole, inner and outer digit.
 export const CHAMELEON_LIMB_PRESETS = Object.freeze( {
 	front: frozenPreset( {
 		kind: 'front',
 		lengths: [
 			0.0943398029,
-			0.1473939940,
-			0.2054263651,
-			0.0306180362,
-			0.0962318815,
-			0.0380432159,
+			0.1079305150,
+			0.1938839108,
+			0.0159373749,
+			0.0981043242,
+			0.1072259322,
 		],
 		// Components in [ forward, up, outward ] body space.
 		restGirdle: [ 0.423999, -0.317999, 0.847998 ],
@@ -59,14 +59,14 @@ export const CHAMELEON_LIMB_PRESETS = Object.freeze( {
 	hind: frozenPreset( {
 		kind: 'hind',
 		lengths: [
-			0.0944722071,
-			0.1822772250,
-			0.1304798871,
-			0.0923309363,
-			0.0985908210,
-			0.0399224292,
+			0.0902773514,
+			0.1411559433,
+			0.1270826608,
+			0.0562117994,
+			0.0853770897,
+			0.0455129333,
 		],
-		restGirdle: [ -0.423405, 0.105851, 0.899735 ],
+		restGirdle: [ -0.332309, 0.055385, 0.941543 ],
 		girdleSwingLimit: 1.12,
 		minimumFlexion: 0.68,
 		maximumFlexion: 2.66,

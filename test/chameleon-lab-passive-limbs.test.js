@@ -51,6 +51,92 @@ function distance( positions, first, second ) {
 
 }
 
+function pointCapsuleDistance( positions, pointOffset, capsule ) {
+
+	const abX = capsule[ 3 ] - capsule[ 0 ];
+	const abY = capsule[ 4 ] - capsule[ 1 ];
+	const abZ = capsule[ 5 ] - capsule[ 2 ];
+	const apX = positions[ pointOffset ] - capsule[ 0 ];
+	const apY = positions[ pointOffset + 1 ] - capsule[ 1 ];
+	const apZ = positions[ pointOffset + 2 ] - capsule[ 2 ];
+	const denominator = abX * abX + abY * abY + abZ * abZ;
+	const t = Math.max( 0, Math.min( 1,
+		( apX * abX + apY * abY + apZ * abZ ) / denominator,
+	) );
+	return Math.hypot(
+		positions[ pointOffset ] - ( capsule[ 0 ] + abX * t ),
+		positions[ pointOffset + 1 ] - ( capsule[ 1 ] + abY * t ),
+		positions[ pointOffset + 2 ] - ( capsule[ 2 ] + abZ * t ),
+	);
+
+}
+
+function segmentDistance( positions, firstOffset, secondOffset, thirdOffset, fourthOffset ) {
+
+	const ux = positions[ secondOffset ] - positions[ firstOffset ];
+	const uy = positions[ secondOffset + 1 ] - positions[ firstOffset + 1 ];
+	const uz = positions[ secondOffset + 2 ] - positions[ firstOffset + 2 ];
+	const vx = positions[ fourthOffset ] - positions[ thirdOffset ];
+	const vy = positions[ fourthOffset + 1 ] - positions[ thirdOffset + 1 ];
+	const vz = positions[ fourthOffset + 2 ] - positions[ thirdOffset + 2 ];
+	const wx = positions[ firstOffset ] - positions[ thirdOffset ];
+	const wy = positions[ firstOffset + 1 ] - positions[ thirdOffset + 1 ];
+	const wz = positions[ firstOffset + 2 ] - positions[ thirdOffset + 2 ];
+	const a = ux * ux + uy * uy + uz * uz;
+	const b = ux * vx + uy * vy + uz * vz;
+	const c = vx * vx + vy * vy + vz * vz;
+	const d = ux * wx + uy * wy + uz * wz;
+	const e = vx * wx + vy * wy + vz * wz;
+	const denominator = a * c - b * b;
+	let firstParameter = denominator > 1e-9 ? ( b * e - c * d ) / denominator : 0;
+	firstParameter = Math.max( 0, Math.min( 1, firstParameter ) );
+	let secondParameter = ( b * firstParameter + e ) / c;
+	if ( secondParameter < 0 ) {
+
+		secondParameter = 0;
+		firstParameter = Math.max( 0, Math.min( 1, -d / a ) );
+
+	} else if ( secondParameter > 1 ) {
+
+		secondParameter = 1;
+		firstParameter = Math.max( 0, Math.min( 1, ( b - d ) / a ) );
+
+	}
+	return Math.hypot(
+		positions[ firstOffset ] + ux * firstParameter
+			- positions[ thirdOffset ] - vx * secondParameter,
+		positions[ firstOffset + 1 ] + uy * firstParameter
+			- positions[ thirdOffset + 1 ] - vy * secondParameter,
+		positions[ firstOffset + 2 ] + uz * firstParameter
+			- positions[ thirdOffset + 2 ] - vz * secondParameter,
+	);
+
+}
+
+function rootMeanSquareDrift( positions, targets ) {
+
+	let squareSum = 0;
+	let count = 0;
+	for ( let limb = 0; limb < PASSIVE_LIMB_COUNT; limb ++ ) {
+
+		for ( let node = 1; node < PASSIVE_LIMB_NODE_COUNT; node ++ ) {
+
+			const offset = scalarOffset( limb, node );
+			for ( let component = 0; component < 3; component ++ ) {
+
+				const delta = positions[ offset + component ] - targets[ offset + component ];
+				squareSum += delta * delta;
+				count ++;
+
+			}
+
+		}
+
+	}
+	return Math.sqrt( squareSum / count );
+
+}
+
 function assertFiniteAndConstrained( ragdoll, tolerance = 0.004 ) {
 
 	assert.equal( ragdoll.isFinite(), true );
@@ -241,7 +327,11 @@ test( 'CHAMELEON-LAB-PASSIVE-LIMBS-004 all free nodes settle outside the ground 
 		}
 
 	}
-	assert.ok( state.calls > 100_000 );
+	assert.equal(
+		state.calls,
+		1_200 * PASSIVE_LIMB_COUNT * ( PASSIVE_LIMB_NODE_COUNT - 1 ),
+		'external scene projection must run once per free node and fixed step',
+	);
 	assert.equal( state.stableScratch, true );
 	assert.equal( ragdoll.stats.invalidCorrections, 0 );
 	assertFiniteAndConstrained( ragdoll, 0.01 );
@@ -300,5 +390,141 @@ test( 'CHAMELEON-LAB-PASSIVE-LIMBS-006 invalid collision output is rejected with
 	assert.ok( ragdoll.stats.invalidCorrections > 0 );
 	assert.throws( () => ragdoll.applyImpulse( 4, 1, {} ), /limb/u );
 	assert.throws( () => ragdoll.interpolate( Number.NaN ), /alpha/u );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-LIMBS-007 configurable low muscle tone follows stable rest targets without becoming rigid', () => {
+
+	const targets = createInitialPositions();
+	const create = muscleTone => new PassiveLimbRagdoll( {
+		initialPositions: targets,
+		muscleTone,
+		damping: 1.6,
+		solverIterations: 10,
+	} );
+	const floppy = create( 0 );
+	const toned = create( 0.18 );
+	assert.notEqual( toned.muscleTargets, targets, 'targets must be copied into owned storage' );
+	const ownedTargets = toned.muscleTargets;
+	const view = toned.getView();
+	assert.equal( view.muscleTargets, ownedTargets );
+	assert.equal( toned.setMuscleTargets( targets ), toned );
+	assert.equal( toned.setMuscleTone( 0.18 ), toned );
+	for ( let step = 0; step < 360; step ++ ) {
+
+		floppy.stepFixed();
+		targets[ scalarOffset( 0, 4 ) + 2 ] += Math.sin( step * 0.02 ) * 1e-5;
+		assert.equal( toned.setMuscleTargets( targets ), toned );
+		assert.equal( toned.stepFixed(), view );
+		assert.equal( toned.muscleTargets, ownedTargets );
+
+	}
+	const floppyDrift = rootMeanSquareDrift( floppy.positions, targets );
+	const tonedDrift = rootMeanSquareDrift( toned.positions, targets );
+	assert.ok( floppyDrift > 0.05, 'gravity fixture did not produce a passive droop' );
+	assert.ok(
+		tonedDrift < floppyDrift * 0.7,
+		`low tone did not retain anatomy: toned=${ tonedDrift }, floppy=${ floppyDrift }`,
+	);
+	assert.ok( tonedDrift > 0.002, 'low tone must remain compliant rather than lock the pose' );
+	assertFiniteAndConstrained( toned, 0.01 );
+	assert.throws( () => toned.setMuscleTone( -0.01 ), /muscleTone/u );
+	assert.throws( () => toned.setMuscleTone( 1.01 ), /muscleTone/u );
+	assert.throws(
+		() => toned.setMuscleTargets( new Float32Array( 3 ) ),
+		/muscleTargets/u,
+	);
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-LIMBS-008 capsule constraints keep distal limbs outside the torso and each other', () => {
+
+	const initial = createInitialPositions();
+	initial.set( [
+		-0.35, 0.9, -0.2,
+		-0.3, 0.75, -0.15,
+		-0.18, 0.6, 0,
+		0.18, 0.6, 0,
+		0.28, 0.48, 0.08,
+	], scalarOffset( 0, 0 ) );
+	initial.set( [
+		-0.35, 0.9, 0.2,
+		-0.3, 0.75, 0.15,
+		0, 0.6, -0.18,
+		0, 0.6, 0.18,
+		0.08, 0.48, 0.28,
+	], scalarOffset( 1, 0 ) );
+	// Packed capsule layout: endpoint A xyz, endpoint B xyz, radius.
+	const torsoCapsules = new Float32Array( [
+		-0.24, 0.48, 0.08, 0.24, 0.48, 0.08, 0.095,
+	] );
+	const radii = new Float32Array(
+		PASSIVE_LIMB_COUNT * PASSIVE_LIMB_NODE_COUNT,
+	).fill( 0.035 );
+	const ragdoll = new PassiveLimbRagdoll( {
+		initialPositions: initial,
+		radii,
+		bodyCapsules: torsoCapsules,
+		selfCollision: true,
+		selfCollisionMargin: 0.004,
+		muscleTone: 0,
+		gravity: { x: 0, y: 0, z: 0 },
+		damping: 2.5,
+		solverIterations: 12,
+		minimumBend: 0.01,
+		maximumBend: 3,
+	} );
+	const ownedCapsules = ragdoll.bodyCapsules;
+	assert.notEqual( ownedCapsules, torsoCapsules );
+	assert.equal( ragdoll.getView().bodyCapsules, ownedCapsules );
+	for ( let step = 0; step < 180; step ++ ) ragdoll.stepFixed();
+
+	const firstSegmentStart = scalarOffset( 0, 2 );
+	const firstSegmentEnd = scalarOffset( 0, 3 );
+	const secondSegmentStart = scalarOffset( 1, 2 );
+	const secondSegmentEnd = scalarOffset( 1, 3 );
+	const separation = segmentDistance(
+		ragdoll.positions,
+		firstSegmentStart, firstSegmentEnd, secondSegmentStart, secondSegmentEnd,
+	);
+	assert.ok(
+		separation >= radii[ 2 ] + radii[ PASSIVE_LIMB_NODE_COUNT + 2 ] + 0.004 - 0.003,
+		`crossed limb capsules remain interwoven: clearance=${ separation }`,
+	);
+	const torsoNode = scalarOffset( 0, 4 );
+	assert.ok(
+		pointCapsuleDistance( ragdoll.positions, torsoNode, torsoCapsules )
+			>= torsoCapsules[ 6 ] + radii[ 4 ] - 0.003,
+		'distal limb remained embedded in the torso capsule',
+	);
+	assert.ok( ragdoll.stats.selfCollisionCorrections > 0 );
+	assert.ok( ragdoll.stats.bodyCollisionCorrections > 0 );
+	assert.equal( ragdoll.bodyCapsules, ownedCapsules );
+	assertFiniteAndConstrained( ragdoll, 0.012 );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-LIMBS-009 external scene projections are bounded independently of XPBD iterations', () => {
+
+	const run = solverIterations => {
+
+		const state = { calls: 0, stableScratch: true };
+		const ragdoll = new PassiveLimbRagdoll( {
+			initialPositions: createInitialPositions(),
+			gravity: { x: 0, y: 0, z: 0 },
+			solverIterations,
+		} );
+		const projector = groundProjector( state );
+		for ( let step = 0; step < 40; step ++ ) ragdoll.stepFixed( null, projector );
+		return state;
+
+	};
+	const low = run( 2 );
+	const high = run( 24 );
+	const expected = 40 * PASSIVE_LIMB_COUNT * ( PASSIVE_LIMB_NODE_COUNT - 1 );
+	assert.equal( low.calls, expected );
+	assert.equal( high.calls, expected );
+	assert.equal( low.stableScratch, true );
+	assert.equal( high.stableScratch, true );
 
 } );

@@ -15,9 +15,10 @@ visuelles ne sont pas une chaîne de corps rigides libre de s’entortiller.
 
 Le modèle visible reprend la géométrie originale, y compris les **7 206 sommets
 de la queue d’origine**. Elle n’est ni remplacée par un tube, ni reconstruite :
-douze os suivent sa courbure source, puis une simulation passive la laisse
-traîner, se balancer et se poser sur le décor. Le laboratoire ne fait pas
-avancer la colonie.
+douze os suivent sa courbure source. Les trois premiers forment un pont rigide
+au-dessus de la croupe ; la simulation passive commence sur le quatrième et
+laisse le reste traîner, se balancer et se poser sur le décor sans tirer le bas
+du dos. Le laboratoire ne fait pas avancer la colonie.
 
 ## Ouvrir le laboratoire
 
@@ -75,7 +76,10 @@ différentes, par exemple dans un angle entre le sol et un mur.
 
 Le squelette de référence reprend la flexion visible du modèle : épaules,
 hanches, coudes et genoux sont placés dans les volumes anatomiques correspondants
-et non sur une hypothétique patte droite. Le talon, la paume et les deux groupes de doigts forment maintenant une seule
+et non sur une hypothétique patte droite. Les axes exportés des bras et jambes
+sont aussi vérifiés à l’intérieur du volume fermé de la peau ; le tracé de debug
+montre ces mêmes axes, sans inventer de raccord entre deux articulations. Le
+talon, la paume et les deux groupes de doigts forment maintenant une seule
 semelle exportée avec le modèle. Une main ou un pied doit donc reposer à plat :
 le runtime ne tire plus uniquement les orteils vers la surface. Le cou et la
 tête conservent de petits mouvements de regard au repos, sans provoquer de pas
@@ -86,11 +90,13 @@ marche reste celui du corps entier et non l’axe local incliné d’un os de co
 
 La touche `F` suspend la recherche d’appuis et la stabilisation du corps. Le
 corps unique tombe, glisse, rebondit et peut être lancé sous l’action de Rapier.
-Les quatre membres perdent alors leur tonus et pendent comme des chaînes
-articulées, puis récupèrent progressivement leur pose lorsque la locomotion est
-réactivée. Ce mode sert à vérifier la gravité et les collisions. Ce n’est pas un
-ragdoll Rapier à 33 corps : le calcul passif local reste borné et ne peut pas
-s’enrouler librement autour du tronc.
+Les quatre membres deviennent souples, tout en conservant une faible tension
+musculaire : ils ploient et suivent l’inertie sans pendre comme des chaînes
+mortes. Des volumes de protection autour du torse et de la tête empêchent leur
+enfoncement dans le corps ; les segments des membres se repoussent aussi pour ne
+pas s’entrecroiser. Ils récupèrent progressivement leur pose lorsque la
+locomotion est réactivée. Ce mode sert à vérifier la gravité et les collisions.
+Ce n’est pas un ragdoll Rapier à 33 corps : le calcul passif local reste borné.
 
 ## Exercices de validation
 
@@ -117,9 +123,10 @@ comportement distingue la préhension d’une adhésion de gecko.
 
 Passez en **Physique libre**, saisissez le corps au clic gauche, secouez
 l’animal puis relâchez-le. Le modèle entier doit suivre le même corps Rapier,
-sans séparation des membres ni explosion d’articulations. Réactivez ensuite la
-locomotion stabilisée : les appuis et l’orientation doivent revenir
-progressivement, sans téléportation.
+sans séparation des membres ni explosion d’articulations. Les pattes doivent
+rester souples avec une tension légère, sans traverser le torse, la tête ou une
+autre patte. Réactivez ensuite la locomotion stabilisée : les appuis et
+l’orientation doivent revenir progressivement, sans téléportation.
 
 Lancez aussi l’animal contre un mur rugueux, un tronc ou un cylindre. S’il entre
 réellement en collision avec une surface autorisée, ses semelles doivent la
@@ -142,6 +149,8 @@ impossible à agripper.
 
 - **Stabilité du corps** dose le rappel vers le cadre formé par les appuis ;
 - **Amortissement** réduit les oscillations et dépassements ;
+- **Tonus passif** règle la tension musculaire résiduelle pendant une saisie ou
+  en **Physique libre**, sans rigidifier les pattes ;
 - **Cadence** règle le rythme des pas diagonaux ;
 - **Longueur du pas** détermine l’avancée de chaque cible ;
 - **Hauteur du pas** règle le dégagement pendant le transfert ;
@@ -172,13 +181,15 @@ impossible à agripper.
 - **Collision** agrandit ou réduit le rayon de contact des treize nœuds ;
 - **Gravité queue** dose son poids sans modifier la gravité du corps.
 
-Le court collet de la queue suit rigidement le bassin jusqu’après la croupe ; la
-partie passive commence au second os. Les onze segments dynamiques et leur
-extrémité conservent leur longueur, répondent à l’inertie et sont projetés hors du sol,
-des murs, des rochers et des troncs. La queue n’est pas préhensile dans ce
-prototype. Quand elle est réellement au repos, elle passe en sommeil : sa pose
-reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un nouveau
-mouvement du corps ou une impulsion.
+Le collet de la queue suit rigidement le bassin jusqu’après la croupe :
+`tail_01`, `tail_02` et `tail_03` restent solidaires du bas du dos, puis la
+partie passive commence sur `tail_04`. Les neuf segments dynamiques conservent
+leur longueur, répondent à l’inertie et sont projetés hors du sol, des murs, des
+rochers et des troncs. Ce raccord empêche une forte courbure de la queue de
+creuser ou couper la silhouette des fesses. La queue n’est pas préhensile dans
+ce prototype. Quand elle est réellement au repos, elle passe en sommeil : sa
+pose reste alors parfaitement fixe, sans tremblement subpixel, jusqu’à un
+nouveau mouvement du corps ou une impulsion.
 
 ### Appuis
 
@@ -225,12 +236,13 @@ sur le verre, pendant une saisie, un lancer ou en mode **Physique libre**.
 ## Ce qui signale un défaut
 
 - une patte s’entortille, dépasse durablement ses angles anatomiques ou traverse
-  le tronc ;
+  le tronc, la tête ou un autre membre ;
 - le corps change instantanément de position sans `R` ;
 - un pied reste pris dans le vide ou sur le verre ;
 - le corps traverse durablement le sol, un mur, un rocher ou un tronc ;
 - la queue est remplacée par une forme tubulaire, s’allonge, se détache du
-  bassin, traverse durablement un obstacle ou oscille sans perdre d’énergie ;
+  bassin, creuse la croupe, traverse durablement un obstacle ou oscille sans
+  perdre d’énergie ;
 - **Intégrité** affiche un nombre au lieu de `OK` ;
 - la route normale de la colonie charge le laboratoire ou son moteur Rapier.
 

@@ -604,7 +604,7 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-013 sleep and wake remain fixed-step invariant
 
 } );
 
-test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 sacral collar stays rigid and dynamics begin at tail two', () => {
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 sacral collar stays rigid and dynamics begin at tail four', () => {
 
 	const tail = createPassiveTailPhysics( {
 		rootPosition: { x: 0.2, y: 0.5, z: -0.1 },
@@ -634,6 +634,110 @@ test( 'CHAMELEON-LAB-PASSIVE-TAIL-014 sacral collar stays rigid and dynamics beg
 
 	}
 	assert.ok( tail.maxSegmentError() < 2e-4 );
+	assertBuffersFinite( tail );
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-015 three proximal segments use four exact allocation-stable kinematic anchors', () => {
+
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0.2, y: 0.5, z: -0.1 },
+		segmentLength: 0.08,
+		gravity: { x: 0, y: -9.81, z: 0 },
+		kinematicSegmentCount: 3,
+	} );
+	assert.equal( tail.kinematicSegmentCount, 3 );
+	assert.equal( tail.kinematicNodeCount, 4 );
+	assert.equal( tail.getView().kinematicNodeCount, 4 );
+	const ownedAnchors = tail.kinematicAnchors;
+	assert.equal( tail.getView().kinematicAnchors, ownedAnchors );
+	for ( let node = 0; node < 4; node ++ ) assert.equal( tail.inverseMasses[ node ], 0 );
+	assert.throws( () => tail.applyImpulse( 3, { x: 1, y: 0, z: 0 } ), /passive node/u );
+
+	const anchors = new Float32Array( 12 );
+	for ( let step = 0; step < 360; step ++ ) {
+
+		const angle = step * 0.002;
+		const directionX = Math.cos( angle );
+		const directionZ = Math.sin( angle );
+		const rootX = 0.2 + step * 0.0001;
+		for ( let node = 0; node < 4; node ++ ) {
+
+			const offset = node * 3;
+			anchors[ offset ] = rootX + directionX * 0.08 * node;
+			anchors[ offset + 1 ] = 0.5;
+			anchors[ offset + 2 ] = -0.1 + directionZ * 0.08 * node;
+
+		}
+		assert.equal( tail.setKinematicAnchors( anchors ), tail );
+		tail.stepFixed();
+		for ( let index = 0; index < anchors.length; index ++ ) {
+
+			assert.ok( Math.abs( tail.positions[ index ] - anchors[ index ] ) < 2e-6 );
+			assert.equal( tail.previousPositions[ index ], tail.positions[ index ] );
+
+		}
+		assert.equal( tail.kinematicAnchors, ownedAnchors );
+
+	}
+	assert.ok( tail.maxSegmentError() < 2e-4 );
+	assertBuffersFinite( tail );
+	assert.throws(
+		() => tail.setKinematicAnchors( new Float32Array( 9 ) ),
+		/kinematicAnchors/u,
+	);
+	assert.throws(
+		() => createPassiveTailPhysics( { kinematicSegmentCount: 12 } ),
+		/kinematicSegmentCount/u,
+	);
+
+} );
+
+test( 'CHAMELEON-LAB-PASSIVE-TAIL-016 external projections stay bounded and sleeping tail ignores sub-threshold anchor noise', () => {
+
+	const callbackState = { calls: 0, stableScratch: true };
+	const tail = createPassiveTailPhysics( {
+		rootPosition: { x: 0, y: 0.6, z: 0 },
+		segmentLength: 0.065,
+		damping: 2.2,
+		solverIterations: 20,
+		kinematicSegmentCount: 3,
+		projectPoint: planeProjector( callbackState ),
+	} );
+	const expectedCallsPerAwakeStep = PASSIVE_TAIL_NODE_COUNT - 4;
+	for ( let step = 0; step < 24; step ++ ) tail.stepFixed();
+	assert.equal( callbackState.calls, 24 * expectedCallsPerAwakeStep );
+	for ( let step = 24; step < 8_000 && ! tail.isSleeping(); step ++ ) tail.stepFixed();
+	assert.equal( tail.isSleeping(), true );
+	assert.equal( tail.maxNodeSpeed(), 0 );
+	assert.equal( tail.kineticEnergy(), 0 );
+
+	const anchors = tail.kinematicAnchors.slice();
+	const passivePose = tail.positions.slice( 12 );
+	const callsAtSleep = callbackState.calls;
+	const wakeCount = tail.stats.wakeCount;
+	for ( let step = 0; step < 20_000; step ++ ) {
+
+		const offset = ( step & 1 ? -1 : 1 ) * tail.sleepRootThreshold * 0.25;
+		for ( let node = 0; node < 4; node ++ ) {
+
+			const scalar = node * 3;
+			anchors[ scalar ] = tail.restOffsets[ scalar ] + offset;
+			anchors[ scalar + 1 ] = 0.6 + tail.restOffsets[ scalar + 1 ];
+			anchors[ scalar + 2 ] = tail.restOffsets[ scalar + 2 ];
+
+		}
+		tail.setKinematicAnchors( anchors );
+		tail.stepFixed();
+		assert.equal( tail.isSleeping(), true );
+
+	}
+	assert.deepEqual( Array.from( tail.positions.slice( 12 ) ), Array.from( passivePose ) );
+	assert.equal( tail.stats.wakeCount, wakeCount );
+	assert.equal( callbackState.calls, callsAtSleep );
+	assert.equal( tail.maxNodeSpeed(), 0 );
+	assert.equal( tail.kineticEnergy(), 0 );
+	assert.equal( callbackState.stableScratch, true );
 	assertBuffersFinite( tail );
 
 } );

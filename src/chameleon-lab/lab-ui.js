@@ -342,6 +342,17 @@ export function createLabUI( {
 	} );
 	makeRange( {
 		parent: muscles,
+		label: 'Tonus passif',
+		object: ragdoll.settings,
+		property: 'limbMuscleTone',
+		min: 0,
+		max: 0.45,
+		step: 0.01,
+		format: ( value ) => value.toFixed( 2 ),
+		help: 'Tension musculaire résiduelle pendant la saisie et le mode physique libre.',
+	} );
+	makeRange( {
+		parent: muscles,
 		label: 'Cadence',
 		object: ragdoll.settings,
 		property: 'gaitFrequency',

@@ -64,9 +64,9 @@ test( 'ANATOMICAL-LIMB-001 presets preserve the exact exported rig axes and segm
 	assert.equal( CHAMELEON_RIG_AXES.leftSideSign, -1 );
 	assert.equal( CHAMELEON_RIG_AXES.rightSideSign, 1 );
 	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 0 ] - 0.0943398029 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 2 ] - 0.2054263651 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 1 ] - 0.1822772250 ) < 1e-10 );
-	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 3 ] - 0.0923309363 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.front.lengths[ 2 ] - 0.1938839108 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 1 ] - 0.1411559433 ) < 1e-10 );
+	assert.ok( Math.abs( CHAMELEON_LIMB_PRESETS.hind.lengths[ 3 ] - 0.0562117994 ) < 1e-10 );
 	assert.ok( CHAMELEON_LIMB_PRESETS.front.girdleSwingLimit > 1 );
 	assert.ok( CHAMELEON_LIMB_PRESETS.hind.girdleSwingLimit > 1 );
 

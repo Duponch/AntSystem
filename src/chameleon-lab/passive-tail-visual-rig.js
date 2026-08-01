@@ -48,15 +48,27 @@ export class PassiveTailVisualRig {
 		this.segmentLengths = Float32Array.from(
 			this.metadata.tail_rest_segment_lengths,
 		);
+		this.staticBoneCount = typeof this.metadata.tail_static_collar_bones === 'string'
+			? this.metadata.tail_static_collar_bones.split( ',' ).filter( Boolean ).length
+			: 1;
+		if ( this.staticBoneCount < 1 || this.staticBoneCount >= this.bones.length )
+			throw new Error( 'Hybrid chameleon static tail collar metadata is invalid.' );
 		this.restWorldPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
+		this.rebasedPositions = new Float32Array( PASSIVE_TAIL_NODE_COUNT * 3 );
 		this._bonePosition = new THREE.Vector3();
 		this._nextPosition = new THREE.Vector3();
+		this._physicsRoot = new THREE.Vector3();
+		this._visualRoot = new THREE.Vector3();
+		this._physicsDirection = new THREE.Vector3();
+		this._visualDirection = new THREE.Vector3();
+		this._relative = new THREE.Vector3();
 		this._currentDirection = new THREE.Vector3();
 		this._desiredDirection = new THREE.Vector3();
 		this._worldQuaternion = new THREE.Quaternion();
 		this._parentWorldQuaternion = new THREE.Quaternion();
 		this._deltaQuaternion = new THREE.Quaternion();
 		this._candidateQuaternion = new THREE.Quaternion();
+		this._rebaseQuaternion = new THREE.Quaternion();
 		this.captureRestWorldPositions( this.restWorldPositions );
 
 	}
@@ -94,7 +106,42 @@ export class PassiveTailVisualRig {
 
 		if ( ! positions || positions.length < PASSIVE_TAIL_NODE_COUNT * 3 )
 			throw new RangeError( 'tail pose buffer is too short' );
-		for ( let index = 0; index < this.bones.length; index ++ ) {
+		const collarIndex = this.staticBoneCount - 1;
+		const collar = this.bones[ collarIndex ];
+		collar.updateWorldMatrix( true, true );
+		collar.getWorldPosition( this._bonePosition );
+		collar.getWorldQuaternion( this._worldQuaternion );
+		this._visualRoot.copy( LOCAL_BONE_AXIS )
+			.multiplyScalar( this.segmentLengths[ collarIndex ] )
+			.applyQuaternion( this._worldQuaternion )
+			.add( this._bonePosition );
+		const rootOffset = this.staticBoneCount * 3;
+		const previousOffset = rootOffset - 3;
+		this._physicsRoot.fromArray( positions, rootOffset );
+		this._physicsDirection.set(
+			positions[ rootOffset ] - positions[ previousOffset ],
+			positions[ rootOffset + 1 ] - positions[ previousOffset + 1 ],
+			positions[ rootOffset + 2 ] - positions[ previousOffset + 2 ],
+		);
+		this._visualDirection.subVectors( this._visualRoot, this._bonePosition );
+		if ( this._physicsDirection.lengthSq() > 1e-10
+			&& this._visualDirection.lengthSq() > 1e-10 )
+			this._rebaseQuaternion.setFromUnitVectors(
+				this._physicsDirection.normalize(), this._visualDirection.normalize(),
+			);
+		else this._rebaseQuaternion.identity();
+		for ( let node = this.staticBoneCount; node < PASSIVE_TAIL_NODE_COUNT; node ++ ) {
+
+			const offset = node * 3;
+			this._relative.fromArray( positions, offset ).sub( this._physicsRoot )
+				.applyQuaternion( this._rebaseQuaternion ).add( this._visualRoot );
+			this.rebasedPositions[ offset ] = this._relative.x;
+			this.rebasedPositions[ offset + 1 ] = this._relative.y;
+			this.rebasedPositions[ offset + 2 ] = this._relative.z;
+
+		}
+
+		for ( let index = this.staticBoneCount; index < this.bones.length; index ++ ) {
 
 			const bone = this.bones[ index ];
 			bone.updateWorldMatrix( true, true );
@@ -104,9 +151,9 @@ export class PassiveTailVisualRig {
 				.applyQuaternion( this._worldQuaternion ).normalize();
 			const offset = index * 3;
 			this._desiredDirection.set(
-				positions[ offset + 3 ] - positions[ offset ],
-				positions[ offset + 4 ] - positions[ offset + 1 ],
-				positions[ offset + 5 ] - positions[ offset + 2 ],
+				this.rebasedPositions[ offset + 3 ] - this.rebasedPositions[ offset ],
+				this.rebasedPositions[ offset + 4 ] - this.rebasedPositions[ offset + 1 ],
+				this.rebasedPositions[ offset + 5 ] - this.rebasedPositions[ offset + 2 ],
 			);
 			if ( this._desiredDirection.lengthSq() < 1e-10 ) continue;
 			this._desiredDirection.normalize();
