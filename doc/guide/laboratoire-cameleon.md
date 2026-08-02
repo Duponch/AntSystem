@@ -87,7 +87,11 @@ possède un graphe partagé de toutes ses surfaces préhensiles : terrain contou
 les obstacles, faces des murs, troncs, bouchons et rochers. A* choisit au clic un
 corridor de surface, puis le caméléon le suit physiquement sans recherche à
 chaque image. À une jonction, il ne passe au jalon suivant qu’après avoir
-réellement pris la nouvelle surface. S’il tourne sans se rapprocher du corridor,
+réellement pris la nouvelle surface et aligné ses appuis avec sa normale. Le
+centre du corps n’a pas besoin de toucher exactement ce portail une fois ces
+deux preuves acquises : un rayon anatomique borné absorbe le décalage entre le
+bassin et les griffes. S’il tourne sans se rapprocher du corridor ni améliorer
+son alignement vers la nouvelle surface,
 une nouvelle route est calculée automatiquement ; le même échec n’est jamais
 rejoué indéfiniment. Les arêtes sont contournées avec la clearance du corps et
 non coupées en diagonale. Une commande clavier reprend immédiatement la priorité
@@ -104,7 +108,9 @@ portée avec la charge. Les membres se replient ensuite en l’air avec une
 compliance musculaire légère, sans poursuivre un cycle de marche. Les anciennes
 prises sont oubliées au décollage ; seule une surface dont un impact Rapier a
 d’abord établi le contact peut être reprise sans capture à distance. Saisir le
-corps ou activer **Physique libre** annule une précharge en cours : relâcher
+corps efface également les atterrissages de pieds encore mémorisés avant le
+clic : le relâcher contre un mur ne peut jamais réactiver simultanément le sol.
+Saisir le corps ou activer **Physique libre** annule une précharge en cours : relâcher
 ensuite `Espace` ne rejoue pas un ancien saut.
 
 ## Deux modes distincts
@@ -195,6 +201,12 @@ Essayez les perchoirs horizontal, diagonal et vertical, puis le plan rocheux
 incliné. Les pieds alternent entre phase d’appui et phase de transfert. Les
 cibles restent bornées autour du corps et les articulations restent proches de
 leur pose anatomique, même lorsqu’un support disparaît.
+
+Dirigez-le ensuite tout droit vers le gros rocher arrondi. Les griffes avant
+doivent trouver son flanc exposé, le corps monter sans tourner en boucle, puis
+les normales d’appui doivent suivre dans l’ordre le flanc, la couronne et la
+face opposée. Une griffe déjà levée peut être reciblée vers la courbure, mais sa
+trajectoire ne doit produire aucun saut visible d’un tick.
 
 Sur l’extrémité d’un perchoir cylindrique, au moins deux griffes doivent rester
 en prise pendant le passage du flanc au bouchon. Le corps continue au-delà de

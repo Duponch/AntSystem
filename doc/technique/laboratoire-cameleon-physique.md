@@ -346,6 +346,11 @@ de repli est autorisée pour un volume irrégulier qui intersecte réellement le
 sol mais dont tous les échantillons tombent légèrement sous son plan. Le graphe
 est ensuite figé en tableaux CSR typés (`offsets`, voisins, coûts, positions,
 normales, colliders et patches) et n’est jamais modifié par un animal.
+Le seuil angulaire d’un portail est la même constante que celui du transfert
+physique des griffes : le graphe ne peut donc plus publier une couture qu’une
+cohorte d’appuis refuserait ensuite. Les rochers convexes, sphères et volumes
+irréguliers déclarés `convex-shell` sont traités comme une enveloppe continue,
+sans confondre leurs faces réellement opposées.
 
 Le planificateur localise le support courant avec sa normale réelle et le point
 cliqué avec la normale du rayon. Il refuse de fabriquer un départ global lorsque
@@ -359,9 +364,16 @@ l’enveloppe de clearance au lieu d’en couper le coin par une corde.
 Un portail sol/mur ou flanc/bouchon n’est consommé que lorsque le collider et la
 normale attendus sont réellement devenus support du corps ; la proximité seule
 ne peut donc plus faire viser la suite depuis le mauvais côté d’une couture.
+Une fois ces deux preuves acquises, le bassin dispose d’un rayon de capture
+borné à `0,72 m` pour absorber son décalage anatomique par rapport aux griffes ;
+un jalon ordinaire et la destination finale conservent leur précision de
+`0,28 m`.
 
-Le watchdog mesure une diminution réelle de la distance au jalon actif. Tourner
-autour d’une arête sans progresser déclenche ainsi une replanification,
+Le watchdog mesure une diminution réelle de la distance au jalon actif. Pendant
+un portail, l’amélioration monotone de l’alignement vers la normale attendue
+compte également comme un progrès : se redresser sur un mur ou un rocher ne
+déclenche plus une fausse récupération. Tourner autour d’une arête sans réduire
+ni distance ni erreur de normale déclenche en revanche une replanification,
 effectuée hors de la boucle physique. Si A* republie exactement le corridor qui
 vient d’échouer, ce corridor est marqué épuisé et n’est plus recalculé en boucle ;
 la récupération tangentielle locale reste active. Une entrée clavier annule
@@ -380,7 +392,10 @@ aléatoires, le watchdog d’immobilité et le rappel des limites tournent tous 
 le plan local du support, sans allocation dans la boucle chaude.
 
 Le faisceau borné de recherche distingue les deux topologies autour d’une lèvre :
-le rayon avant acquiert le mur qui s’oppose au mouvement, puis un rayon de retour
+le rayon avant et deux rayons avant relevés forment un éventail à coût constant
+qui trouve le flanc exposé d’un rocher convexe ; un impact sur sa moitié basse,
+non porteuse, ne devient jamais une prise mais demande un dégagement borné du
+corps. Un rayon de retour
 placé au-delà de l’arête acquiert le sommet ou la face suivante qui accompagne
 le mouvement. Tout rayon dont l’origine est déjà à l’intérieur du collider visé
 est rejeté avant le classement ; il ne peut donc sélectionner artificiellement
@@ -388,6 +403,10 @@ l’envers ou la sous-face du même volume. Le filtre d’hémisphère des norma
 conserve simultanément l’ancien appui, la normale orthogonale de transition et
 le nouveau côté, ce qui rend continu le parcours sol → mur → sommet → face
 opposée avec la seule commande avant.
+Lorsqu’une surface courbe devient accessible pendant une enjambée, la griffe
+déjà en vol est reciblée sans recommencer le pas : sa courbe est rebasée sur sa
+pose courante, sa durée restante et son dégagement sont bornés, ce qui interdit
+le saut d’un tick observé avec une simple substitution de cible.
 
 `Espace` démarre une précharge tant qu’un support ou la tolérance au bord reste
 valide. Maintenir la touche augmente continûment deux cibles : hauteur
@@ -414,7 +433,9 @@ observée pendant le vol. Après libération des appuis, les canaux de pas
 
 La transition de prise est explicite. Au décollage, les propriétaires des
 quatre anciens contacts sont supprimés : ils ne peuvent pas réapparaître dans
-le vide. Seul un manifold Rapier réel du torse ou de la tête peut d’abord choisir
+le vide. La saisie efface aussi les propriétaires de touchdown encore mémorisés
+par la démarche ; un pas commencé avant le clic ne peut donc pas restaurer le
+sol après un impact sur un mur. Seul un manifold Rapier réel du torse ou de la tête peut d’abord choisir
 le collider propriétaire. Les semelles assez proches de ce collider déjà acquis
 amorcent ensuite le nouveau polygone de support ; leur simple proximité ne peut
 jamais capturer une surface distante. Une composante latérale rapide oriente la
@@ -613,6 +634,14 @@ ne sont reliées que sur une même surface voisine, à travers une couture court
 sur deux faces adjacentes d’un volume convexe, ou autour d’une branche
 explicitement identifiée. Des faces opposées ou deux îlots distants d’un même
 collider restent séparés.
+
+Pendant une locomotion réellement commandée, une griffe de tête marquée comme
+transfert explicite peut temporairement relier l’ancien et le nouveau collider
+sur la portée anatomique du corps. Ce droit n’existe ni à l’arrêt, ni pendant
+une chute ou une réacquisition d’impact. Il possède sa propre hystérésis
+entrée/sortie, puis son drapeau est supprimé dès que les quatre griffes forment
+de nouveau une cohorte sur un propriétaire unique ou que le verrou statique
+s’endort.
 
 La cohorte retenue doit former une composante connexe. Une hystérésis emploie
 une distance de sortie légèrement supérieure à la distance d’entrée ; après

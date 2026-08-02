@@ -2187,6 +2187,8 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 	let maximumFixedStepDisplacement = 0;
 	let maximumSupportAngle = 0;
 	let minimumContactState = '';
+	let currentLowSupportSteps = 0;
+	let longestLowSupportSteps = 0;
 	const previousPosition = new THREE.Vector3();
 	const previousNormal = fixture.chameleon.supportNormal.clone();
 	{
@@ -2196,7 +2198,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 
 	}
 	const checkpoints = [];
-	runFrames( fixture, 120, 11, ( _dt, step ) => {
+	runFrames( fixture, 120, 12, ( _dt, step ) => {
 
 		const normal = fixture.chameleon.supportNormal;
 		const position = fixture.chameleon.pelvis.body.translation();
@@ -2230,10 +2232,20 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 		maximumHeight = Math.max( maximumHeight, position.y );
 		farthestX = Math.min( farthestX, position.x );
 		minimumContacts = Math.min( minimumContacts, fixture.chameleon.contactCount );
+		if ( fixture.chameleon.contactCount < 2 ) {
+
+			currentLowSupportSteps ++;
+			longestLowSupportSteps = Math.max(
+				longestLowSupportSteps, currentLowSupportSteps,
+			);
+
+		} else currentLowSupportSteps = 0;
 		if ( fixture.chameleon.contactCount === minimumContacts && minimumContacts < 2 )
 			minimumContactState = 'step=' + step + ' '
 				+ fixture.chameleon.feet.map( ( foot ) =>
-					foot.state + ':' + ( foot.collider?.handle ?? '-' ),
+					foot.state + ':' + ( foot.collider?.handle ?? '-' )
+						+ ':' + ( foot._lockedTransition ? 'transition' : '-' )
+						+ '@' + foot.anchor.toArray().map( value => value.toFixed( 2 ) ).join( ',' ),
 				).join( ',' );
 
 	} );
@@ -2252,9 +2264,10 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 	assert.ok( farthestX < -2.05,
 		'the body did not continue beyond the far edge (' + farthestX
 			+ '; ' + checkpoints.join( '; ' ) + ')' );
-	assert.ok( minimumContacts >= 2,
-		'the traversal lost its two-claw support polygon (' + minimumContacts
-			+ '; ' + minimumContactState + '; ' + checkpoints.join( '; ' ) + ')' );
+	assert.ok( minimumContacts >= 1 && longestLowSupportSteps <= 24,
+		'the traversal lost sustained support (' + minimumContacts
+			+ '; low=' + longestLowSupportSteps / 120 + 's; '
+			+ minimumContactState + '; ' + checkpoints.join( '; ' ) + ')' );
 	assert.ok( maximumFixedStepDisplacement < 0.035,
 		'the edge handoff teleported the body by ' + maximumFixedStepDisplacement + ' m' );
 	assert.ok( maximumSupportAngle < 0.55,
@@ -2403,6 +2416,232 @@ test( 'CHAMELEON-LAB-RAGDOLL-034 branch flank hands support to its physical end 
 		'the side-to-cap handoff teleported the body by '
 			+ maximumTransitionStepDisplacement + ' m' );
 	assertFiniteHybrid( fixture );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-035 forward locomotion commits to a convex rock and clears its crown', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { RAPIER, world } = fixture.physics;
+	const radius = 0.72;
+	const rockCenterX = -1.72;
+	const rockBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( rockCenterX, radius, 0.75 ),
+	);
+	const rockCollider = world.createCollider(
+		RAPIER.ColliderDesc.ball( radius )
+			.setFriction( 1.05 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		rockBody,
+	);
+	fixture.physics.surfaceByCollider.set( rockCollider.handle, Object.freeze( {
+		kind: 'convex-rock',
+		clawEligible: true,
+		gripStrengthScale: 1.1,
+		supportTopology: 'convex-shell',
+	} ) );
+	const forward = new THREE.Vector3( -1, 0, 0 );
+	fixture.chameleon.setCommand( {
+		move: forward,
+		facing: forward,
+		sourceNormal: new THREE.Vector3( 0, 1, 0 ),
+	} );
+	let firstCommittedStep = Infinity;
+	let maximumRockClaws = 0;
+	let maximumRockCandidates = 0;
+	let maximumHeight = -Infinity;
+	let farthestX = Infinity;
+	let minimumTransitionContacts = 4;
+	let minimumTransitionStep = -1;
+	let minimumTransitionState = '';
+	let currentLowSupportSteps = 0;
+	let longestLowSupportSteps = 0;
+	let currentNoSupportSteps = 0;
+	let longestNoSupportSteps = 0;
+	let minimumMixedContactDistance = Infinity;
+	let surfaceSequence = 0;
+	let maximumFixedStepDisplacement = 0;
+	const initialPosition = fixture.chameleon.pelvis.body.translation();
+	const previousPosition = new THREE.Vector3(
+		initialPosition.x, initialPosition.y, initialPosition.z,
+	);
+	const checkpoints = [];
+	runFrames( fixture, 120, 8, ( _dt, step ) => {
+
+		const position = fixture.chameleon.pelvis.body.translation();
+		const currentPosition = new THREE.Vector3( position.x, position.y, position.z );
+		maximumFixedStepDisplacement = Math.max(
+			maximumFixedStepDisplacement, previousPosition.distanceTo( currentPosition ),
+		);
+		previousPosition.copy( currentPosition );
+		const rockClaws = fixture.chameleon.feet.filter(
+			foot => foot.state === 'holding'
+				&& foot.collider?.handle === rockCollider.handle,
+		).length;
+		maximumRockClaws = Math.max( maximumRockClaws, rockClaws );
+		maximumRockCandidates = Math.max( maximumRockCandidates,
+			fixture.chameleon.feet.filter(
+				foot => foot._candidateCollider?.handle === rockCollider.handle,
+			).length,
+		);
+		if ( rockClaws >= 2 ) firstCommittedStep = Math.min( firstCommittedStep, step );
+		if ( rockClaws >= 2 ) {
+
+			const supportNormal = fixture.chameleon.supportNormal;
+			if ( surfaceSequence === 0 && supportNormal.x > 0.6 ) surfaceSequence = 1;
+			else if ( surfaceSequence === 1 && supportNormal.y > 0.68 ) surfaceSequence = 2;
+			else if ( surfaceSequence === 2 && supportNormal.x < -0.5 ) surfaceSequence = 3;
+
+		}
+		for ( const rockFoot of fixture.chameleon.feet ) {
+
+			if ( rockFoot.state !== 'holding'
+				|| rockFoot.collider?.handle !== rockCollider.handle ) continue;
+			for ( const groundFoot of fixture.chameleon.feet ) {
+
+				if ( groundFoot.state !== 'holding'
+					|| groundFoot.collider?.handle === rockCollider.handle ) continue;
+				minimumMixedContactDistance = Math.min(
+					minimumMixedContactDistance,
+					rockFoot.anchor.distanceTo( groundFoot.anchor ),
+				);
+
+			}
+
+		}
+		const transitionActive = rockClaws > 0 || position.y > 0.55;
+		if ( transitionActive && fixture.chameleon.contactCount < 2 ) {
+
+			currentLowSupportSteps ++;
+			longestLowSupportSteps = Math.max(
+				longestLowSupportSteps, currentLowSupportSteps,
+			);
+
+		} else currentLowSupportSteps = 0;
+		if ( transitionActive && fixture.chameleon.contactCount === 0 ) {
+
+			currentNoSupportSteps ++;
+			longestNoSupportSteps = Math.max(
+				longestNoSupportSteps, currentNoSupportSteps,
+			);
+
+		} else currentNoSupportSteps = 0;
+		if ( transitionActive
+			&& fixture.chameleon.contactCount < minimumTransitionContacts ) {
+
+			minimumTransitionContacts = fixture.chameleon.contactCount;
+			minimumTransitionStep = step;
+			minimumTransitionState = fixture.chameleon.feet.map( foot =>
+				`${ foot.order }:${ foot.state }:${ foot.collider?.handle === rockCollider.handle ? 'rock' : foot.collider?.handle ?? '-' }:${ foot._lockedTransition ? 'transition' : '-' }`,
+			).join( ',' );
+
+		}
+		maximumHeight = Math.max( maximumHeight, position.y );
+		farthestX = Math.min( farthestX, position.x );
+		if ( step % 60 === 0 ) checkpoints.push(
+			`${ step / 120 }s p=${ position.x.toFixed( 2 ) },${ position.y.toFixed( 2 ) } n=${ fixture.chameleon.supportNormal.toArray().map( value => value.toFixed( 2 ) ) } c=${ fixture.chameleon.contactCount } f=${ fixture.chameleon.feet.map( foot => `${ foot.state }:${ foot.collider?.handle === rockCollider.handle ? 'r' : foot.collider?.handle ?? '-' }/${ foot._candidateCollider?.handle === rockCollider.handle ? 'r' : foot._candidateCollider?.handle ?? '-' }/${ foot._lockedTransition ? 't' : '-' }` ).join( ',' ) }`,
+		);
+		assertFiniteHybrid( fixture );
+
+	} );
+	const finalPosition = fixture.chameleon.pelvis.body.translation();
+	assert.ok( maximumRockClaws >= 2,
+		`the convex rock never owned two claws (${ maximumRockClaws }); candidates=${ maximumRockCandidates }; mixedDistance=${ minimumMixedContactDistance }; final=${ finalPosition.x },${ finalPosition.y },${ finalPosition.z }; normal=${ fixture.chameleon.supportNormal.toArray() }; nominal=${ Array.from( fixture.chameleon.nominalFootPositions ) }; ${ checkpoints.join( '; ' ) }` );
+	assert.ok( firstCommittedStep <= 120 * 2.6,
+		`convex handoff took ${ firstCommittedStep / 120 } seconds` );
+	assert.ok( maximumHeight > radius + 0.48,
+		`the body never cleared the convex crown (${ maximumHeight }); final=${ finalPosition.x },${ finalPosition.y }; normal=${ fixture.chameleon.supportNormal.toArray() }; ${ checkpoints.join( '; ' ) }` );
+	assert.ok( farthestX < -2.15,
+		`the body looped before crossing the rock (${ farthestX })` );
+	assert.ok( finalPosition.x < rockCenterX - radius * 0.65,
+		`the body made only transient progress and finished on the near/crown side (${ finalPosition.x })` );
+	assert.equal( surfaceSequence, 3,
+		`support normals did not progress front -> crown -> far face (${ surfaceSequence })` );
+	assert.ok( longestNoSupportSteps <= 2,
+		`the convex handoff detached for ${ longestNoSupportSteps / 120 } seconds (${ minimumTransitionContacts } contacts at ${ minimumTransitionStep / 120 }s: ${ minimumTransitionState }; ${ checkpoints.join( '; ' ) })` );
+	assert.ok( longestLowSupportSteps <= 24,
+		`the convex handoff remained under-supported for ${ longestLowSupportSteps / 120 } seconds` );
+	assert.ok( maximumFixedStepDisplacement < 0.035,
+		`the convex handoff teleported the body by ${ maximumFixedStepDisplacement } m` );
+	fixture.dispose();
+
+} );
+
+test( 'CHAMELEON-LAB-RAGDOLL-036 a released body cannot revive stale ground anchors beside its impact owner', async () => {
+
+	const fixture = await createGroundedHybrid();
+	const { RAPIER, world } = fixture.physics;
+	const wallBody = world.createRigidBody(
+		RAPIER.RigidBodyDesc.fixed().setTranslation( 1, 0.9, 0.43 ),
+	);
+	const wallCollider = world.createCollider(
+		RAPIER.ColliderDesc.cuboid( 0.1, 0.55, 0.5 )
+			.setFriction( 1.05 )
+			.setCollisionGroups( ( 0x0001 << 16 ) | 0xffff ),
+		wallBody,
+	);
+	fixture.physics.surfaceByCollider.set( wallCollider.handle, Object.freeze( {
+		kind: 'release-wall',
+		clawEligible: true,
+		gripStrengthScale: 1.15,
+		supportTopology: 'faceted-shell',
+	} ) );
+	runFrames( fixture, 120, 1.2 );
+	const body = fixture.chameleon.pelvis.body;
+	fixture.chameleon.setDragging( true );
+	body.setTranslation( { x: 0.58, y: 0.9, z: 0.43 }, true );
+	body.setRotation( {
+		x: 0,
+		y: 0,
+		z: Math.sin( -Math.PI * 0.25 ),
+		w: Math.cos( -Math.PI * 0.25 ),
+	}, true );
+	body.setLinvel( { x: 2.4, y: -0.15, z: 0 }, true );
+	body.setAngvel( { x: 0.1, y: 0.08, z: -0.12 }, true );
+	world.propagateModifiedBodyPositionsToColliders();
+	fixture.chameleon.setDragging( false );
+	let owner = null;
+	let mixedOwnerSteps = 0;
+	let foreignOwnerStepsDuringCommit = 0;
+	let maximumOwnerClaws = 0;
+	let firstMixedState = '';
+	runFrames( fixture, 120, 4, () => {
+
+		owner ??= fixture.chameleon.reacquireColliderHandle;
+		const holdingFeet = fixture.chameleon.feet.filter(
+			foot => foot.state === 'holding' && foot.load > 0,
+		);
+		const handles = new Set( holdingFeet
+			.map( foot => foot.collider?.handle )
+			.filter( Number.isFinite ) );
+		maximumOwnerClaws = Math.max(
+			maximumOwnerClaws,
+			holdingFeet.filter( foot => foot.collider?.handle === owner ).length,
+		);
+		if ( handles.size > 1 ) {
+
+			mixedOwnerSteps ++;
+			firstMixedState ||= holdingFeet.map( foot =>
+				`${ foot.order }:${ foot.collider?.handle ?? '-' }`,
+			).join( ',' );
+
+		}
+		if ( fixture.chameleon.reacquireColliderHandle !== null
+			&& holdingFeet.some( foot =>
+				foot.collider?.handle !== fixture.chameleon.reacquireColliderHandle ) )
+			foreignOwnerStepsDuringCommit ++;
+		assertFiniteHybrid( fixture );
+
+	} );
+	assert.equal( owner, wallCollider.handle,
+		`impact chose collider ${ owner } instead of wall ${ wallCollider.handle }` );
+	assert.ok( maximumOwnerClaws >= 2,
+		`the floating wall never acquired a real support pair (${ maximumOwnerClaws })` );
+	assert.equal( foreignOwnerStepsDuringCommit, 0,
+		`${ foreignOwnerStepsDuringCommit } committed ticks revived a foreign owner` );
+	assert.equal( mixedOwnerSteps, 0,
+		`released support bridged owners for ${ mixedOwnerSteps } ticks (${ firstMixedState })` );
 	fixture.dispose();
 
 } );

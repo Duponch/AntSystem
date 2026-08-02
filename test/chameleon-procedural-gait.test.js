@@ -546,3 +546,121 @@ test( 'CHAMELEON-GAIT-015 stopping mid-stride finishes it and corrects the oppos
 	assert.deepEqual( Array.from( gait.getView().footSwinging ), [ 0, 0, 0, 0 ] );
 
 } );
+
+test( 'CHAMELEON-GAIT-016 an airborne claw retargets continuously without allocation or teleportation', async () => {
+
+	const gait = new ChameleonProceduralGait( {
+		stepDistance: 0.025,
+		stepHeight: 0.09,
+		minSwingDuration: 0.24,
+		maxSwingDuration: 0.24,
+	} );
+	const initial = flatContacts();
+	const moving = flatContacts( 0.3 );
+	gait.reset( initial );
+	const view = gait.getView();
+	const identities = [
+		view,
+		view.footPositions,
+		view.footNormals,
+		view.footStartPositions,
+		view.footTargetPositions,
+		gait.footTargetNormals,
+		view.footPhase,
+		view.footSwinging,
+	];
+	const foot = CHAMELEON_FOOT.FRONT_LEFT;
+	while ( ! view.footSwinging[ foot ] || view.footPhase[ foot ] < 0.34 )
+		gait.update( 1 / 120, moving );
+
+	const offset = foot * 3;
+	const beforeRetarget = footTuple( view.footPositions, foot );
+	const retargetPositions = Float32Array.from( moving.contactPositions );
+	const retargetNormals = Float32Array.from( moving.contactNormals );
+	retargetPositions.set( [ 0.54, 0.04, 0.38 ], offset );
+	// Deliberately non-unit: retargeting owns normalisation just like touchdown.
+	retargetNormals.set( [ 0, 2, 2 ], offset );
+
+	assert.equal(
+		gait.retargetSwingFoot( foot, retargetPositions, retargetNormals ),
+		true,
+	);
+	assert.deepEqual(
+		footTuple( view.footPositions, foot ),
+		beforeRetarget,
+		'retargeting must not move an airborne claw in the calling tick',
+	);
+	assert.deepEqual(
+		footTuple( view.footTargetPositions, foot ),
+		footTuple( retargetPositions, foot ),
+	);
+	assertNear( view.footTargetPositions[ offset ], 0.54 );
+	assertNear( gait.footTargetNormals[ offset ], 0 );
+	assertNear( gait.footTargetNormals[ offset + 1 ], Math.SQRT1_2 );
+	assertNear( gait.footTargetNormals[ offset + 2 ], Math.SQRT1_2 );
+	const identitiesAfterRetarget = [
+		gait.getView(),
+		view.footPositions,
+		view.footNormals,
+		view.footStartPositions,
+		view.footTargetPositions,
+		gait.footTargetNormals,
+		view.footPhase,
+		view.footSwinging,
+	];
+	for ( let index = 0; index < identities.length; index ++ )
+		assert.strictEqual( identitiesAfterRetarget[ index ], identities[ index ] );
+
+	let previous = beforeRetarget;
+	let maximumFixedStepTravel = 0;
+	let maximumFixedStepState = '';
+	let remainingTicks = 0;
+	while ( view.footSwinging[ foot ] && remainingTicks < 120 ) {
+
+		gait.update( 1 / 120, moving );
+		const current = footTuple( view.footPositions, foot );
+		const travel = Math.hypot(
+			current[ 0 ] - previous[ 0 ],
+			current[ 1 ] - previous[ 1 ],
+			current[ 2 ] - previous[ 2 ],
+		);
+		if ( travel > maximumFixedStepTravel ) {
+
+			maximumFixedStepTravel = travel;
+			maximumFixedStepState = `${ remainingTicks }: ${ previous } -> ${ current }; phase=${ view.footPhase[ foot ] }; duration=${ gait.footSwingDuration[ foot ] }`;
+
+		}
+		previous = current;
+		remainingTicks ++;
+
+	}
+	assert.ok( remainingTicks > 1 && remainingTicks < 120,
+		`retargeted claw did not land in bounded time (${ remainingTicks } ticks)` );
+	assert.ok( maximumFixedStepTravel < 0.035,
+		`retargeting introduced a ${ maximumFixedStepTravel } m fixed-step teleport (${ maximumFixedStepState })` );
+	assert.deepEqual(
+		footTuple( view.footPositions, foot ),
+		footTuple( retargetPositions, foot ),
+		'touchdown must use the latest surface position',
+	);
+	assertNear( view.footNormals[ offset ], 0 );
+	assertNear( view.footNormals[ offset + 1 ], Math.SQRT1_2 );
+	assertNear( view.footNormals[ offset + 2 ], Math.SQRT1_2 );
+	assert.equal( gait.retargetSwingFoot( foot, retargetPositions, retargetNormals ), false,
+		'a planted claw must never be retargeted implicitly' );
+
+	const source = await readFile(
+		new URL( '../src/chameleon-procedural-gait.js', import.meta.url ),
+		'utf8',
+	);
+	const methodStart = source.indexOf( '\n\tretargetSwingFoot( foot, positions, normals ) {' );
+	const methodEnd = source.indexOf( '\n\tgetViews() {', methodStart );
+	assert.ok( methodStart >= 0 && methodEnd > methodStart,
+		'retargetSwingFoot source boundary was not found' );
+	assert.doesNotMatch(
+		source.slice( methodStart, methodEnd ),
+		/\bnew\s+(?!RangeError\b)|\.subarray\(|Array\.from\(|\.slice\(/u,
+		'the fixed-step retarget path must stay allocation-free',
+	);
+
+} );

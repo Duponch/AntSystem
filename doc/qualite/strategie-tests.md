@@ -211,19 +211,27 @@ commande ;
 `CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` annule atomiquement l’autorité du saut
 pendant une saisie ou en mode libre ;
 `CHAMELEON-LAB-PLATFORMER-INTEGRATION-010` protège tout le cycle de vie du
-tracé de route. `SUPPORT-COHORT-001` à `005` exercent les seuils runtime,
+tracé de route. `CHAMELEON-LAB-NAVIGATION-010` prouve la capture anatomique
+bornée d’un portail dont le propriétaire et la normale sont déjà acquis ;
+`011` distingue une rotation de support progressive d’une vraie stagnation.
+`SUPPORT-COHORT-001` à `005` exercent les seuils runtime,
 l’angle orthogonal valide, le pont mur/sol éloigné, les faces opposées d’un même
 collider, les branches radiales, la portée anatomique, l’hystérésis et la
-réutilisation des buffers. `CHAMELEON-LAB-GAIT-005` protège l’idle
+réutilisation des buffers. `SUPPORT-COHORT-002B` interdit le pont élargi hors
+d’une locomotion explicite et vérifie son hystérésis sans franchir la limite
+commune de normale. `CHAMELEON-LAB-GAIT-005` protège l’idle
 corps entier sans déplacer les pieds et `CHAMELEON-LAB-GAIT-009` supprime cette
 enveloppe terrestre lorsque le corps est détaché. Dans
 `test/chameleon-procedural-gait.test.js`, `CHAMELEON-GAIT-014` borne la remise
 en place d’arrêt à une correction pour chacune des deux diagonales malgré des
 candidats mouvants sur une surface courbe ; `CHAMELEON-GAIT-015` termine le
 couple déjà en vol puis autorise exactement une correction de la diagonale
-opposée, sans redémarrer de boucle.
+opposée, sans redémarrer de boucle. `CHAMELEON-GAIT-016` recible une griffe déjà
+en vol, impose la continuité au tick d’appel et au tick physique suivant, une
+pose finale exacte, un temps d’atterrissage borné et aucune allocation du chemin
+chaud.
 
-Les identifiants `CHAMELEON-LAB-RAGDOLL-001` à `034` sont l’autorité de
+Les identifiants `CHAMELEON-LAB-RAGDOLL-001` à `036` sont l’autorité de
 non-régression de l’architecture hybride : un corps Rapier, quatre appuis, pose
 corps entier et IK anatomique bornées, mode libre à membres passifs, queue XPBD
 endormable, récupération d’impact et valeurs finies.
@@ -254,7 +262,13 @@ métadonnées de branche non finies et exige le repli vers la géométrie Rapier
 une normale unitaire, deux griffes et un verrou endormi. Enfin,
 `CHAMELEON-LAB-RAGDOLL-034` vérifie le transfert physique flanc→bouchon d’un
 cylindre fini : au moins deux appuis, cadre tourné vers l’axe, progression au-delà
-du bord et déplacement par sous-pas borné. Les preuves
+du bord et déplacement par sous-pas borné. `CHAMELEON-LAB-RAGDOLL-035` force
+ensuite le franchissement d’une vraie sphère Rapier : paire de griffes acquise,
+séquence ordonnée flanc→couronne→face opposée, position finale au-delà de la
+couronne, absence de longue perte d’appui et déplacement par sous-pas borné.
+`CHAMELEON-LAB-RAGDOLL-036` relâche enfin le corps contre un mur physiquement
+séparé du sol, exige deux griffes sur le propriétaire d’impact et interdit tout
+tick mélangeant ce propriétaire avec un ancien ancrage au sol. Les preuves
 spécialisées des membres verrouillent le faible tonus configurable, les capsules
 du corps,
 l’auto-collision segmentaire et une seule projection de scène par nœud libre et

@@ -1,5 +1,12 @@
 export const SUPPORT_COHORT_FOOT_COUNT = 4;
 export const SUPPORT_COHORT_FULL_MASK = ( 1 << SUPPORT_COHORT_FOOT_COUNT ) - 1;
+export const SUPPORT_TOPOLOGY_RADIAL = 1;
+export const SUPPORT_TOPOLOGY_SHELL = 2;
+export const SUPPORT_TOPOLOGY_ACTIVE_HANDOFF = 4;
+// Shared by the baked navigation graph and the physical support solver. A
+// corridor must never publish a portal whose two local support frames cannot
+// coexist for the leading/trailing claw hand-off.
+export const SUPPORT_SEAM_MINIMUM_NORMAL_DOT = -0.25;
 
 function finiteNonNegative( name, value ) {
 
@@ -97,6 +104,8 @@ export class SupportCohortModel {
 		reachSlack = 0.018,
 		enterSeamDistance = 0.29,
 		exitSeamDistance = 0.39,
+		activeHandoffDistance = 0.96,
+		activeHandoffExitDistance = 1.08,
 		sameSurfaceNormalDot = 0.7,
 	} = {} ) {
 
@@ -109,6 +118,16 @@ export class SupportCohortModel {
 		);
 		if ( this.exitSeamDistance < this.enterSeamDistance )
 			throw new RangeError( 'exitSeamDistance must be >= enterSeamDistance' );
+		this.activeHandoffDistance = finiteNonNegative(
+			'activeHandoffDistance', activeHandoffDistance,
+		);
+		this.activeHandoffExitDistance = finiteNonNegative(
+			'activeHandoffExitDistance', activeHandoffExitDistance,
+		);
+		if ( this.activeHandoffExitDistance < this.activeHandoffDistance )
+			throw new RangeError(
+				'activeHandoffExitDistance must be >= activeHandoffDistance',
+			);
 		this.sameSurfaceNormalDot = finiteUnitRange(
 			'sameSurfaceNormalDot', sameSurfaceNormalDot,
 		);
@@ -170,10 +189,13 @@ export class SupportCohortModel {
 				const secondHandle = colliderHandles[ second ];
 				const sameHandle = Number.isFinite( firstHandle )
 					&& firstHandle === secondHandle;
-				const branch = sameHandle && topologyFlags[ first ] === 1
-					&& topologyFlags[ second ] === 1;
-				const facetedShell = sameHandle && topologyFlags[ first ] === 2
-					&& topologyFlags[ second ] === 2;
+				const firstTopology = topologyFlags[ first ];
+				const secondTopology = topologyFlags[ second ];
+				const branch = sameHandle && ( firstTopology & SUPPORT_TOPOLOGY_RADIAL ) !== 0
+					&& ( secondTopology & SUPPORT_TOPOLOGY_RADIAL ) !== 0;
+				const facetedShell = sameHandle
+					&& ( firstTopology & SUPPORT_TOPOLOGY_SHELL ) !== 0
+					&& ( secondTopology & SUPPORT_TOPOLOGY_SHELL ) !== 0;
 				const normalDot = contactNormals[ firstOffset ] * contactNormals[ secondOffset ]
 					+ contactNormals[ firstOffset + 1 ] * contactNormals[ secondOffset + 1 ]
 					+ contactNormals[ firstOffset + 2 ] * contactNormals[ secondOffset + 2 ];
@@ -192,11 +214,23 @@ export class SupportCohortModel {
 				// orthogonal face hand-off may span the body length even though every
 				// individual claw remains anatomically reachable. Opposite faces stay
 				// disconnected (dot < -0.25), preventing a box from becoming a bridge.
-				const sameColliderTransition = facetedShell && normalDot >= -0.25;
+				const sameColliderTransition = facetedShell
+					&& normalDot >= SUPPORT_SEAM_MINIMUM_NORMAL_DOT;
 				const localSeam = squaredDistance <= seamDistance * seamDistance
-					&& normalDot >= -0.25;
+					&& normalDot >= SUPPORT_SEAM_MINIMUM_NORMAL_DOT;
+				// A probe-confirmed locomotion hand-off may span the body between a
+				// trailing ground claw and a leading claw already on a convex obstacle.
+				// The flag is never set by idle or impact reacquisition, so this wider
+				// anatomical bridge cannot recreate the old remote magnetic suspension.
+				const activeHandoff = ! sameHandle
+					&& ( ( firstTopology | secondTopology )
+						& SUPPORT_TOPOLOGY_ACTIVE_HANDOFF ) !== 0
+					&& squaredDistance <= ( retainedPair
+						? this.activeHandoffExitDistance : this.activeHandoffDistance )
+						** 2
+					&& normalDot >= SUPPORT_SEAM_MINIMUM_NORMAL_DOT;
 				if ( ! branch && ! sameLocalSurface
-					&& ! sameColliderTransition && ! localSeam ) continue;
+					&& ! sameColliderTransition && ! localSeam && ! activeHandoff ) continue;
 				links[ first ] |= secondBit;
 				links[ second ] |= firstBit;
 

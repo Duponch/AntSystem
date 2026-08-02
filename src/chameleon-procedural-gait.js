@@ -36,6 +36,8 @@ export const CHAMELEON_FOOT = Object.freeze( {
 } );
 
 const EPSILON = 1e-8;
+const RETARGET_REBASE_DISTANCE_SQUARED = 0.012 * 0.012;
+const RETARGET_REBASE_NORMAL_DOT = 0.985;
 const PAIR_A_0 = CHAMELEON_FOOT.FRONT_LEFT;
 const PAIR_A_1 = CHAMELEON_FOOT.HIND_RIGHT;
 const PAIR_B_0 = CHAMELEON_FOOT.FRONT_RIGHT;
@@ -345,6 +347,8 @@ export class ChameleonProceduralGait {
 		this.footTargetPositions = new Float32Array( CHAMELEON_FOOT_COMPONENTS );
 		this.footTargetNormals = new Float32Array( CHAMELEON_FOOT_COMPONENTS );
 		this.footPhase = new Float32Array( CHAMELEON_FOOT_COUNT );
+		this.footSwingDuration = new Float32Array( CHAMELEON_FOOT_COUNT );
+		this.footLiftScale = new Float32Array( CHAMELEON_FOOT_COUNT );
 		this.footSwinging = new Uint8Array( CHAMELEON_FOOT_COUNT );
 		this.bodyPosition = new Float32Array( 3 );
 		this.bodyForward = new Float32Array( [ 1, 0, 0 ] );
@@ -411,6 +415,8 @@ export class ChameleonProceduralGait {
 			copyPackedContact( this.footStartNormals, offset, this.footNormals, offset );
 			copyPackedContact( this.footTargetNormals, offset, this.footNormals, offset );
 			this.footPhase[ foot ] = 0;
+			this.footSwingDuration[ foot ] = this.minSwingDuration;
+			this.footLiftScale[ foot ] = 1;
 			this.footSwinging[ foot ] = 0;
 
 		}
@@ -481,6 +487,61 @@ export class ChameleonProceduralGait {
 		this._settlingAfterDrive = true;
 		this._settlementPairsRemaining = 0b11;
 		return this;
+
+	}
+
+	retargetSwingFoot( foot, positions, normals ) {
+
+		if ( ! Number.isInteger( foot ) || foot < 0 || foot >= CHAMELEON_FOOT_COUNT )
+			throw new RangeError( 'foot must be a valid chameleon foot index' );
+		if ( ! this.footSwinging[ foot ] || ! positions ) return false;
+		const offset = foot * 3;
+		const oldTargetX = this.footTargetPositions[ offset ];
+		const oldTargetY = this.footTargetPositions[ offset + 1 ];
+		const oldTargetZ = this.footTargetPositions[ offset + 2 ];
+		const oldNormalX = this.footTargetNormals[ offset ];
+		const oldNormalY = this.footTargetNormals[ offset + 1 ];
+		const oldNormalZ = this.footTargetNormals[ offset + 2 ];
+		for ( let component = 0; component < 3; component ++ ) {
+
+			const index = offset + component;
+			this.footTargetPositions[ index ] = finiteOr(
+				positions[ index ], this.footTargetPositions[ index ],
+			);
+			if ( normals ) this.footTargetNormals[ index ] = finiteOr(
+				normals[ index ], this.footTargetNormals[ index ],
+			);
+
+		}
+		normalizePackedVector( this.footTargetNormals, offset, 0, 1, 0 );
+		const targetDx = this.footTargetPositions[ offset ] - oldTargetX;
+		const targetDy = this.footTargetPositions[ offset + 1 ] - oldTargetY;
+		const targetDz = this.footTargetPositions[ offset + 2 ] - oldTargetZ;
+		const normalDot = oldNormalX * this.footTargetNormals[ offset ]
+			+ oldNormalY * this.footTargetNormals[ offset + 1 ]
+			+ oldNormalZ * this.footTargetNormals[ offset + 2 ];
+		if ( targetDx * targetDx + targetDy * targetDy + targetDz * targetDz
+			> RETARGET_REBASE_DISTANCE_SQUARED
+			|| normalDot < RETARGET_REBASE_NORMAL_DOT ) {
+
+			const remainingFraction = Math.max( 0, 1 - this.footPhase[ foot ] );
+			for ( let component = 0; component < 3; component ++ ) {
+
+				const index = offset + component;
+				this.footStartPositions[ index ] = this.footPositions[ index ];
+				this.footStartNormals[ index ] = this.footNormals[ index ];
+
+			}
+			this.footSwingDuration[ foot ] = clamp(
+				this.footSwingDuration[ foot ] * remainingFraction,
+				this.fixedStep * 2,
+				this.maxSwingDuration,
+			);
+			this.footLiftScale[ foot ] = remainingFraction * remainingFraction;
+			this.footPhase[ foot ] = 0;
+
+		}
+		return true;
 
 	}
 
@@ -660,6 +721,8 @@ export class ChameleonProceduralGait {
 		}
 		normalizePackedVector( this.footTargetNormals, offset, 0, 1, 0 );
 		this.footPhase[ foot ] = 0;
+		this.footSwingDuration[ foot ] = this._swingDuration;
+		this.footLiftScale[ foot ] = 1;
 		this.footSwinging[ foot ] = 1;
 
 	}
@@ -668,7 +731,8 @@ export class ChameleonProceduralGait {
 
 		if ( ! this.footSwinging[ foot ] ) return true;
 		const offset = foot * 3;
-		const phase = Math.min( 1, this.footPhase[ foot ] + dt / this._swingDuration );
+		const phase = Math.min( 1, this.footPhase[ foot ] + dt
+			/ Math.max( this.fixedStep, this.footSwingDuration[ foot ] ) );
 		this.footPhase[ foot ] = phase;
 
 		// Lift, travel and placement are separate C2 stages. The claw first rises
@@ -677,7 +741,8 @@ export class ChameleonProceduralGait {
 		// shuffle and remains exactly still at both contacts.
 		const blend = swingAdvanceEnvelope( phase );
 		const lift = swingClearanceEnvelope( phase ) * this.stepHeight
-			* ( foot < 2 ? FRONT_SWING_CLEARANCE : HIND_SWING_CLEARANCE );
+			* ( foot < 2 ? FRONT_SWING_CLEARANCE : HIND_SWING_CLEARANCE )
+			* this.footLiftScale[ foot ];
 
 		let normalX = this.footStartNormals[ offset ] +
 			( this.footTargetNormals[ offset ] - this.footStartNormals[ offset ] ) * blend;

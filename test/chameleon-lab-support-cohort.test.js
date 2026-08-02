@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+	SUPPORT_SEAM_MINIMUM_NORMAL_DOT,
 	SUPPORT_COHORT_FULL_MASK,
+	SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
 	SupportCohortModel,
 } from '../src/chameleon-lab/support-cohort-model.js';
 
@@ -100,6 +102,121 @@ test( 'SUPPORT-COHORT-002 distant wall and floor groups cannot suspend the body 
 	view = model.select( REACHABLE, MAXIMUM_REACH, 0b1111, 0, links );
 	assert.equal( view.mask, 0b0011,
 		'equal disconnected cohorts without history use stable mask order' );
+
+} );
+
+test( 'SUPPORT-COHORT-002B only explicit locomotion may widen an inter-collider hand-off', () => {
+
+	const model = new SupportCohortModel( {
+		enterSeamDistance: 0.72,
+		exitSeamDistance: 0.84,
+		activeHandoffDistance: 0.96,
+		activeHandoffExitDistance: 1.08,
+	} );
+	const geometry = {
+		positions: [
+			[ -0.1, 0.75, 0 ],
+			[ 0.1, 0.75, 0 ],
+			[ -0.1, 0, 0.55 ],
+			[ 0.1, 0, 0.55 ],
+		],
+		normals: [ FORWARD, FORWARD, UP, UP ],
+		handles: [ 51, 51, 52, 52 ],
+	};
+	const nearestCrossOwnerDistance = Math.hypot( 0.75, 0.55 );
+	assert.ok( nearestCrossOwnerDistance > model.exitSeamDistance );
+	assert.ok( nearestCrossOwnerDistance < model.activeHandoffDistance );
+
+	let links = compatibilityFor( model, {
+		...geometry,
+		previous: 0b0011,
+	} );
+	let view = model.select(
+		REACHABLE, MAXIMUM_REACH, ACTIVE_FOUR, 0b0011, links,
+	);
+	assert.equal( links[ 0 ] & 0b1100, 0,
+		'idle/impact contacts must not manufacture a seam between nearby owners' );
+	assert.equal( view.mask, 0b0011,
+		'without explicit locomotion authority the retained owner stays isolated' );
+
+	links = compatibilityFor( model, {
+		...geometry,
+		branches: [
+			0,
+			0,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+		],
+		previous: 0b0011,
+	} );
+	view = model.select(
+		REACHABLE, MAXIMUM_REACH, ACTIVE_FOUR, 0b0011, links,
+	);
+	assert.notEqual( links[ 0 ] & 0b1100, 0,
+		'a probe-confirmed active hand-off must connect leading and trailing owners' );
+	assert.equal( view.mask, SUPPORT_COHORT_FULL_MASK,
+		'active locomotion may retain the trailing pair while the leading pair transfers' );
+
+	const retainedGeometry = {
+		...geometry,
+		positions: geometry.positions.map( position => position.slice() ),
+	};
+	retainedGeometry.positions[ 2 ][ 2 ] = 0.68;
+	retainedGeometry.positions[ 3 ][ 2 ] = 0.68;
+	const retainedDistance = Math.hypot( 0.75, 0.68 );
+	assert.ok( retainedDistance > model.activeHandoffDistance );
+	assert.ok( retainedDistance < model.activeHandoffExitDistance );
+	links = compatibilityFor( model, {
+		...retainedGeometry,
+		branches: [
+			0,
+			0,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+		],
+		previous: SUPPORT_COHORT_FULL_MASK,
+	} );
+	view = model.select(
+		REACHABLE, MAXIMUM_REACH, ACTIVE_FOUR, SUPPORT_COHORT_FULL_MASK, links,
+	);
+	assert.equal( view.mask, SUPPORT_COHORT_FULL_MASK,
+		'a retained active hand-off uses a wider exit threshold instead of chattering' );
+	retainedGeometry.positions[ 2 ][ 2 ] = 0.82;
+	retainedGeometry.positions[ 3 ][ 2 ] = 0.82;
+	links = compatibilityFor( model, {
+		...retainedGeometry,
+		branches: [
+			0,
+			0,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+		],
+		previous: SUPPORT_COHORT_FULL_MASK,
+	} );
+	view = model.select(
+		REACHABLE, MAXIMUM_REACH, ACTIVE_FOUR, SUPPORT_COHORT_FULL_MASK, links,
+	);
+	assert.notEqual( view.mask, SUPPORT_COHORT_FULL_MASK,
+		'a retained hand-off must still release beyond its bounded exit threshold' );
+
+	const rejectedDot = SUPPORT_SEAM_MINIMUM_NORMAL_DOT - 0.01;
+	const rejectedNormal = [ Math.sqrt( 1 - rejectedDot * rejectedDot ), rejectedDot, 0 ];
+	links = compatibilityFor( model, {
+		...geometry,
+		normals: [ UP, UP, rejectedNormal, rejectedNormal ],
+		branches: [
+			0,
+			0,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+			SUPPORT_TOPOLOGY_ACTIVE_HANDOFF,
+		],
+		previous: 0b0011,
+	} );
+	view = model.select(
+		REACHABLE, MAXIMUM_REACH, ACTIVE_FOUR, 0b0011, links,
+	);
+	assert.equal( view.mask, 0b0011,
+		'active hand-off authority must not bypass the shared normal discontinuity limit' );
 
 } );
 

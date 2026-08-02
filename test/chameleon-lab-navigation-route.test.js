@@ -244,6 +244,88 @@ test( 'CHAMELEON-LAB-NAVIGATION-005 a portal waits for the expected support owne
 
 } );
 
+test( 'CHAMELEON-LAB-NAVIGATION-010 an acquired transition portal tolerates the pelvis clearance offset', () => {
+
+	const route = {
+		positions: new Float32Array( [ 0, 0, 0, 1, 0, 0, 1, 1, 0 ] ),
+		normals: new Float32Array( [ 0, 1, 0, 1, 0, 0, 1, 0, 0 ] ),
+		kinds: new Uint8Array( [ 0, 2, 1 ] ),
+		handles: new Float64Array( [ 11, 22, 22 ] ),
+		patchIds: new Int16Array( [ 2, 0, 0 ] ),
+		count: 3,
+	};
+	const explorer = new AutonomousExplorer();
+	const output = new THREE.Vector3();
+	explorer.heading.set( 1, 0, 0 );
+	explorer.setDestination(
+		new THREE.Vector3( 1, 1, 0 ), new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3(), route,
+	);
+	explorer.update(
+		1 / 120, new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3(), output, 11,
+	);
+	assert.equal( explorer.routeIndex, 1 );
+	explorer.update(
+		1 / 120, new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3( 0.2, 0, 0 ), output, 22,
+	);
+	assert.equal( explorer.routeIndex, 1,
+		'a remote matching owner must not skip a physical hand-off' );
+	explorer.update(
+		1 / 120, new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3( 0.35, 0, 0 ), output, 22,
+	);
+	assert.equal( explorer.routeIndex, 2,
+		'an acquired owner and support frame must absorb the bounded pelvis offset' );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-011 support-normal alignment counts as portal progress', () => {
+
+	const route = {
+		positions: new Float32Array( [ 0, 0, 0, 1, 0, 0, 1, 1, 0 ] ),
+		normals: new Float32Array( [ 0, 1, 0, 1, 0, 0, 1, 0, 0 ] ),
+		kinds: new Uint8Array( [ 0, 2, 1 ] ),
+		handles: new Float64Array( [ 11, 22, 22 ] ),
+		patchIds: new Int16Array( [ 2, 0, 0 ] ),
+		count: 3,
+	};
+	const explorer = new AutonomousExplorer();
+	const position = new THREE.Vector3( 0.2, 0, 0 );
+	const output = new THREE.Vector3();
+	const supportNormal = new THREE.Vector3( 0, 1, 0 );
+	explorer.heading.set( 1, 0, 0 );
+	explorer.setDestination(
+		new THREE.Vector3( 1, 1, 0 ), new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3(), route,
+	);
+	explorer.update(
+		1 / 120, new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3(), output, 11,
+	);
+	assert.equal( explorer.routeIndex, 1 );
+	explorer.resetProgress( position );
+	for ( let tick = 0; tick < 180; tick ++ ) {
+
+		const alignment = 0.78 * tick / 179;
+		supportNormal.set(
+			alignment,
+			Math.sqrt( Math.max( 0, 1 - alignment * alignment ) ),
+			0,
+		);
+		explorer.update( 1 / 120, supportNormal, position, output, 11 );
+
+	}
+	assert.equal( explorer.consumeReplanRequest(), false,
+		'a monotone physical plane change must not trigger recovery' );
+	for ( let tick = 0; tick < 180; tick ++ )
+		explorer.update( 1 / 120, supportNormal, position, output, 11 );
+	assert.equal( explorer.consumeReplanRequest(), true,
+		'a plane change that subsequently stops must still be detected' );
+
+} );
+
 test( 'CHAMELEON-LAB-NAVIGATION-006 a source face remains stable at a box seam', async () => {
 
 	await withEnvironment( ( environment ) => {

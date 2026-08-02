@@ -316,6 +316,7 @@ export function createLabEnvironment( { scene, physics } ) {
 			friction: 0.92,
 			clawEligible: true,
 			gripStrengthScale: 0.9,
+			supportTopology: 'convex-shell',
 		} ) );
 
 	}

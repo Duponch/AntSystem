@@ -796,6 +796,12 @@ export class AutonomousExplorer {
 		// endpoints remain reachable, but below one forelimb span so a face/lip
 		// waypoint cannot be skipped before the leading claws acquire it.
 		this.routeWaypointRadius = 0.28;
+		// The pelvis does not coincide with a claw portal: body clearance and the
+		// mixed floor/wall stance leave a bounded offset even after the expected
+		// support owns the animal. A larger capture is therefore allowed only after
+		// both collider identity and a strong normal alignment prove the hand-off.
+		this.routeTransitionCaptureRadius = 0.72;
+		this.routeTransitionNormalDot = 0.8;
 		this.routePositions = new Float32Array( MAX_ROUTE_WAYPOINTS * 3 );
 		this.routeNormals = new Float32Array( MAX_ROUTE_WAYPOINTS * 3 );
 		this.routeKinds = new Uint8Array( MAX_ROUTE_WAYPOINTS );
@@ -814,6 +820,7 @@ export class AutonomousExplorer {
 		this._angleCross = new THREE.Vector3();
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = Infinity;
+		this._goalWindowAlignment = NaN;
 		this._goalMotionDistance = 0;
 		this._recoverySeconds = 0;
 		this._recoverySign = 1;
@@ -843,6 +850,7 @@ export class AutonomousExplorer {
 		this.progressDistance = 0;
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = Infinity;
+		this._goalWindowAlignment = NaN;
 		this._goalMotionDistance = 0;
 		this._recoverySeconds = 0;
 		this.destinationCompleted = false;
@@ -968,6 +976,7 @@ export class AutonomousExplorer {
 		this._recoverySeconds = 0;
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = Infinity;
+		this._goalWindowAlignment = NaN;
 		this._goalMotionDistance = 0;
 		this.replanRequested = false;
 		this._replanAwaitingRoute = false;
@@ -1080,11 +1089,13 @@ export class AutonomousExplorer {
 
 	}
 
-	_trackGoalProgress( dt, distance, position ) {
+	_trackGoalProgress( dt, distance, position, normalAlignment = -1, transition = false ) {
 
 		if ( ! Number.isFinite( this._goalWindowDistance ) ) {
 
 			this._goalWindowDistance = distance;
+			this._goalWindowAlignment = Number.isFinite( normalAlignment )
+				? THREE.MathUtils.clamp( normalAlignment, -1, 1 ) : -1;
 			this.lastPosition.copy( position );
 			this.hasProgressSample = true;
 
@@ -1101,12 +1112,24 @@ export class AutonomousExplorer {
 		// body instead of disrupting a successful edge traversal.
 		// Travelling in circles is not progress. The former watchdog only counted
 		// travelled distance, so a floor -> wall -> floor loop could run forever.
-		// A compiled surface corridor makes distance-to-current-waypoint monotone;
-		// require that geodesic progress as well as some physical displacement.
+		// A compiled corridor makes distance-to-current-waypoint monotone on one
+		// support. At an explicit portal, however, rotating the support frame is the
+		// geodesic progress until the pelvis can leave the seam.
 		const goalAdvance = this._goalWindowDistance - distance;
-		const stuck = this._goalMotionDistance < 0.055 || goalAdvance < 0.035;
+		const boundedAlignment = Number.isFinite( normalAlignment )
+			? THREE.MathUtils.clamp( normalAlignment, -1, 1 ) : -1;
+		const alignmentAdvance = Number.isFinite( this._goalWindowAlignment )
+			? boundedAlignment - this._goalWindowAlignment : 0;
+		const translatedTowardsGoal = this._goalMotionDistance >= 0.055
+			&& goalAdvance >= 0.035;
+		// A real plane change can rotate the support frame while the pelvis remains
+		// almost stationary at the seam. That monotone physical progress must not be
+		// replaced by the lateral recovery turn that used to cause wall/rock loops.
+		const alignedTowardsTransition = transition && alignmentAdvance >= 0.055;
+		const stuck = ! translatedTowardsGoal && ! alignedTowardsTransition;
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = distance;
+		this._goalWindowAlignment = boundedAlignment;
 		this._goalMotionDistance = 0;
 		return stuck;
 
@@ -1116,6 +1139,8 @@ export class AutonomousExplorer {
 
 		let distance = 0;
 		let arrivalRadius = this.destinationArrivalRadius;
+		let normalAlignment = -1;
+		let transitionWaypoint = false;
 		const supportHandle = numericColliderHandle( supportCollider );
 		for ( let skipped = 0; skipped < MAX_ROUTE_WAYPOINTS; skipped ++ ) {
 
@@ -1129,17 +1154,32 @@ export class AutonomousExplorer {
 			distance = this._toDestination.length();
 			const finalWaypoint = this.routeCount <= 1 || this.routeIndex >= this.routeCount - 1;
 			arrivalRadius = finalWaypoint ? this.destinationArrivalRadius : this.routeWaypointRadius;
-			if ( distance > arrivalRadius ) break;
 			const expectedHandle = this.routeHandles[ waypoint ];
 			const ownerConfirmed = ! Number.isFinite( expectedHandle )
 				|| supportHandle === expectedHandle;
 			const expectedNormalX = this.routeNormals[ offset ];
 			const expectedNormalY = this.routeNormals[ offset + 1 ];
 			const expectedNormalZ = this.routeNormals[ offset + 2 ];
-			const normalConfirmed = ! Number.isFinite( expectedHandle )
-				|| this._surfaceNormal.x * expectedNormalX
+			const expectedNormalLength = Math.hypot(
+				expectedNormalX, expectedNormalY, expectedNormalZ,
+			);
+			normalAlignment = expectedNormalLength > 1e-8
+				? ( this._surfaceNormal.x * expectedNormalX
 					+ this._surfaceNormal.y * expectedNormalY
-					+ this._surfaceNormal.z * expectedNormalZ > 0.34;
+					+ this._surfaceNormal.z * expectedNormalZ ) / expectedNormalLength
+				: 1;
+			const normalConfirmed = ! Number.isFinite( expectedHandle )
+				|| normalAlignment > 0.34;
+			transitionWaypoint = ! finalWaypoint
+				&& this.routeKinds[ waypoint ] === LAB_SURFACE_NODE_KIND.TRANSITION;
+			const transitionAcquired = transitionWaypoint
+				&& Number.isFinite( expectedHandle )
+				&& ownerConfirmed
+				&& normalAlignment >= this.routeTransitionNormalDot
+				&& distance <= Math.max(
+					arrivalRadius, this.routeTransitionCaptureRadius,
+				);
+			if ( distance > arrivalRadius && ! transitionAcquired ) break;
 			// A portal represents a support hand-off. Distance alone used to skip the
 			// crown while the rear claws were still on the floor, sending the follower
 			// back through the solid. Advance only after the expected patch owns the
@@ -1157,6 +1197,7 @@ export class AutonomousExplorer {
 			if ( this.routeIndex > 1 ) this._identicalRouteExhausted = false;
 			this._goalProgressSeconds = 0;
 			this._goalWindowDistance = Infinity;
+			this._goalWindowAlignment = NaN;
 			this._goalMotionDistance = 0;
 			this._recoverySeconds = 0;
 			this.lastPosition.copy( position );
@@ -1180,7 +1221,9 @@ export class AutonomousExplorer {
 
 		} else this._goalHeading.copy( this.heading );
 
-		if ( this._trackGoalProgress( dt, distance, position ) ) {
+		if ( this._trackGoalProgress(
+			dt, distance, position, normalAlignment, transitionWaypoint,
+		) ) {
 
 			if ( ! this._identicalRouteExhausted ) this.replanRequested = true;
 			this._recoverySign *= -1;

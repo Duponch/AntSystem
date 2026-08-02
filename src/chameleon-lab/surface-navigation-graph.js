@@ -1,5 +1,7 @@
 import * as THREE from 'three/webgpu';
 
+import { SUPPORT_SEAM_MINIMUM_NORMAL_DOT } from './support-cohort-model.js';
+
 export const LAB_SURFACE_NODE_KIND = Object.freeze( {
 	TERRAIN: 0,
 	SUPPORT: 1,
@@ -327,7 +329,7 @@ class SurfaceGraphBuilder {
 					const normalDot = this.normals[ offset ] * this.normals[ otherOffset ]
 						+ this.normals[ offset + 1 ] * this.normals[ otherOffset + 1 ]
 						+ this.normals[ offset + 2 ] * this.normals[ otherOffset + 2 ];
-					if ( normalDot < -0.35 ) continue;
+					if ( normalDot < SUPPORT_SEAM_MINIMUM_NORMAL_DOT ) continue;
 					if ( ! this._transitionSegmentClear( node, other ) ) continue;
 					if ( groundedPair )
 						groundedFallbacks.push( {

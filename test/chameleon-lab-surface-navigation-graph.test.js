@@ -5,6 +5,7 @@ import * as THREE from 'three/webgpu';
 
 import { createLabEnvironment } from '../src/chameleon-lab/environment.js';
 import { createPhysicsWorld } from '../src/chameleon-lab/physics-world.js';
+import { SUPPORT_SEAM_MINIMUM_NORMAL_DOT } from '../src/chameleon-lab/support-cohort-model.js';
 import { buildLabSurfaceNavigationGraph } from '../src/chameleon-lab/surface-navigation-graph.js';
 import { SurfaceRoutePlanner } from '../src/chameleon-lab/third-person-controller.js';
 
@@ -322,10 +323,15 @@ test( 'CHAMELEON-LAB-SURFACE-NAV-005 cross-collider portals are outward-facing a
 				const arrival = dx * graph.normals[ to ]
 					+ dy * graph.normals[ to + 1 ]
 					+ dz * graph.normals[ to + 2 ];
+				const normalDot = graph.normals[ from ] * graph.normals[ to ]
+					+ graph.normals[ from + 1 ] * graph.normals[ to + 1 ]
+					+ graph.normals[ from + 2 ] * graph.normals[ to + 2 ];
 				assert.ok( departure >= -1e-4,
 					`portal ${ node } -> ${ neighbor } enters its departure solid` );
 				assert.ok( arrival <= 1e-4,
 					`portal ${ node } -> ${ neighbor } enters its destination solid` );
+				assert.ok( normalDot >= SUPPORT_SEAM_MINIMUM_NORMAL_DOT - EPSILON,
+					`portal ${ node } -> ${ neighbor } exceeds the physical normal discontinuity` );
 
 			}
 
