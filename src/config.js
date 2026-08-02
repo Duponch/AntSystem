@@ -270,33 +270,50 @@ export const gfx = {
 	butterflyCastShadow: true,
 	butterflyReceiveShadow: true,
 	chameleonEnabled: true,
+	// ChameleonPhysical.glb is authored at world scale. Changing its live scale
+	// would invalidate the Rapier body, claw reach, tail radii and navigation
+	// clearance, so the value is retained only to migrate old saves and is
+	// forced to 1 below.
 	chameleonScale: 1,
 	chameleonPatrolSpeed: 1.15,
 	chameleonTrackingSpeed: 1.45,
 	chameleonAnimationSpeed: 1,
 	chameleonTurnSpeed: 6,
-	chameleonContactPhysics: true,
-	chameleonFootIK: true,
-	chameleonContactFrequency: 60,
-	chameleonBodyContacts: true,
-	chameleonBodyContactFrequency: 30,
-	chameleonBodyProbeRadius: 0.1,
-	chameleonTailContacts: true,
-	chameleonTailContactFrequency: 30,
-	chameleonTailProbeRadius: 0.075,
-	chameleonStepHeight: 0.16,
-	chameleonGaitStrength: 1,
+	chameleonSprintMultiplier: 1.75,
+	chameleonMoveForce: 13,
+	chameleonTurnTorque: 2.6,
+	chameleonMotorStrength: 1,
+	chameleonMotorDamping: 1,
+	chameleonLimbMuscleTone: 0.18,
+	chameleonGaitFrequency: 0.92,
+	chameleonStepLength: 0.19,
+	chameleonStepHeight: 0.09,
+	chameleonStrideAmplitude: 0.64,
+	chameleonLimbLift: 0.43,
+	chameleonJointFlex: 0.82,
+	chameleonBodyMotion: 1,
+	chameleonSuspension: 1,
+	chameleonGripEnabled: true,
+	chameleonGripStrength: 32,
+	chameleonGripStiffness: 175,
+	chameleonGripDamping: 8,
+	chameleonGripReach: 0.42,
+	chameleonRightingStrength: 1.15,
+	chameleonSurfaceCommitTime: 0.85,
+	chameleonTailDamping: 3.2,
+	chameleonTailFlexibility: 0.46,
+	chameleonTailCollisionScale: 1,
+	chameleonTailGravity: 1,
 	chameleonRoamingEnabled: true,
 	chameleonRoamingRadius: Math.ceil( WORLD * Math.SQRT2 ),
 	chameleonCamouflageEnabled: true,
-	chameleonCamouflageEnvironmentMatch: 0.68,
-	chameleonCamouflageEdgeReveal: 0.35,
-	chameleonCamouflagePatternStrength: 0.18,
-	chameleonCamouflagePatternScale: 3,
-	chameleonCamouflageSampleSpread: 0.004,
-	chameleonCamouflageShadowRetention: 0.28,
-	chameleonCamouflageAdaptSeconds: 2.2,
-	chameleonCamouflageReleaseSeconds: 0.8,
+	chameleonCamouflageStrength: 0.98,
+	chameleonCamouflageSurfaceCommitSeconds: 0.1,
+	chameleonCamouflageSurfaceTransitionSeconds: 0.28,
+	chameleonCamouflageSupportHoldSeconds: 0.24,
+	chameleonCamouflageEyeRetention: 0.86,
+	chameleonCamouflageAdaptSeconds: 0.85,
+	chameleonCamouflageReleaseSeconds: 0.45,
 	chameleonCamouflageInterval: 14,
 	chameleonCamouflageMinDuration: 7,
 	chameleonCamouflageMaxDuration: 13,
@@ -309,6 +326,9 @@ export const gfx = {
 	chameleonCastShadow: true,
 	chameleonReceiveShadow: true,
 	chameleonDebugAttackRange: false,
+	chameleonDebugContacts: false,
+	chameleonDebugRig: false,
+	chameleonDebugRoute: false,
 	chameleonTongueColor: '#d96a79',
 
 	// Nourriture : vraies billes posées au sol (1 bille = 1 cellule de grille)
@@ -429,14 +449,22 @@ if ( saved ) {
 
 	}
 
-	// The former optical fidelity could reach 100% and behave like an
-	// invisibility cloak. Preserve the player's intent while migrating it to a
-	// biologically plausible, strictly partial environment match.
+	// The former viewport camouflage could reach 100% and behave like an
+	// invisibility cloak. Preserve only its intensity when migrating to the
+	// opaque support material; obsolete rendering keys never enter `gfx` again.
 	const legacyOpticalFidelity = saved.gfx?.chameleonCamouflageOpticalFidelity;
-	if ( ! Object.hasOwn( saved.gfx || {}, 'chameleonCamouflageEnvironmentMatch' )
+	const legacyEnvironmentMatch = saved.gfx?.chameleonCamouflageEnvironmentMatch;
+	if ( ! Object.hasOwn( saved.gfx || {}, 'chameleonCamouflageStrength' )
+		&& Number.isFinite( legacyEnvironmentMatch ) ) {
+
+		gfx.chameleonCamouflageStrength = Math.min( 1, Math.max(
+			0, legacyEnvironmentMatch / 0.68 * 0.98,
+		) );
+
+	} else if ( ! Object.hasOwn( saved.gfx || {}, 'chameleonCamouflageStrength' )
 		&& Number.isFinite( legacyOpticalFidelity ) ) {
 
-		gfx.chameleonCamouflageEnvironmentMatch = Math.min( 0.78, Math.max( 0, legacyOpticalFidelity * 0.68 ) );
+		gfx.chameleonCamouflageStrength = Math.min( 1, Math.max( 0, legacyOpticalFidelity * 0.98 ) );
 
 	}
 
@@ -459,6 +487,21 @@ if ( saved ) {
 		if ( Math.abs( gfx.chameleonCamouflageMaxDuration - 6 ) < 1e-9 )
 			gfx.chameleonCamouflageMaxDuration = 13;
 
+	}
+
+	// The hybrid runtime supersedes the former probe-based visual corrector.
+	// A missing motor setting is an unambiguous pre-hybrid save. Preserve every
+	// intentional value, but translate former defaults to the calibrated
+	// physical defaults and carry the old camouflage intensity into the opaque
+	// support material.
+	if ( ! Object.hasOwn( legacyChameleonSettings, 'chameleonMotorStrength' ) ) {
+
+		if ( Math.abs( gfx.chameleonStepHeight - 0.16 ) < 1e-9 )
+			gfx.chameleonStepHeight = 0.09;
+		if ( Math.abs( gfx.chameleonCamouflageAdaptSeconds - 2.2 ) < 1e-9 )
+			gfx.chameleonCamouflageAdaptSeconds = 0.85;
+		if ( Math.abs( gfx.chameleonCamouflageReleaseSeconds - 0.8 ) < 1e-9 )
+			gfx.chameleonCamouflageReleaseSeconds = 0.45;
 	}
 
 	params.paused = false;
@@ -534,27 +577,52 @@ gfx.butterflyPredatorVisionDistance = clampSetting( gfx.butterflyPredatorVisionD
 gfx.butterflyPredatorVisionAngle = clampSetting( gfx.butterflyPredatorVisionAngle, 30, 360 );
 gfx.butterflyFleeSpeedMultiplier = clampSetting( gfx.butterflyFleeSpeedMultiplier, 1, 4 );
 gfx.butterflyThreatScanFrequency = clampSetting( gfx.butterflyThreatScanFrequency, 1, 30 );
-gfx.chameleonScale = clampSetting( gfx.chameleonScale, 0.4, 2.5 );
+// Physical dimensions are authored and validated at exactly 1×. Keeping this
+// assignment after persistence makes every legacy save safe before any Rapier
+// collider or navigation clearance is created.
+gfx.chameleonScale = 1;
 gfx.chameleonPatrolSpeed = clampSetting( gfx.chameleonPatrolSpeed, 0.05, 4 );
 gfx.chameleonTrackingSpeed = clampSetting( gfx.chameleonTrackingSpeed, 0.05, 5 );
 gfx.chameleonAnimationSpeed = clampSetting( gfx.chameleonAnimationSpeed, 0.1, 4 );
-gfx.chameleonContactFrequency = clampSetting( gfx.chameleonContactFrequency, 15, 120 );
-gfx.chameleonBodyContactFrequency = clampSetting( gfx.chameleonBodyContactFrequency, 15, 60 );
-gfx.chameleonBodyProbeRadius = clampSetting( gfx.chameleonBodyProbeRadius, 0.02, 0.28 );
-gfx.chameleonTailContactFrequency = clampSetting( gfx.chameleonTailContactFrequency, 15, 60 );
-gfx.chameleonTailProbeRadius = clampSetting( gfx.chameleonTailProbeRadius, 0.02, 0.22 );
-gfx.chameleonStepHeight = clampSetting( gfx.chameleonStepHeight, 0, 0.5 );
-gfx.chameleonGaitStrength = clampSetting( gfx.chameleonGaitStrength, 0, 1 );
+gfx.chameleonSprintMultiplier = clampSetting( gfx.chameleonSprintMultiplier, 1, 3 );
+gfx.chameleonMoveForce = clampSetting( gfx.chameleonMoveForce, 2, 35 );
+gfx.chameleonTurnTorque = clampSetting( gfx.chameleonTurnTorque, 0.5, 8 );
+gfx.chameleonMotorStrength = clampSetting( gfx.chameleonMotorStrength, 0, 2.5 );
+gfx.chameleonMotorDamping = clampSetting( gfx.chameleonMotorDamping, 0.2, 2.5 );
+gfx.chameleonLimbMuscleTone = clampSetting( gfx.chameleonLimbMuscleTone, 0, 0.45 );
+gfx.chameleonGaitFrequency = clampSetting( gfx.chameleonGaitFrequency, 0.25, 3 );
+gfx.chameleonStepLength = clampSetting( gfx.chameleonStepLength, 0.08, 0.34 );
+gfx.chameleonStrideAmplitude = clampSetting( gfx.chameleonStrideAmplitude, 0.1, 0.9 );
+gfx.chameleonLimbLift = clampSetting( gfx.chameleonLimbLift, 0, 0.75 );
+gfx.chameleonJointFlex = clampSetting( gfx.chameleonJointFlex, 0, 1.15 );
+gfx.chameleonBodyMotion = clampSetting( gfx.chameleonBodyMotion, 0, 2 );
+gfx.chameleonSuspension = clampSetting( gfx.chameleonSuspension, 0, 2 );
+gfx.chameleonGripStrength = clampSetting( gfx.chameleonGripStrength, 3, 80 );
+gfx.chameleonGripStiffness = clampSetting( gfx.chameleonGripStiffness, 30, 360 );
+gfx.chameleonGripDamping = clampSetting( gfx.chameleonGripDamping, 1, 24 );
+gfx.chameleonGripReach = clampSetting( gfx.chameleonGripReach, 0.08, 0.42 );
+gfx.chameleonRightingStrength = clampSetting( gfx.chameleonRightingStrength, 0, 2 );
+gfx.chameleonSurfaceCommitTime = clampSetting( gfx.chameleonSurfaceCommitTime, 0.2, 2 );
+gfx.chameleonTailDamping = clampSetting( gfx.chameleonTailDamping, 0, 8 );
+gfx.chameleonTailFlexibility = clampSetting( gfx.chameleonTailFlexibility, 0, 1 );
+gfx.chameleonTailCollisionScale = clampSetting( gfx.chameleonTailCollisionScale, 0.5, 1.75 );
+gfx.chameleonTailGravity = clampSetting( gfx.chameleonTailGravity, 0, 2 );
+gfx.chameleonStepHeight = clampSetting( gfx.chameleonStepHeight, 0.015, 0.2 );
 gfx.chameleonTurnSpeed = clampSetting( gfx.chameleonTurnSpeed, 1, 15 );
 gfx.chameleonRoamingRadius = clampSetting(
 	gfx.chameleonRoamingRadius, 2, Math.ceil( WORLD * Math.SQRT2 ),
 );
-gfx.chameleonCamouflageEnvironmentMatch = clampSetting( gfx.chameleonCamouflageEnvironmentMatch, 0, 0.86 );
-gfx.chameleonCamouflageEdgeReveal = clampSetting( gfx.chameleonCamouflageEdgeReveal, 0, 0.8 );
-gfx.chameleonCamouflagePatternStrength = clampSetting( gfx.chameleonCamouflagePatternStrength, 0, 0.4 );
-gfx.chameleonCamouflagePatternScale = clampSetting( gfx.chameleonCamouflagePatternScale, 0.5, 12 );
-gfx.chameleonCamouflageSampleSpread = clampSetting( gfx.chameleonCamouflageSampleSpread, 0, 0.015 );
-gfx.chameleonCamouflageShadowRetention = clampSetting( gfx.chameleonCamouflageShadowRetention, 0.1, 0.6 );
+gfx.chameleonCamouflageStrength = clampSetting( gfx.chameleonCamouflageStrength, 0, 1 );
+gfx.chameleonCamouflageSurfaceCommitSeconds = clampSetting(
+	gfx.chameleonCamouflageSurfaceCommitSeconds, 0.02, 0.5,
+);
+gfx.chameleonCamouflageSurfaceTransitionSeconds = clampSetting(
+	gfx.chameleonCamouflageSurfaceTransitionSeconds, 0.05, 1.5,
+);
+gfx.chameleonCamouflageSupportHoldSeconds = clampSetting(
+	gfx.chameleonCamouflageSupportHoldSeconds, 0, 1,
+);
+gfx.chameleonCamouflageEyeRetention = clampSetting( gfx.chameleonCamouflageEyeRetention, 0, 1 );
 gfx.chameleonCamouflageAdaptSeconds = clampSetting( gfx.chameleonCamouflageAdaptSeconds, 0.1, 6 );
 gfx.chameleonCamouflageReleaseSeconds = clampSetting( gfx.chameleonCamouflageReleaseSeconds, 0.1, 4 );
 gfx.chameleonCamouflageInterval = clampSetting( gfx.chameleonCamouflageInterval, 1, 60 );
@@ -563,7 +631,7 @@ gfx.chameleonCamouflageMaxDuration = Math.max(
 	gfx.chameleonCamouflageMinDuration,
 	clampSetting( gfx.chameleonCamouflageMaxDuration, 0.5, 60 ),
 );
-gfx.chameleonSupportClearance = clampSetting( gfx.chameleonSupportClearance, 0, 0.25 );
+gfx.chameleonSupportClearance = clampSetting( gfx.chameleonSupportClearance, 0, 0.04 );
 gfx.chameleonAttackDistance = clampSetting( gfx.chameleonAttackDistance, 0.5, 8 );
 gfx.chameleonDetectionDistance = Math.max(
 	gfx.chameleonAttackDistance,

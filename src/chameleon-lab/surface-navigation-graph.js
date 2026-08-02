@@ -123,6 +123,11 @@ class SurfaceGraphBuilder {
 		this.solidBounds = [];
 		this.solidVolumes = [];
 		this.solidPoint = new THREE.Vector3();
+		// Flat or gently sloped production terrain may be an arbitrary triangle
+		// manifold (the main clearing has a real entrance hole). Keep its XZ
+		// triangles in bake-owned storage so route shortcuts can prove continuous
+		// support instead of treating the ground as an infinite rectangle.
+		this.terrainTriangles = [];
 		this.groundHandle = -1;
 
 	}
@@ -258,6 +263,7 @@ class SurfaceGraphBuilder {
 			spacing: this.spacing,
 			clearance: this.clearance,
 			maximumTransitionDegree: this.maximumTransitionDegree,
+			terrainTriangles: Float32Array.from( this.terrainTriangles ),
 		} );
 
 	}
@@ -533,11 +539,90 @@ function pointBlockedByObstacle( x, z, obstacles ) {
 
 }
 
-function terrainSegmentClear( ax, az, bx, bz, obstacles ) {
+function clipSegmentToTriangle( ax, az, bx, bz, triangles, offset, out ) {
+
+	const x0 = triangles[ offset ];
+	const z0 = triangles[ offset + 1 ];
+	const x1 = triangles[ offset + 2 ];
+	const z1 = triangles[ offset + 3 ];
+	const x2 = triangles[ offset + 4 ];
+	const z2 = triangles[ offset + 5 ];
+	const orientation = Math.sign(
+		( x1 - x0 ) * ( z2 - z0 ) - ( z1 - z0 ) * ( x2 - x0 ),
+	);
+	if ( orientation === 0 ) return false;
+	const dx = bx - ax;
+	const dz = bz - az;
+	let minimum = 0;
+	let maximum = 1;
+	for ( const [ ex0, ez0, ex1, ez1 ] of [
+		[ x0, z0, x1, z1 ],
+		[ x1, z1, x2, z2 ],
+		[ x2, z2, x0, z0 ],
+	] ) {
+
+		const edgeX = ex1 - ex0;
+		const edgeZ = ez1 - ez0;
+		const atStart = orientation * (
+			edgeX * ( az - ez0 ) - edgeZ * ( ax - ex0 )
+		);
+		const slope = orientation * ( edgeX * dz - edgeZ * dx );
+		if ( Math.abs( slope ) <= EPSILON ) {
+
+			if ( atStart < -1e-6 ) return false;
+			continue;
+
+		}
+		const boundary = ( -1e-6 - atStart ) / slope;
+		if ( slope > 0 ) minimum = Math.max( minimum, boundary );
+		else maximum = Math.min( maximum, boundary );
+		if ( minimum > maximum + 1e-7 ) return false;
+
+	}
+	out[ 0 ] = Math.max( 0, minimum );
+	out[ 1 ] = Math.min( 1, maximum );
+	return out[ 1 ] >= out[ 0 ] - 1e-7;
+
+}
+
+function segmentCoveredByTerrain( ax, az, bx, bz, triangles, intervalScratch ) {
+
+	if ( ! triangles || triangles.length === 0 ) return true;
+	const triangleCount = Math.floor( triangles.length / 6 );
+	let covered = 0;
+	for ( let pass = 0; pass <= triangleCount; pass ++ ) {
+
+		let furthest = covered;
+		for ( let offset = 0; offset + 5 < triangles.length; offset += 6 ) {
+
+			if ( ! clipSegmentToTriangle(
+				ax, az, bx, bz, triangles, offset, intervalScratch,
+			) ) continue;
+			if ( intervalScratch[ 0 ] > covered + 1e-5 ) continue;
+			furthest = Math.max( furthest, intervalScratch[ 1 ] );
+
+		}
+		if ( furthest >= 1 - 1e-5 ) return true;
+		if ( furthest <= covered + 1e-6 ) return false;
+		covered = furthest;
+
+	}
+	return false;
+
+}
+
+function terrainSegmentClear(
+	ax, az, bx, bz,
+	obstacles,
+	terrainTriangles = null,
+	intervalScratch = new Float64Array( 2 ),
+) {
 
 	for ( const obstacle of obstacles )
 		if ( segmentIntersectsRectangle( ax, az, bx, bz, obstacle ) ) return false;
-	return true;
+	return segmentCoveredByTerrain(
+		ax, az, bx, bz, terrainTriangles, intervalScratch,
+	);
 
 }
 
@@ -696,7 +781,149 @@ function sampleCylinder( builder, entry ) {
 
 }
 
-function sampleTriangleMesh( builder, entry ) {
+function projectedGroundPoint( x, z, facets, target, normalTarget ) {
+
+	for ( const facet of facets ) {
+
+		if ( x < facet.minX - 1e-6 || x > facet.maxX + 1e-6
+			|| z < facet.minZ - 1e-6 || z > facet.maxZ + 1e-6 ) continue;
+		const denominator = ( facet.bz - facet.cz ) * ( facet.ax - facet.cx )
+			+ ( facet.cx - facet.bx ) * ( facet.az - facet.cz );
+		if ( Math.abs( denominator ) <= EPSILON ) continue;
+		const wa = ( ( facet.bz - facet.cz ) * ( x - facet.cx )
+			+ ( facet.cx - facet.bx ) * ( z - facet.cz ) ) / denominator;
+		const wb = ( ( facet.cz - facet.az ) * ( x - facet.cx )
+			+ ( facet.ax - facet.cx ) * ( z - facet.cz ) ) / denominator;
+		const wc = 1 - wa - wb;
+		if ( wa < -1e-6 || wb < -1e-6 || wc < -1e-6 ) continue;
+		target.set(
+			x,
+			wa * facet.ay + wb * facet.by + wc * facet.cy,
+			z,
+		);
+		normalTarget.set( facet.nx, facet.ny, facet.nz );
+		return true;
+
+	}
+	return false;
+
+}
+
+function sampleTriangulatedGround( builder, entry ) {
+
+	const geometry = entry.object.geometry;
+	const position = geometry.getAttribute?.( 'position' );
+	if ( ! position || position.count < 3 ) return;
+	const index = geometry.index;
+	const triangleCount = index ? Math.floor( index.count / 3 ) : Math.floor( position.count / 3 );
+	const a = new THREE.Vector3();
+	const b = new THREE.Vector3();
+	const c = new THREE.Vector3();
+	const ab = new THREE.Vector3();
+	const ac = new THREE.Vector3();
+	const normal = new THREE.Vector3();
+	const facets = [];
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minZ = Infinity;
+	let maxZ = -Infinity;
+	for ( let triangle = 0; triangle < triangleCount; triangle ++ ) {
+
+		const ia = index ? index.getX( triangle * 3 ) : triangle * 3;
+		const ib = index ? index.getX( triangle * 3 + 1 ) : triangle * 3 + 1;
+		const ic = index ? index.getX( triangle * 3 + 2 ) : triangle * 3 + 2;
+		a.fromBufferAttribute( position, ia ).applyMatrix4( entry.object.matrixWorld );
+		b.fromBufferAttribute( position, ib ).applyMatrix4( entry.object.matrixWorld );
+		c.fromBufferAttribute( position, ic ).applyMatrix4( entry.object.matrixWorld );
+		normal.crossVectors( ab.subVectors( b, a ), ac.subVectors( c, a ) ).normalize();
+		if ( normal.lengthSq() < EPSILON ) continue;
+		if ( normal.y < 0 ) normal.negate();
+		if ( normal.y < 0.2 ) continue;
+		const facet = {
+			ax: a.x, ay: a.y, az: a.z,
+			bx: b.x, by: b.y, bz: b.z,
+			cx: c.x, cy: c.y, cz: c.z,
+			nx: normal.x, ny: normal.y, nz: normal.z,
+			minX: Math.min( a.x, b.x, c.x ),
+			maxX: Math.max( a.x, b.x, c.x ),
+			minZ: Math.min( a.z, b.z, c.z ),
+			maxZ: Math.max( a.z, b.z, c.z ),
+		};
+		facets.push( facet );
+		builder.terrainTriangles.push(
+			a.x, a.z,
+			b.x, b.z,
+			c.x, c.z,
+		);
+		minX = Math.min( minX, facet.minX );
+		maxX = Math.max( maxX, facet.maxX );
+		minZ = Math.min( minZ, facet.minZ );
+		maxZ = Math.max( maxZ, facet.maxZ );
+
+	}
+	if ( facets.length === 0 ) throw new Error( 'triangulated ground has no upward facets' );
+	const columns = Math.max( 2, Math.ceil( ( maxX - minX ) / builder.spacing ) + 1 );
+	const rows = Math.max( 2, Math.ceil( ( maxZ - minZ ) / builder.spacing ) + 1 );
+	const stepX = ( maxX - minX ) / ( columns - 1 );
+	const stepZ = ( maxZ - minZ ) / ( rows - 1 );
+	const nodes = new Int32Array( columns * rows );
+	nodes.fill( -1 );
+	const point = new THREE.Vector3();
+	const pointNormal = new THREE.Vector3();
+	for ( let row = 0; row < rows; row ++ ) for ( let column = 0; column < columns; column ++ ) {
+
+		const x = minX + column * stepX;
+		const z = minZ + row * stepZ;
+		if ( pointBlockedByObstacle( x, z, builder.obstacles )
+			|| ! projectedGroundPoint( x, z, facets, point, pointNormal ) ) continue;
+		nodes[ row * columns + column ] = builder.addNode(
+			point,
+			pointNormal,
+			entry.collider.handle,
+			LAB_SURFACE_NODE_KIND.TERRAIN,
+			0,
+		);
+
+	}
+	const neighbours = [ [ 1, 0 ], [ 0, 1 ], [ 1, 1 ], [ -1, 1 ] ];
+	const intervalScratch = new Float64Array( 2 );
+	for ( let row = 0; row < rows; row ++ ) for ( let column = 0; column < columns; column ++ ) {
+
+		const node = nodes[ row * columns + column ];
+		if ( node < 0 ) continue;
+		for ( const [ dc, dr ] of neighbours ) {
+
+			const nextColumn = column + dc;
+			const nextRow = row + dr;
+			if ( nextColumn < 0 || nextColumn >= columns
+				|| nextRow < 0 || nextRow >= rows ) continue;
+			const next = nodes[ nextRow * columns + nextColumn ];
+			if ( next < 0 ) continue;
+			if ( ! terrainSegmentClear(
+				builder.rawPositions[ node * 3 ],
+				builder.rawPositions[ node * 3 + 2 ],
+				builder.rawPositions[ next * 3 ],
+				builder.rawPositions[ next * 3 + 2 ],
+				builder.obstacles,
+				builder.terrainTriangles,
+				intervalScratch,
+			) ) continue;
+			builder.addEdge( node, next );
+
+		}
+
+	}
+
+}
+
+function sampleTriangleMesh( builder, entry, { groundOnly = false } = {} ) {
+
+	if ( groundOnly ) {
+
+		sampleTriangulatedGround( builder, entry );
+		return;
+
+	}
 
 	const geometry = entry.object.geometry;
 	const position = geometry.getAttribute?.( 'position' );
@@ -744,6 +971,7 @@ function createGraphView( data ) {
 
 	const scratchPoint = new THREE.Vector3();
 	const scratchNormal = new THREE.Vector3();
+	const terrainIntervalScratch = new Float64Array( 2 );
 	// Clicks always carry the Rapier collider that was hit. Keep this index in the
 	// closure so locating a point scans one surface only, not the complete world
 	// manifold. It is built once and cannot be mutated through the public graph.
@@ -850,6 +1078,8 @@ function createGraphView( data ) {
 				Number( to?.x ?? to?.[ 0 ] ),
 				Number( to?.z ?? to?.[ 2 ] ),
 				graph.obstacles,
+				graph.terrainTriangles,
+				terrainIntervalScratch,
 			);
 
 		},
@@ -932,7 +1162,9 @@ export function buildLabSurfaceNavigationGraph( entries, {
 	builder.obstacles = createObstacleBounds( entries, groundBounds.max.y, safeClearance );
 	builder.solidBounds = createSolidBounds( entries );
 	builder.solidVolumes = createSolidVolumes( entries );
-	sampleBox( builder, ground, { groundOnly: true } );
+	if ( ground.object.geometry?.type === 'BoxGeometry' )
+		sampleBox( builder, ground, { groundOnly: true } );
+	else sampleTriangleMesh( builder, ground, { groundOnly: true } );
 	for ( const entry of safeEntries ) {
 
 		if ( entry === ground ) continue;

@@ -18,8 +18,12 @@ La suite couvre notamment :
 - `NAV-ENTRANCE` : continuité de l’anneau, trou raycastable, rayon partagé, lèvre physique continue, placement périphérique et raccord borné ;
 - `BEE-SIM` : cycle de butinage complet, déterminisme, météo, démographie agrégée, cohortes et recyclage stables, continuité de phase par clip, ciblage borné, vues SoA, layout/GLB/VAT bornés, draws fixes et boucle chaude sans allocation ;
 - `BUTTERFLY-SIM` : cycle œuf→larve→chrysalide→adulte→œuf, immatures invisibles, activité adulte, météo indépendante du vieillissement, ciblage de quatre fleurs, SoA fixe, asset/clip/VAT, draw unique, chargement paresseux, perception bornée du caméléon et fuite continue ;
-- `CHAMELEON-SIM` : prédation complète, rig et langue, graphe global borné de terrain/rochers/souches/troncs/branches/arbres, transitions, clearance, corridors locaux continus, exploration déterministe sans A* de routine, repères de support et réglages UI ;
-- laboratoire physique du caméléon : route isolée, contrats de mesh/rig `3.6.0`
+- `CHAMELEON-SIM` : même corps hybride dans le laboratoire et le jeu principal,
+  prédation complète, clics virtuels vers des destinations de
+  terrain/rochers/souches/troncs/branches/arbres, A* événementiel, transitions
+  réellement acquises par les griffes, camouflage opaque lié au support,
+  façade papillons/inspecteur et réglages UI ;
+- moteur physique partagé du caméléon : route isolée, contrats de mesh/rig `3.6.0`
   et d’anatomie `2.2.0`, géométrie source exacte,
   `original_tail_vertices = 7206`, aucun poids de queue sur le corps, collet
   rigide `tail_01`, dynamique à partir de `tail_02` avec feather géodésique
@@ -47,9 +51,30 @@ La suite couvre notamment :
 
 `BUTTERFLY-SIM-001` à `009` protègent les buffers et télémétries stables, la reproductibilité, le cycle complet, le vieillissement indépendant des conditions de vol, les trois comportements adultes, les cibles et directions indexées, la capacité fixe, le diagnostic et l’absence d’allocation de collection dans la boucle chaude. `BUTTERFLY-SIM-010` à `014` figent `Butterfly.glb`, `Flight_Butterfly`, les 1 105 sommets, 528 triangles, 13 joints, 81 images à 16 fps et 716 040 octets de VAT, puis l’unique draw instancié, l’orientation et le matériau éclairé, le chargement paresseux singleton, le masque de surface et le raccordement UI/config. `BUTTERFLY-FEAR-001` à `006` couvrent l’interruption par une menace visible, l’effacement immédiat de la peur face au camouflage, le champ de vision configurable, l’anticipation d’un prédateur mobile sans téléportation, la cadence de scan bornée et déterministe, puis la stabilité des buffers et du mapping de sélection. L’allure de la teinte et du battement reste contrôlée par inspection WebGPU plutôt que par comparaison de pixels.
 
-`CHAMELEON-SIM-001` à `037` continuent de protéger la machine d’états, le ciblage 8–10 Hz, le contact balayé, la capture transactionnelle, le rig, les ombres et les réglages. Les preuves `029` à `033` ajoutent la bouche alignée sur la normale du support, l’indépendance déplacement/animation, le remplacement continu d’un corridor sans rupture de cap, l’exploration réactive sans circuit, le camouflage limité aux pauses planifiées et son verrou continu jusqu’à la frappe. `CHAMELEON-SIM-034` à `037` figent la transition perceptive monotone invariante au découpage temporel, les variantes précréées couvrant tout l’animal, le retour aux matériaux naturels à coût nul, l’unique `viewportSharedTexture` légèrement décalée, l’adaptation diffuse éclairée, la profondeur, la simple passe, l’ombre résiduelle dither et le préchauffage. `037` interdit explicitement la cape d’invisibilité : correspondance plafonnée à 0,86, au moins 14 % de réponse naturelle, contour plus lisible aux angles rasants, paramètres bornés et motif déterministe en espace objet. Les oracles interdisent les mipmaps, le blur, les draws ou les dispatchs compute supplémentaires ; l’équilibre artistique reste validé par inspection WebGPU plutôt que par comparaison de pixels. Dans `test/chameleon-surface-graph.test.js`, `CHAMELEON-SURFACE-001` couvre toutes les instances reconnues au-delà des anciens plafonds ; `002` vérifie les corridors terrain→rocher→tronc→arbre, les repères SoA et le plafond actif de 384 échantillons ; `003` exerce une fixture de rochers adversariale pour interdire les nœuds ou arêtes sans clearance ; `004` protège le cache par révision et configuration ; `005` prouve une exploration locale déterministe, continue, avec inertie et préférence pour les branches peu visitées. Le graphe CSR reste plafonné à 8 192 nœuds et les routes A* explicites ne servent qu’au diagnostic ou à une destination imposée. Les quatre contacts de pieds restent une approximation analytique : aucun test ne prétend valider un solveur IK complet qui n’existe pas.
+`CHAMELEON-SIM-*` protège la machine écologique, le ciblage borné et occulté
+par le décor, le contact balayé de la langue, son arrêt au premier obstacle,
+la capture/consommation/libération transactionnelle, les ombres, la façade et
+les réglages. Cette famille ne duplique pas les preuves physiques : le runtime
+principal doit instancier `createHybridChameleon`, puis les mêmes familles
+`CHAMELEON-LAB-RAGDOLL-*`, `SUPPORT-COHORT-*`,
+`CHAMELEON-LAB-SURFACE-NAV-*`, `CHAMELEON-LAB-NAVIGATION-*`,
+`CHAMELEON-LAB-GAIT-*` et `CHAMELEON-PHYSICAL-ASSET-*` deviennent son oracle de
+locomotion. Un test d’intégration source interdit le retour des anciens modules
+de sondes comme autorité de déplacement.
 
-`CHAMELEON-LAB-CAMOUFLAGE-001` à `007` protègent séparément le prototype physique :
+L’exploration principale ajoute une matrice dédiée : choix déterministe d’une
+destination atteignable, préférence pondérée pour troncs/rochers/arbres, appel
+A* uniquement lors d’un nouveau « clic virtuel », réutilisation du corridor,
+confirmation physique d’un portail et replanification bornée après stagnation.
+L'index spatial est comparé à une recherche exhaustive pour plusieurs points et
+rayons afin de prouver qu'il conserve les candidats exacts sans scan global en
+production.
+Les fixtures doivent contenir au minimum sol→mur→sommet→face opposée, sphère,
+cylindre fini, arbre vertical et un obstacle qui impose un détour. Un oracle
+séparé libère le corps entre un mur et un sol éloignés et exige qu’aucun tick ne
+publie simultanément ces deux propriétaires.
+
+`CHAMELEON-LAB-CAMOUFLAGE-001` à `007` protègent le moteur physique partagé :
 profils et repères de support immuables, vote borné des quatre pattes, hystérésis
 en faveur du support courant, transition invariante au découpage temporel,
 variante `MeshStandardNodeMaterial` opaque et retour au matériau GLB naturel.
@@ -119,9 +144,14 @@ Les scénarios couvrent notamment profondeur extrême, tunnels étroits/larges, 
 
 L’inspecteur `OBS` permet de suivre une fourmi précise, sa destination, son corridor, sa progression, sa vitesse mesurée et la raison d’un arrêt. Le même panneau accepte désormais un papillon ou le caméléon : il expose intention, menace, camouflage, classe de surface, support et corridor local sans devenir une source de décision. Les sphères et volumes de vision ne sont affichés que pour l’individu sélectionné. L’inspecteur sert à expliquer un échec mais ne remplace pas l’oracle automatisé.
 
-La validation WebGPU ciblée doit encore confirmer visuellement la pose et l’absence de popping aux raccords terrain/rocher/tronc/arbre, le passage autour des obstacles, l’alignement du corps sur les normales et les quatre contacts approximatifs, la variété de l’exploration locale, la fuite continue et le centrage de la portée de langue sur la bouche. Les tests Node protègent les invariants numériques et de budget, pas la qualité artistique de la pose.
+La validation WebGPU ciblée doit confirmer visuellement la pose et l’absence de
+popping aux raccords terrain/rocher/tronc/arbre, le passage autour des obstacles,
+l’alignement du corps sur les normales et les quatre contacts physiques, la
+variété de l’exploration par clics virtuels, la fuite continue et le centrage de
+la portée de langue sur la bouche. Les tests Node protègent les invariants
+numériques et de budget, pas la qualité artistique de la pose.
 
-### Laboratoire physique du caméléon
+### Moteur physique partagé du caméléon
 
 Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manuelle minimale vérifie :
 
@@ -173,6 +203,28 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
 - caméra sans traversée persistante du décor ;
 - debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
+
+Ouvrir ensuite la partie normale avec les aides **Chemin de surface**,
+**Proxies / contacts** et **Squelette à travers la peau**. La campagne
+d’intégration à la vraie scène exige :
+
+- apparition sur un support valide, sans ancien caméléon ni doublon de collider ;
+- destinations autonomes successives sur le terrain, un tronc couché, un
+  rocher et un arbre vertical, sans circuit répétitif ;
+- corridor visible identique à celui réellement suivi et A* absent entre deux
+  destinations ;
+- franchissement sol→obstacle→sommet→face opposée par les seules griffes, sans
+  position imposée ni téléportation ;
+- relâchement/chute sans pont de prises entre deux supports éloignés ;
+- pause de camouflage : peau opaque conforme au support tenu, motif fixe dans
+  le monde, ombres conservées et papillons cessant seulement alors d’éviter le
+  prédateur ;
+- interruption de la route par une proie, regard tête/cou, contact réel de la
+  langue, retour dans la bouche, puis reprise d’une exploration autonome ;
+- masquage souterrain, sélection/HUD et destruction/recréation sans fuite de
+  corps Rapier, listener ou géométrie de debug ;
+- comparaison de cadence avec le caméléon désactivé puis activé à ×1, sans coût
+  dépendant de `antCount` et sans allocation croissante au fil des destinations.
 
 Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
 `chameleon-lab-controller`, `chameleon-lab-navigation-route`,

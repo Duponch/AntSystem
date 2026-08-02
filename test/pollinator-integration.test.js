@@ -399,10 +399,8 @@ test( 'POLLINATOR-009 disabled pollinators skip asset loading and can lazy-start
 		readSource( '../src/pollinators.js' ),
 	] );
 
-	assert.match(
-		mainSource,
-		/gfx\.pollinators\s*\?\s*loadPollinatorAssets\(\)\s*:\s*Promise\.resolve\(\s*null\s*\)/u,
-	);
+	assert.doesNotMatch( mainSource, /loadPollinatorAssets|loadButterflyAsset/u );
+	assert.match( mainSource, /await bees\.preload\(\)/u );
 	assert.match( facadeSource, /if\s*\(\s*!\s*gfx\.pollinators\s*\)\s*return Promise\.resolve\(\s*null\s*\)/u );
 	assert.match( facadeSource, /if\s*\(\s*loadPromise\s*\)\s*return loadPromise/u );
 	assert.match( facadeSource, /loadPromise = loadPollinatorAssets\(\)/u );

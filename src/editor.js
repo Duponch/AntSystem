@@ -8,13 +8,26 @@
 import * as THREE from 'three/webgpu';
 import { CATALOG } from './graphics/props.js';
 
-export function createEditor( { scene, camera, renderer, controls, props, sim, ground, onSelect } ) {
+const CHAMELEON_SURFACE_CATEGORIES = new Set( [ 'trees', 'obstacles', 'rocks' ] );
+
+export function createEditor( {
+	scene,
+	camera,
+	renderer,
+	controls,
+	props,
+	sim,
+	ground,
+	onSelect,
+	onDecorChanged = null,
+} ) {
 
 	let enabled = false;
 	let selected = null;              // { entry, index }
 	let placing = null;               // nom de modèle en attente de placement
 	let dragging = false;
 	let stampsDirty = false;
+	let chameleonSurfacesDirty = false;
 	let stampTimer = null;
 
 	const raycaster = new THREE.Raycaster();
@@ -91,9 +104,10 @@ export function createEditor( { scene, camera, renderer, controls, props, sim, g
 
 	}
 
-	function queueStamps() {
+	function queueStamps( category = null ) {
 
 		stampsDirty = true;
+		if ( CHAMELEON_SURFACE_CATEGORIES.has( category ) ) chameleonSurfacesDirty = true;
 		clearTimeout( stampTimer );
 		stampTimer = setTimeout( () => {
 
@@ -101,6 +115,12 @@ export function createEditor( { scene, camera, renderer, controls, props, sim, g
 
 				stampsDirty = false;
 				sim.setObstacles( props.computeWallStamps() );
+				if ( chameleonSurfacesDirty ) {
+
+					chameleonSurfacesDirty = false;
+					onDecorChanged?.();
+
+				}
 
 			}
 
@@ -130,7 +150,7 @@ export function createEditor( { scene, camera, renderer, controls, props, sim, g
 					scale: info.defaultScale,
 				} );
 				select( ref );
-				queueStamps();
+				queueStamps( info.category );
 
 			}
 
@@ -154,7 +174,7 @@ export function createEditor( { scene, camera, renderer, controls, props, sim, g
 
 		props.updatePlacement( selected.entry, selected.index, { x: p.x, z: p.z } );
 		refreshMarker();
-		queueStamps();
+		queueStamps( selected.entry.category );
 
 	} );
 
@@ -203,15 +223,16 @@ export function createEditor( { scene, camera, renderer, controls, props, sim, g
 			if ( ! selected ) return;
 			props.updatePlacement( selected.entry, selected.index, patch );
 			refreshMarker();
-			queueStamps();
+			queueStamps( selected.entry.category );
 
 		},
 		deleteSelection() {
 
 			if ( ! selected ) return;
+			const category = selected.entry.category;
 			props.removePlacement( selected.entry, selected.index );
 			select( null );
-			queueStamps();
+			queueStamps( category );
 
 		},
 	};

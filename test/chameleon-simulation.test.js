@@ -626,3 +626,306 @@ test( 'CHAMELEON-SIM-033 camouflage dwell survives acquisition and aim, then rev
 	assert.equal( advanceChameleonCamouflageDwell( 0, 1, false, true, false ), 0 );
 
 } );
+
+test( 'CHAMELEON-SIM-039 external locomotion accepts an exact authoritative rig pose', () => {
+
+	const internal = createFastSimulation();
+	assert.throws(
+		() => internal.setExternalPose( 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0 ),
+		/requires externalLocomotion/u,
+	);
+
+	const simulation = createFastSimulation( { externalLocomotion: true } );
+	const view = simulation.getView();
+	const telemetry = simulation.getTelemetry();
+	const returned = simulation.setExternalPose(
+		3, 4, 5,
+		3, 4, 0,
+		0, 0, 2,
+		3.125, 4.875, 5.625,
+	);
+
+	assert.equal( returned, view );
+	assert.deepEqual( [ view.x, view.y, view.z ], [ 3, 4, 5 ] );
+	assert.ok( Math.abs( view.headingX - 0.6 ) < 1e-12 );
+	assert.ok( Math.abs( view.headingY - 0.8 ) < 1e-12 );
+	assert.equal( view.headingZ, 0 );
+	assert.deepEqual( [ view.upX, view.upY, view.upZ ], [ 0, 0, 1 ] );
+	assert.deepEqual( [ view.mouthX, view.mouthY, view.mouthZ ], [ 3.125, 4.875, 5.625 ] );
+	assert.deepEqual(
+		[ view.tongueTipX, view.tongueTipY, view.tongueTipZ ],
+		[ view.mouthX, view.mouthY, view.mouthZ ],
+	);
+
+	simulation.update( 0 );
+	assert.equal( simulation.getView(), view );
+	assert.equal( simulation.getTelemetry(), telemetry );
+	assert.equal( telemetry.distanceTravelled, 0, 'the initial authority hand-off is not locomotion' );
+	assert.equal( telemetry.lastStepDistance, 0 );
+	assert.throws(
+		() => simulation.setExternalPose( 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 ),
+		/non-zero length/u,
+	);
+
+} );
+
+test( 'CHAMELEON-SIM-040 external patrol and tracking never integrate the authoritative body pose', () => {
+
+	const simulation = createFastSimulation( {
+		externalLocomotion: true,
+		restScanDuration: 0,
+	} );
+	const emptyPrey = { count: 0 };
+	const initialPose = [
+		8, 1.5, - 6,
+		0, 0, - 1,
+		0, 1, 0,
+		8.2, 1.7, - 6.4,
+	];
+	simulation.setExternalPose( ...initialPose );
+	simulation.update( 0.01, emptyPrey );
+	assert.equal( simulation.state, CHAMELEON_STATE.PATROL_LOG );
+
+	for ( let i = 0; i < 100; i ++ ) simulation.update( 0.01, emptyPrey );
+	let view = simulation.getView();
+	assert.deepEqual( [ view.x, view.y, view.z ], initialPose.slice( 0, 3 ) );
+	assert.deepEqual( [ view.mouthX, view.mouthY, view.mouthZ ], initialPose.slice( 9, 12 ) );
+	assert.equal( simulation.getTelemetry().distanceTravelled, 0 );
+	assert.equal( simulation.getTelemetry().lastStepDistance, 0 );
+
+	simulation.setExternalPose(
+		11, 5.5, - 6,
+		0, 0, - 1,
+		0, 1, 0,
+		11.2, 5.7, - 6.4,
+	);
+	simulation.update( 0.05, emptyPrey );
+	view = simulation.getView();
+	assert.deepEqual( [ view.x, view.y, view.z ], [ 11, 5.5, - 6 ] );
+	assert.deepEqual( [ view.mouthX, view.mouthY, view.mouthZ ], [ 11.2, 5.7, - 6.4 ] );
+	assert.equal( simulation.getTelemetry().distanceTravelled, 5 );
+	assert.equal( simulation.getTelemetry().lastStepDistance, 5 );
+	assert.equal( simulation.getTelemetry().maxStepDistance, 5 );
+
+	simulation.update( 0.05, emptyPrey );
+	assert.equal( simulation.getTelemetry().distanceTravelled, 5 );
+	assert.equal( simulation.getTelemetry().lastStepDistance, 0 );
+
+	simulation.setExternalPose(
+		11, 5.5, - 6,
+		0, 0, - 1,
+		0, 1, 0,
+		11.2, 5.7, - 6.4,
+		true,
+	);
+	simulation.update( simulation.maxIntegrationStep, emptyPrey );
+	assert.equal( simulation.state, CHAMELEON_STATE.REST_SCAN );
+	assert.deepEqual( [ simulation.x, simulation.y, simulation.z ], [ 11, 5.5, - 6 ] );
+
+} );
+
+test( 'CHAMELEON-SIM-041 external locomotion preserves the complete capture and retraction FSM', () => {
+
+	const simulation = createFastSimulation( {
+		externalLocomotion: true,
+		restScanDuration: 0,
+	} );
+	const bodyX = 10;
+	const bodyY = 2;
+	const bodyZ = - 3;
+	const mouthX = 10.35;
+	const mouthY = 2.2;
+	const mouthZ = - 3;
+	const { prey, events } = createPrey( [ [ 11.35, 2.2, - 3 ] ] );
+	const observed = new Uint8Array( CHAMELEON_STATE_NAMES.length );
+
+	for ( let i = 0; i < 1000 && events.consumeAttempts === 0; i ++ ) {
+
+		simulation.setExternalPose(
+			bodyX, bodyY, bodyZ,
+			0, 0, 1,
+			0, 1, 0,
+			mouthX, mouthY, mouthZ,
+			false,
+		);
+		simulation.update( 0.002, prey );
+		observed[ simulation.state ] = 1;
+		assert.deepEqual( [ simulation.x, simulation.y, simulation.z ], [ bodyX, bodyY, bodyZ ] );
+		assert.deepEqual( [ simulation.mouthX, simulation.mouthY, simulation.mouthZ ], [ mouthX, mouthY, mouthZ ] );
+		assert.deepEqual(
+			[ simulation.headingX, simulation.headingY, simulation.headingZ ],
+			[ 0, 0, 1 ],
+			'aiming must not overwrite the physical rig heading',
+		);
+
+	}
+
+	for ( const state of [
+		CHAMELEON_STATE.TRACK_PREY,
+		CHAMELEON_STATE.AIM_AND_BRACE,
+		CHAMELEON_STATE.STRIKE_EXTEND,
+		CHAMELEON_STATE.CONTACT,
+		CHAMELEON_STATE.RETRACT_WITH_PREY,
+		CHAMELEON_STATE.BITE_AND_SWALLOW,
+	] ) assert.equal( observed[ state ], 1, `${ CHAMELEON_STATE_NAMES[ state ] } was not observed` );
+	assert.equal( events.captureAttempts, 1 );
+	assert.equal( events.consumeAttempts, 1 );
+	assert.equal( simulation.getTelemetry().contacts, 1 );
+	assert.equal( simulation.getTelemetry().consumed, 1 );
+	assert.equal( simulation.getTelemetry().distanceTravelled, 0 );
+
+} );
+
+test( 'CHAMELEON-SIM-042 external pose ingestion remains allocation-free', async () => {
+
+	const source = await readFile(
+		new URL( '../src/chameleon-simulation.js', import.meta.url ),
+		'utf8',
+	);
+	const methodStart = source.indexOf( '\n\tsetExternalPose(' );
+	const methodEnd = source.indexOf( '\n\t_consumeExternalPoseTelemetry()', methodStart );
+	const method = source.slice( methodStart, methodEnd );
+	assert.ok( methodStart >= 0 && methodEnd > methodStart );
+	assert.doesNotMatch( method, /\bnew\s+(?:Array|Object|Map|Set|Float32Array|Uint8Array)\b/u );
+	assert.doesNotMatch( method, /\.(?:map|filter|reduce|slice|sort|forEach)\s*\(/u );
+
+	const simulation = createFastSimulation( { externalLocomotion: true } );
+	const view = simulation.getView();
+	const telemetry = simulation.getTelemetry();
+	for ( let i = 0; i < 1000; i ++ ) {
+
+		simulation.setExternalPose( i * 0.001, 0, 0, 1, 0, 0, 0, 1, 0, i * 0.001 + 0.2, 0.1, 0 );
+		simulation.update( 0 );
+
+	}
+	assert.equal( simulation.getView(), view );
+	assert.equal( simulation.getTelemetry(), telemetry );
+
+} );
+
+test( 'CHAMELEON-SIM-043 world visibility gates acquisition and drops an occluded target', () => {
+
+	const simulation = createFastSimulation( {
+		externalLocomotion: true,
+		restScanDuration: 0,
+		attackDistance: 1,
+		detectionDistance: 3,
+	} );
+	const { prey } = createPrey( [ [ 2.4, 0.2, 0 ] ] );
+	let visible = false;
+	let visibilityChecks = 0;
+	prey.hasLineOfSight = () => {
+
+		visibilityChecks ++;
+		return visible;
+
+	};
+	const pose = [ 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.2, 0 ];
+	for ( let step = 0; step < 30; step ++ ) {
+
+		simulation.setExternalPose( ...pose );
+		simulation.update( 0.01, prey );
+
+	}
+	assert.equal( simulation.targetIndex, - 1 );
+	assert.ok( visibilityChecks > 0 );
+
+	visible = true;
+	for ( let step = 0; step < 30 && simulation.targetIndex < 0; step ++ ) {
+
+		simulation.setExternalPose( ...pose );
+		simulation.update( 0.01, prey );
+
+	}
+	assert.equal( simulation.targetIndex, 0 );
+	assert.equal( simulation.state, CHAMELEON_STATE.TRACK_PREY );
+	visible = false;
+	simulation.setExternalPose( ...pose );
+	simulation.update( 0.01, prey );
+	assert.equal( simulation.targetIndex, - 1 );
+	assert.equal( simulation.state, CHAMELEON_STATE.PATROL_LOG );
+
+} );
+
+test( 'CHAMELEON-SIM-044 an occluded swept tongue can neither capture nor consume prey', () => {
+
+	const simulation = createFastSimulation( {
+		externalLocomotion: true,
+		restScanDuration: 0,
+	} );
+	const { prey, events } = createPrey( [ [ 1.05, 0.2, 0 ] ] );
+	let tongueOcclusionChecks = 0;
+	prey.hasLineOfSight = () => true;
+	prey.isTongueSegmentClear = () => {
+
+		tongueOcclusionChecks ++;
+		return false;
+
+	};
+	for ( let step = 0; step < 800; step ++ ) {
+
+		simulation.setExternalPose( 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.2, 0 );
+		simulation.update( 0.002, prey );
+
+	}
+	assert.ok( simulation.getTelemetry().attacksReleased > 0 );
+	assert.ok( tongueOcclusionChecks > 0 );
+	assert.equal( events.captureAttempts, 0 );
+	assert.equal( events.consumeAttempts, 0 );
+	assert.equal( simulation.getTelemetry().captures, 0 );
+
+} );
+
+test( 'CHAMELEON-SIM-045 a refused consume releases the butterfly transactionally', () => {
+
+	const simulation = createFastSimulation();
+	const { prey, events } = createPrey( [ [ 1.25, 0.13, 0 ] ] );
+	let releases = 0;
+	prey.consume = () => {
+
+		events.consumeAttempts ++;
+		return false;
+
+	};
+	prey.releaseCapture = ( index ) => {
+
+		releases ++;
+		prey.captured[ index ] = 0;
+		return true;
+
+	};
+	for ( let step = 0; step < 1000 && events.consumeAttempts === 0; step ++ )
+		simulation.update( 0.002, prey );
+	assert.equal( events.captureAttempts, 1 );
+	assert.equal( events.consumeAttempts, 1 );
+	assert.equal( releases, 1 );
+	assert.equal( prey.captured[ 0 ], 0 );
+	assert.equal( simulation.getTelemetry().consumeRejected, 1 );
+	assert.equal( simulation.getTelemetry().consumed, 0 );
+
+} );
+
+test( 'CHAMELEON-SIM-046 a route rejection is guarded against stale target indices', () => {
+
+	const simulation = createFastSimulation( {
+		externalLocomotion: true,
+		restScanDuration: 0,
+		attackDistance: 1,
+		detectionDistance: 3,
+	} );
+	const { prey } = createPrey( [ [ 2.4, 0.2, 0 ] ] );
+	prey.hasLineOfSight = () => true;
+	for ( let step = 0; step < 30 && simulation.targetIndex < 0; step ++ ) {
+
+		simulation.setExternalPose( 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.2, 0 );
+		simulation.update( 0.01, prey );
+
+	}
+	assert.equal( simulation.targetIndex, 0 );
+	assert.equal( simulation.rejectTarget( 1 ), false );
+	assert.equal( simulation.targetIndex, 0 );
+	assert.equal( simulation.rejectTarget( 0 ), true );
+	assert.equal( simulation.targetIndex, - 1 );
+	assert.equal( simulation.state, CHAMELEON_STATE.PATROL_LOG );
+
+} );

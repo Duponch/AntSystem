@@ -24,7 +24,6 @@ import { createColonyTests } from './tests.js';
 import { createWarden } from './warden.js';
 import { createEditor } from './editor.js';
 import { createSpiders } from './spiders.js';
-import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js';
 import { createPollinators } from './pollinators.js';
 import { createRagdoll } from './ragdoll.js';
 import { createAntFollow } from './antfollow.js';
@@ -180,12 +179,10 @@ async function main() {
 	} catch { /* document illisible : on repart du procédural */ }
 
 	// sol/fourmilière + décor + fourmis en parallèle (chargements de fichiers)
-	const [ env, props, ants, pollinatorAssets, butterflyVat ] = await Promise.all( [
+	const [ env, props, ants ] = await Promise.all( [
 		createEnvironment( scene, sim ),
 		createProps( scene, decorDoc ),
 		createAnts( sim ),
-		gfx.pollinators ? loadPollinatorAssets() : Promise.resolve( null ),
-		gfx.pollinators && gfx.butterflies ? loadButterflyAsset() : Promise.resolve( null ),
 	] );
 	const grass = createGrass( scene, sim );
 	const foodballs = createFoodBalls( scene, sim );
@@ -196,7 +193,13 @@ async function main() {
 	await sim.init();
 	await sim.setObstacles( props.wallStamps );
 
-	const bees = createPollinators( { scene, renderer, camera, props, assets: pollinatorAssets, butterflyVat } );
+	const bees = createPollinators( {
+		scene,
+		renderer,
+		camera,
+		props,
+		environment: env,
+	} );
 	await bees.preload();
 	const spiders = await createSpiders( { scene, sim, renderer, props } );
 	spiders.setExternalAuthorityScheduling( params.timingMode === 'strict' );
@@ -240,7 +243,16 @@ async function main() {
 	const cinematic = createCinematic( { camera, controls, sim, renderer } );
 	const bench = createBench( { sim } );
 	const cones = createDebugCones( scene, sim );
-	const editor = createEditor( { scene, camera, renderer, controls, props, sim, ground: env.ground } );
+	const editor = createEditor( {
+		scene,
+		camera,
+		renderer,
+		controls,
+		props,
+		sim,
+		ground: env.ground,
+		onDecorChanged: () => bees.refreshChameleonSurfaces( 0 ),
+	} );
 
 	// --- musique d'ambiance (l'autoplay attend le premier geste utilisateur) ---
 	const musicEl = new Audio( '/music.ogg' );
@@ -374,6 +386,12 @@ async function main() {
 		onReset: resetAuthoritativeSimulation,
 		onSetColonyEnabled: setColonyEnabledAuthoritatively,
 	} );
+	window.addEventListener( 'beforeunload', () => {
+
+		wildlife.dispose();
+		bees.dispose();
+
+	}, { once: true } );
 
 	// éclosions → activation de nouvelles fourmis : nées au couvain (sous
 	// terre), elles remontent d'elles-mêmes. L'ordre compte : on initialise

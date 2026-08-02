@@ -136,8 +136,12 @@ test( 'BUTTERFLY-SIM-012 asset loading is conditional, lazy and singleton', asyn
 		readSource( '../src/pollinator-assets.js' ),
 	] );
 
-	assert.match( mainSource, /gfx\.pollinators && gfx\.butterflies \? loadButterflyAsset\(\) : Promise\.resolve\( null \)/u );
-	assert.match( mainSource, /createPollinators\( \{ scene, renderer, camera, props, assets: pollinatorAssets, butterflyVat \} \)/u );
+	assert.doesNotMatch( mainSource, /loadButterflyAsset|loadPollinatorAssets/u );
+	assert.match(
+		mainSource,
+		/createPollinators\(\s*\{[\s\S]*?\bscene,[\s\S]*?\brenderer,[\s\S]*?\bcamera,[\s\S]*?\bprops,[\s\S]*?\benvironment:\s*env,[\s\S]*?\}\s*\)/u,
+	);
+	assert.match( mainSource, /await bees\.preload\(\)/u );
 	assert.match( facadeSource, /if \( ! gfx\.pollinators \|\| ! gfx\.butterflies \) return Promise\.resolve\( null \)/u );
 	assert.match( facadeSource, /if \( butterflyLoadPromise \) return butterflyLoadPromise/u );
 	assert.match( facadeSource, /butterflyLoadPromise = Promise\.all/u );

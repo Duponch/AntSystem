@@ -147,10 +147,11 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 
 	}
 
-	function applyNest() {
+	async function applyNest() {
 
 		sim.applyLayout();
 		env.rebuildEntrance();
+		await bees.refreshChameleonSurfaces( 0 );
 		nestVolume.rebuild();          // la forme a change : on refait le champ 3D
 		refreshNestInfo();
 		gui.controllersRecursive().forEach( ( c ) => c.updateDisplay() );
@@ -183,7 +184,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 					env.setThickness( gfx.groundThickness );
 
 				}
-				applyNest();
+				await applyNest();
 				await onReset();
 
 			} finally {
@@ -205,7 +206,7 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 				if ( ! await sim.layout.growToAsync( target, {
 					beforeCommit: commitPause.beforeCommit,
 				} ) ) return false;
-				applyNest();
+				await applyNest();
 				await sim.synchronize();
 				return true;
 
@@ -675,6 +676,8 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 		props.setCategoryScale( cat );
 		if ( restamp ) sim.setObstacles( props.computeWallStamps() );
 		if ( cat === 'trees' ) bees.refreshHiveAnchor( true );
+		if ( cat === 'trees' || cat === 'obstacles' || cat === 'rocks' )
+			bees.refreshChameleonSurfaces();
 
 	};
 
@@ -762,29 +765,44 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	const fChameleon = fGfx.addFolder( 'Caméléon' );
 	fChameleon.add( gfx, 'chameleonEnabled' ).name( 'Activer' )
 		.onChange( ( value ) => bees.setChameleonEnabled( value ) );
-	fChameleon.add( gfx, 'chameleonScale', 0.4, 2.5, 0.05 ).name( 'Taille' );
-	fChameleon.add( gfx, 'chameleonPatrolSpeed', 0.05, 4, 0.05 ).name( 'Vitesse de mouvement' );
-	fChameleon.add( gfx, 'chameleonTrackingSpeed', 0.05, 5, 0.05 ).name( 'Vitesse de poursuite' );
-	fChameleon.add( gfx, 'chameleonAnimationSpeed', 0.1, 4, 0.05 ).name( 'Vitesse animation marche' );
-	fChameleon.add( gfx, 'chameleonTurnSpeed', 1, 15, 0.25 ).name( 'Réactivité orientation' );
-	const fChameleonContacts = fChameleon.addFolder( 'Contacts physiques' );
-	fChameleonContacts.add( gfx, 'chameleonContactPhysics' ).name( 'Collisions exactes' );
-	fChameleonContacts.add( gfx, 'chameleonFootIK' ).name( 'Pattes procédurales' );
-	fChameleonContacts.add( gfx, 'chameleonBodyContacts' ).name( 'Contacts du corps' );
-	fChameleonContacts.add( gfx, 'chameleonBodyContactFrequency', 15, 60, 1 )
-		.name( 'Corps (Hz)' );
-	fChameleonContacts.add( gfx, 'chameleonBodyProbeRadius', 0.02, 0.28, 0.005 )
-		.name( 'Rayon sondes corps' );
-	fChameleonContacts.add( gfx, 'chameleonTailContacts' ).name( 'Contacts de queue' );
-	fChameleonContacts.add( gfx, 'chameleonTailContactFrequency', 15, 60, 1 )
-		.name( 'Queue (Hz)' );
-	fChameleonContacts.add( gfx, 'chameleonTailProbeRadius', 0.02, 0.22, 0.005 )
-		.name( 'Rayon sondes queue' );
-	fChameleonContacts.add( gfx, 'chameleonContactFrequency', 15, 120, 1 )
-		.name( 'Solveur de contact (Hz)' );
-	fChameleonContacts.add( gfx, 'chameleonStepHeight', 0, 0.5, 0.01 ).name( 'Hauteur des pas' );
-	fChameleonContacts.add( gfx, 'chameleonGaitStrength', 0, 1, 0.01 ).name( 'Influence IK' );
-	fChameleonContacts.close();
+	const fChameleonMotion = fChameleon.addFolder( 'Locomotion physique' );
+	fChameleonMotion.add( gfx, 'chameleonPatrolSpeed', 0.05, 4, 0.05 ).name( 'Vitesse exploration' );
+	fChameleonMotion.add( gfx, 'chameleonTrackingSpeed', 0.05, 5, 0.05 ).name( 'Vitesse poursuite' );
+	fChameleonMotion.add( gfx, 'chameleonSprintMultiplier', 1, 3, 0.05 ).name( 'Multiplicateur sprint' );
+	fChameleonMotion.add( gfx, 'chameleonAnimationSpeed', 0.1, 4, 0.05 ).name( 'Vitesse animation' );
+	fChameleonMotion.add( gfx, 'chameleonMoveForce', 2, 35, 0.5 ).name( 'Force motrice' );
+	fChameleonMotion.add( gfx, 'chameleonTurnSpeed', 1, 15, 0.25 ).name( 'Réactivité du cap' );
+	fChameleonMotion.add( gfx, 'chameleonTurnTorque', 0.5, 8, 0.1 ).name( 'Couple de rotation' );
+	fChameleonMotion.close();
+	const fChameleonGait = fChameleon.addFolder( 'Squelette et démarche' );
+	fChameleonGait.add( gfx, 'chameleonMotorStrength', 0, 2.5, 0.05 ).name( 'Stabilité du corps' );
+	fChameleonGait.add( gfx, 'chameleonMotorDamping', 0.2, 2.5, 0.05 ).name( 'Amortissement' );
+	fChameleonGait.add( gfx, 'chameleonLimbMuscleTone', 0, 0.45, 0.01 ).name( 'Tonus musculaire' );
+	fChameleonGait.add( gfx, 'chameleonGaitFrequency', 0.25, 3, 0.05 ).name( 'Cadence (Hz)' );
+	fChameleonGait.add( gfx, 'chameleonStepLength', 0.08, 0.34, 0.005 ).name( 'Longueur des pas' );
+	fChameleonGait.add( gfx, 'chameleonStepHeight', 0.015, 0.2, 0.005 ).name( 'Hauteur des pas' );
+	fChameleonGait.add( gfx, 'chameleonStrideAmplitude', 0.1, 0.9, 0.01 ).name( 'Amplitude épaules / hanches' );
+	fChameleonGait.add( gfx, 'chameleonLimbLift', 0, 0.75, 0.01 ).name( 'Levée des membres' );
+	fChameleonGait.add( gfx, 'chameleonJointFlex', 0, 1.15, 0.01 ).name( 'Flexion coudes / genoux' );
+	fChameleonGait.add( gfx, 'chameleonBodyMotion', 0, 2, 0.05 ).name( 'Mouvement du corps' );
+	fChameleonGait.add( gfx, 'chameleonSuspension', 0, 2, 0.05 ).name( 'Suspension anatomique' );
+	fChameleonGait.close();
+	const fChameleonGrip = fChameleon.addFolder( 'Appuis et accroche' );
+	fChameleonGrip.add( gfx, 'chameleonGripEnabled' ).name( 'Appuis pieds / griffes' );
+	fChameleonGrip.add( gfx, 'chameleonGripStrength', 3, 80, 1 ).name( 'Force de maintien' );
+	fChameleonGrip.add( gfx, 'chameleonGripStiffness', 30, 360, 5 ).name( 'Rigidité d’appui' );
+	fChameleonGrip.add( gfx, 'chameleonGripDamping', 1, 24, 0.5 ).name( 'Amortissement d’appui' );
+	fChameleonGrip.add( gfx, 'chameleonGripReach', 0.08, 0.42, 0.01 ).name( 'Portée capteurs' );
+	fChameleonGrip.add( gfx, 'chameleonRightingStrength', 0, 2, 0.05 ).name( 'Réflexe de redressement' );
+	fChameleonGrip.add( gfx, 'chameleonSurfaceCommitTime', 0.2, 2, 0.05 ).name( 'Verrouillage surface (s)' );
+	fChameleonGrip.add( gfx, 'chameleonSupportClearance', 0, 0.04, 0.001 ).name( 'Dégagement support' );
+	fChameleonGrip.close();
+	const fChameleonTail = fChameleon.addFolder( 'Queue passive' );
+	fChameleonTail.add( gfx, 'chameleonTailFlexibility', 0, 1, 0.01 ).name( 'Souplesse' );
+	fChameleonTail.add( gfx, 'chameleonTailDamping', 0, 8, 0.1 ).name( 'Amortissement' );
+	fChameleonTail.add( gfx, 'chameleonTailCollisionScale', 0.5, 1.75, 0.05 ).name( 'Rayon de collision' );
+	fChameleonTail.add( gfx, 'chameleonTailGravity', 0, 2, 0.05 ).name( 'Gravité de la queue' );
+	fChameleonTail.close();
 	const fChameleonRoaming = fChameleon.addFolder( 'Exploration et camouflage' );
 	fChameleonRoaming.add( gfx, 'chameleonRoamingEnabled' ).name( 'Explorer la carte' );
 	fChameleonRoaming.add(
@@ -792,26 +810,31 @@ export function createUI( { scene, sim, ants, env, sky, grass, props, foodballs,
 	).name( 'Rayon d\'exploration' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageEnabled' ).name( 'Camouflage automatique' );
 	const fChameleonSkin = fChameleonRoaming.addFolder( 'Peau camoufl\u00e9e' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflageEnvironmentMatch', 0, 0.86, 0.01 ).name( 'Adaptation au d\u00e9cor' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflageEdgeReveal', 0, 0.8, 0.01 ).name( 'Lisibilit\u00e9 des contours' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflagePatternStrength', 0, 0.4, 0.01 ).name( 'Motifs cutan\u00e9s' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflagePatternScale', 0.5, 12, 0.1 ).name( '\u00c9chelle des motifs' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflageSampleSpread', 0, 0.015, 0.0005 ).name( 'Diffusion des couleurs' );
-	fChameleonSkin.add( gfx, 'chameleonCamouflageShadowRetention', 0.1, 0.6, 0.01 ).name( 'Ombre r\u00e9siduelle' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageStrength', 0, 1, 0.01 ).name( 'Correspondance support' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageEyeRetention', 0, 1, 0.01 ).name( 'Détails des yeux' );
 	fChameleonSkin.add( gfx, 'chameleonCamouflageAdaptSeconds', 0.1, 6, 0.1 ).name( 'Temps d\'adaptation (s)' );
 	fChameleonSkin.add( gfx, 'chameleonCamouflageReleaseSeconds', 0.1, 4, 0.1 ).name( 'Retour naturel (s)' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageSurfaceCommitSeconds', 0.02, 0.5, 0.01 ).name( 'Validation support (s)' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageSurfaceTransitionSeconds', 0.05, 1.5, 0.05 ).name( 'Transition support (s)' );
+	fChameleonSkin.add( gfx, 'chameleonCamouflageSupportHoldSeconds', 0, 1, 0.02 ).name( 'Mémoire support (s)' );
 	fChameleonSkin.close();
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageInterval', 1, 60, 0.5 ).name( 'Intervalle camouflage' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageMinDuration', 0.5, 30, 0.25 ).name( 'Camouflage min (s)' );
 	fChameleonRoaming.add( gfx, 'chameleonCamouflageMaxDuration', 0.5, 60, 0.25 ).name( 'Camouflage max (s)' );
-	fChameleonRoaming.add( gfx, 'chameleonSupportClearance', 0, 0.25, 0.001 ).name( 'Dégagement support' );
 	fChameleonRoaming.close();
-	fChameleon.add( gfx, 'chameleonDetectionDistance', 1, 12, 0.1 ).name( 'Distance de détection' );
-	fChameleon.add( gfx, 'chameleonAttackDistance', 0.5, 8, 0.1 ).name( 'Distance d\'attaque' );
-	fChameleon.add( gfx, 'chameleonDebugAttackRange' ).name( 'Zone attaque (sélection)' );
-	fChameleon.add( gfx, 'chameleonAimDuration', 0.2, 3, 0.05 ).name( 'Préparation attaque (s)' );
-	fChameleon.add( gfx, 'chameleonTongueRetractDuration', 0.15, 0.6, 0.01 ).name( 'Rétraction langue (s)' );
-	fChameleon.add( gfx, 'chameleonAttackCooldown', 0.3, 6, 0.1 ).name( 'Repos après attaque (s)' );
+	const fChameleonHunt = fChameleon.addFolder( 'Chasse' );
+	fChameleonHunt.add( gfx, 'chameleonDetectionDistance', 1, 12, 0.1 ).name( 'Distance de détection' );
+	fChameleonHunt.add( gfx, 'chameleonAttackDistance', 0.5, 8, 0.1 ).name( 'Distance d\'attaque' );
+	fChameleonHunt.add( gfx, 'chameleonAimDuration', 0.2, 3, 0.05 ).name( 'Préparation attaque (s)' );
+	fChameleonHunt.add( gfx, 'chameleonTongueRetractDuration', 0.15, 0.6, 0.01 ).name( 'Rétraction langue (s)' );
+	fChameleonHunt.add( gfx, 'chameleonAttackCooldown', 0.3, 6, 0.1 ).name( 'Repos après attaque (s)' );
+	fChameleonHunt.close();
+	const fChameleonDebug = fChameleon.addFolder( 'Diagnostic' );
+	fChameleonDebug.add( gfx, 'chameleonDebugContacts' ).name( 'Proxies / contacts' );
+	fChameleonDebug.add( gfx, 'chameleonDebugRig' ).name( 'Squelette à travers la peau' );
+	fChameleonDebug.add( gfx, 'chameleonDebugRoute' ).name( 'Chemin de surface' );
+	fChameleonDebug.add( gfx, 'chameleonDebugAttackRange' ).name( 'Zone attaque (sélection)' );
+	fChameleonDebug.close();
 	fChameleon.add( gfx, 'chameleonCastShadow' ).name( 'Projeter les ombres' )
 		.onChange( ( value ) => bees.setChameleonCastShadow( value ) );
 	fChameleon.add( gfx, 'chameleonReceiveShadow' ).name( 'Recevoir les ombres' )

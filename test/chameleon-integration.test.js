@@ -4,8 +4,6 @@ import test from 'node:test';
 
 const GLB_MAGIC = 0x46546C67;
 const GLB_JSON_CHUNK = 0x4E4F534A;
-const REQUIRED_WALK = 'Walk_Chameleon_Imported';
-const REQUIRED_ATTACK = 'Attack_Chameleon_Imported';
 
 async function readSource( relativeUrl ) {
 
@@ -43,195 +41,142 @@ async function readGlb( relativeUrl ) {
 
 }
 
-function animationDuration( gltf, animation ) {
+test( 'CHAMELEON-SIM-015 shipped physical GLB preserves the production rig contract', async () => {
 
-	let duration = 0;
-	for ( const sampler of animation.samplers || [] ) {
-
-		const accessor = gltf.accessors?.[ sampler.input ];
-		assert.ok( accessor?.max?.length );
-		duration = Math.max( duration, accessor.max[ 0 ] );
-
-	}
-	return duration;
-
-}
-
-function animationTargets( gltf, animation ) {
-
-	return new Set( ( animation.channels || [] ).map(
-		( channel ) => gltf.nodes?.[ channel.target.node ]?.name,
-	) );
-
-}
-
-test( 'CHAMELEON-SIM-015 shipped GLB preserves the exact rig, sockets and clip contract', async () => {
-
-	const { bytes, json } = await readGlb( '../public/Chameleon.glb' );
-	const names = ( json.nodes || [] ).map( ( node ) => node.name );
-	const clips = ( json.animations || [] ).map( ( animation ) => animation.name );
+	const { bytes, json } = await readGlb( '../public/assets/ChameleonPhysical.glb' );
+	const names = new Set( ( json.nodes || [] ).map( ( node ) => node.name ) );
 	const skinnedNodes = ( json.nodes || [] ).filter(
 		( node ) => node.mesh !== undefined && node.skin !== undefined,
 	);
 
-	assert.ok( bytes.length < 3 * 1024 * 1024, 'single-animal GLB must stay below 3 MiB' );
-	assert.ok( clips.includes( REQUIRED_WALK ) );
-	assert.ok( clips.includes( REQUIRED_ATTACK ) );
-	assert.ok( names.includes( 'jaw' ) );
-	assert.ok( names.includes( 'tongue_base' ) );
-	assert.ok( names.includes( 'tongue_mid' ) );
-	assert.ok( names.includes( 'tongue_tip' ) );
-	assert.equal( names.filter( ( name ) => name === 'mouth_socket' ).length, 1 );
-	assert.equal( names.filter( ( name ) => name === 'capture_socket' ).length, 1 );
-	assert.ok( ( json.skins || [] ).some( ( skin ) => ( skin.joints || [] ).length >= 32 ) );
-	assert.ok( skinnedNodes.length >= 1 );
-	assert.ok( skinnedNodes.every( ( node ) => node.skin === skinnedNodes[ 0 ].skin ) );
-	assert.ok(
-		( json.nodes || [] ).some(
-			( node ) => /tongue/iu.test( node.name || '' ) && node.mesh !== undefined,
-		),
-		'exported tongue must remain a separate hideable mesh',
-	);
-
-} );
-
-test( 'CHAMELEON-SIM-016 attack clip animates the whole body, jaw and tongue at useful speed', async () => {
-
-	const { json } = await readGlb( '../public/Chameleon.glb' );
-	const attack = json.animations.find( ( animation ) => animation.name === REQUIRED_ATTACK );
-	const walk = json.animations.find( ( animation ) => animation.name === REQUIRED_WALK );
-	const targets = animationTargets( json, attack );
-
+	assert.ok( bytes.length < 12 * 1024 * 1024, 'physical animal GLB must stay below 12 MiB' );
+	assert.equal( json.skins?.length, 1 );
+	assert.equal( json.skins[ 0 ].joints.length, 43 );
+	assert.equal( skinnedNodes.length, 1 );
+	assert.equal( skinnedNodes[ 0 ].name, 'Chameleon_Physics_Body' );
+	assert.equal( skinnedNodes[ 0 ].extras?.physics_ready, true );
+	assert.equal( json.animations?.length || 0, 0, 'locomotion is procedural, not clip-driven' );
 	for ( const required of [
-		'root',
-		'pelvis',
-		'chest',
-		'neck',
-		'head',
-		'jaw',
-		'tongue_base',
-		'tongue_mid',
-		'tongue_tip',
-		'upper_front.L',
-		'upper_hind.R',
-	] ) assert.ok( targets.has( required ), `${ required } is absent from attack animation` );
-	assert.ok( attack.channels.length >= 100, 'attack must be a full-body animation' );
-	assert.ok( animationDuration( json, attack ) >= 1.5 );
-	assert.ok( animationDuration( json, attack ) <= 2.2 );
-	assert.ok( animationDuration( json, walk ) >= 1 );
-
-	const mainMesh = ( json.meshes || [] ).find( ( mesh ) => /GameMesh/iu.test( mesh.name || '' ) );
-	assert.ok( mainMesh );
-	assert.notEqual(
-		mainMesh.primitives?.[ 0 ]?.attributes?.COLOR_0,
-		undefined,
-		'main PBR mesh must keep authored vertex colors',
-	);
+		'root', 'pelvis', 'spine_01', 'spine_02', 'neck', 'head', 'jaw',
+		'front_girdle.L', 'front_upper.L', 'front_lower.L', 'front_palm.L',
+		'hind_girdle.R', 'hind_upper.R', 'hind_lower.R', 'hind_palm.R',
+		'tail_01', 'tail_12',
+	] ) assert.equal( names.has( required ), true, `${ required } is absent from the physical rig` );
 
 } );
 
-test( 'CHAMELEON-SIM-017 loader is singleton, validates exact names and clones the skeleton safely', async () => {
+test( 'CHAMELEON-SIM-016 procedural locomotion owns the body while behaviour only owns intent', async () => {
 
-	const source = await readSource( '../src/chameleon-assets.js' );
+	const [ runtime, hybrid ] = await Promise.all( [
+		readSource( '../src/chameleon-physical-system.js' ),
+		readSource( '../src/chameleon-lab/hybrid-chameleon.js' ),
+	] );
 
-	assert.match( source, /let assetPromise = null/u );
-	assert.match( source, /if\s*\(\s*assetPromise\s*\)\s*return assetPromise/u );
-	assert.match( source, /loader\.loadAsync\(\s*CHAMELEON_ASSET_URL\s*\)/u );
-	assert.match( source, /Walk_Chameleon_Imported/u );
-	assert.match( source, /Attack_Chameleon_Imported/u );
-	assert.match( source, /mouth_socket/u );
-	assert.match( source, /capture_socket/u );
-	assert.match( source, /cloneSkeleton\(\s*asset\.scene\s*\)/u );
-	assert.match( source, /MeshStandardNodeMaterial/u );
-	assert.match( source, /vertexColors/u );
-	assert.match( source, /if\s*\(\s*\/tongue\/iu\.test\(\s*object\.name\s*\)\s*\)/u );
-	assert.doesNotMatch( source, /loadVAT|InstancedMesh/u );
+	assert.match( runtime, /new ChameleonSimulation\(\s*\{[\s\S]*?externalLocomotion:\s*true/u );
+	const fixedStart = runtime.indexOf( '\n\tfunction beforePhysicsStep(' );
+	const fixedEnd = runtime.indexOf( '\n\tfunction stepSimulation(', fixedStart );
+	const fixed = runtime.slice( fixedStart, fixedEnd );
+	const pose = fixed.indexOf( 'simulation.setExternalPose(' );
+	const behaviour = fixed.indexOf( 'simulation.update(' );
+	const command = fixed.indexOf( 'hybrid.setCommand(' );
+	const physical = fixed.indexOf( 'hybrid.beforeStep(' );
+	assert.ok( pose >= 0 && behaviour > pose && command > behaviour && physical > command );
+	assert.match( runtime, /surfaceWorld\.physics\.step\([\s\S]*?beforePhysicsStep[\s\S]*?hybrid\.afterStep\(\)/u );
+	assert.match( runtime, /hybrid\.syncVisual\(\s*lastPhysicsAlpha,\s*renderDt\s*\)/u );
+	assert.match( hybrid, /new ChameleonProceduralGait\s*\(/u );
+	assert.match( hybrid, /new PassiveTailPhysics\s*\(/u );
+	assert.match( hybrid, /new PassiveLimbRagdoll\s*\(/u );
+	assert.doesNotMatch( runtime + hybrid, /new THREE\.AnimationMixer\s*\(/u );
 
 } );
 
-test( 'CHAMELEON-SIM-018 renderer owns one mixer and a fixed tapered procedural tongue', async () => {
+test( 'CHAMELEON-SIM-017 physical loader validates and instantiates the authored hybrid body', async () => {
 
-	const source = await readSource( '../src/chameleons.js' );
-	const mixerConstructions = source.match( /new THREE\.AnimationMixer\(/gu ) || [];
+	const source = await readSource( '../src/chameleon-lab/hybrid-chameleon.js' );
+
+	assert.match( source, /assetUrl\s*=\s*[']\/assets\/ChameleonPhysical\.glb[']/u );
+	assert.match( source, /assetScene\s*=\s*null/u );
+	assert.match( source, /new GLTFLoader\(\)\.loadAsync\(\s*assetUrl\s*\)/u );
+	assert.match( source, /new StableVisualRig\(\s*model\s*\)/u );
+	assert.match( source, /RigidBodyDesc\.dynamic\(\)[\s\S]*?setCcdEnabled\(\s*true\s*\)/u );
+	assert.match( source, /ColliderDesc\.capsule\s*\(/u );
+	assert.match( source, /ColliderDesc\.ball\s*\(/u );
+	assert.match( source, /object\.castShadow\s*=\s*true/u );
+	assert.match( source, /object\.receiveShadow\s*=\s*true/u );
+
+} );
+
+test( 'CHAMELEON-SIM-018 physical renderer owns one fixed procedural tongue without a mixer', async () => {
+
+	const source = await readSource( '../src/chameleon-physical-system.js' );
 	const cylinderConstructions = source.match( /new THREE\.CylinderGeometry\(/gu ) || [];
 	const padConstructions = source.match( /new THREE\.SphereGeometry\(/gu ) || [];
 
-	assert.equal( mixerConstructions.length, 1 );
 	assert.equal( cylinderConstructions.length, 1 );
 	assert.equal( padConstructions.length, 1 );
-	assert.match( source, /new THREE\.CylinderGeometry\(\s*0\.54,\s*1,\s*1/u );
-	assert.match( source, /view\.attackClipPhase/u );
-	assert.match( source, /view\.mouthX/u );
-	assert.match( source, /view\.tongueTipX/u );
-	assert.match( source, /setFromUnitVectors\(\s*LOCAL_Y,\s*tongueDirection\s*\)/u );
-	assert.match( source, /tongueTube\.scale\.set\(\s*width,\s*length,\s*width\s*\)/u );
-	const tongueUpdate = source.slice(
-		source.indexOf( 'function updateTongue' ), source.indexOf( 'function setCastShadow' ),
+	assert.doesNotMatch( source, /new THREE\.AnimationMixer\s*\(/u );
+	assert.match( source, /function createTongueVisual\(\s*scene\s*\)/u );
+	assert.match( source, /view\.tongueTipX\s*-\s*renderedMouthPosition\.x/u );
+	assert.match( source, /setFromUnitVectors\(\s*LOCAL_BONE_AXIS,\s*tongueDirection\s*\)/u );
+	assert.match( source, /tongue\.tube\.scale\.set\(\s*1,\s*length,\s*1\s*\)/u );
+	assert.match( source, /tongue\.pad\.position\.set\(\s*view\.tongueTipX/u );
+	const renderAttack = source.slice(
+		source.indexOf( '\n\tfunction renderAttack(' ),
+		source.indexOf( '\n\tfunction updateDebugView(', source.indexOf( '\n\tfunction renderAttack(' ) ),
 	);
-	assert.doesNotMatch( tongueUpdate, /new THREE\.(?:CylinderGeometry|SphereGeometry)/u );
+	assert.doesNotMatch( renderAttack, /new THREE\.(?:CylinderGeometry|SphereGeometry)/u );
 
 } );
 
-test( 'CHAMELEON-SIM-019 support relief rebuild is revision-driven and has no frame raycast', async () => {
+test( 'CHAMELEON-SIM-019 production navigation uses one shared physical surface manifold', async () => {
 
-	const source = await readSource( '../src/chameleons.js' );
+	const source = await readSource( '../src/chameleon-physical-system.js' );
 
-	assert.match( source, /selectChameleonHost\(\s*props\.registry\s*\)/u );
-	assert.match( source, /new ChameleonSurfaceGraphBaker\(\)/u );
-	assert.match( source, /surfaceGraphBaker\.update\(\s*props\.registry/u );
-	assert.match( source, /props\.getRevision/u );
-	assert.match( source, /revision !== propRevision/u );
-	assert.match( source, /nextTreeScale !== treeScale/u );
-	assert.match( source, /nextRockScale !== rockScale/u );
-	assert.match( source, /if\s*\(\s*! changed\s*\)\s*return false/u );
-	assert.match( source, /simulation\.setTrackSamples\(\s*track\s*\)/u );
-	assert.match( source, /localX\.copy\(\s*forward\s*\)\.multiplyScalar\(\s*-\s*1\s*\)/u );
-	assert.match( source, /rotationMatrix\.makeBasis\(\s*localX,\s*up,\s*localZ\s*\)/u );
-	assert.doesNotMatch( source, /Raycaster|raycast|intersectObject|intersectObjects/u );
+	assert.match( source, /await createMainChameleonSurfaceWorld\(\s*\{/u );
+	assert.equal( ( source.match( /createMainChameleonSurfaceWorld\(/gu ) || [] ).length, 1 );
+	assert.match( source, /new SurfaceRoutePlanner\(\s*surfaceWorld\.navigation\s*\)/u );
+	assert.match( source, /new AutonomousExplorer\(/u );
+	assert.match( source, /routePlanner\.plan\(/u );
+	assert.match( source, /explorer\.setDestination\(/u );
+	assert.match( source, /getSupportNetwork:\s*\(\)\s*=>\s*surfaceWorld\.navigation/u );
+	assert.match( source, /getSurfaceWorld:\s*\(\)\s*=>\s*surfaceWorld/u );
+	assert.doesNotMatch( source, /Raycaster|intersectObjects?|\.raycast\s*\(/u );
 
 } );
 
-test( 'CHAMELEON-SIM-020 runtime exposes independent visibility and shadow controls', async () => {
+test( 'CHAMELEON-SIM-020 physical runtime exposes visibility, shadows and stable facade views', async () => {
 
-	const source = await readSource( '../src/chameleons.js' );
+	const source = await readSource( '../src/chameleon-physical-system.js' );
 
 	assert.match( source, /function setSurfaceVisible\(\s*visible\s*\)/u );
-	assert.match( source, /function setCastShadow\(\s*enabled\s*\)/u );
-	assert.match( source, /function setReceiveShadow\(\s*enabled\s*\)/u );
-	assert.match( source, /mesh\.castShadow = castShadow/u );
-	assert.match( source, /mesh\.receiveShadow = receiveShadow/u );
-	assert.match( source, /tongueTube\.castShadow = castShadow/u );
-	assert.match( source, /tongueTube\.receiveShadow = receiveShadow/u );
-	assert.match( source, /getButterflyPredationContext\(\)/u );
+	assert.match( source, /function setCastShadow\(\s*value\s*\)/u );
+	assert.match( source, /function setReceiveShadow\(\s*value\s*\)/u );
+	assert.match( source, /mesh\.castShadow\s*=\s*enabled/u );
+	assert.match( source, /mesh\.receiveShadow\s*=\s*enabled/u );
+	assert.match( source, /tongue\.tube\.castShadow\s*=\s*enabled/u );
+	assert.match( source, /tongue\.tube\.receiveShadow\s*=\s*enabled/u );
 	assert.match( source, /getSimulation:\s*\(\)\s*=>\s*simulation/u );
 	assert.match( source, /getTelemetry:\s*\(\)\s*=>\s*simulation\.getTelemetry\(\)/u );
+	assert.match( source, /getDebugView:\s*\(\)\s*=>\s*debugView/u );
+	assert.match( source, /getAvoidanceContext:\s*\(\)\s*=>\s*avoidanceView/u );
 
 } );
 
-test( 'CHAMELEON-SIM-038 hierarchical prey look drives neck and head before tongue rendering', async () => {
+test( 'CHAMELEON-SIM-038 prey look drives the physical neck before tongue rendering', async () => {
 
-	const source = await readSource( '../src/chameleons.js' );
+	const source = await readSource( '../src/chameleon-physical-system.js' );
+	const lookStart = source.indexOf( '\n\tfunction updateLookTarget(' );
+	const lookEnd = source.indexOf( '\n\tfunction beforePhysicsStep(', lookStart );
+	const look = source.slice( lookStart, lookEnd );
 
-	assert.match( source, /new ChameleonHeadLookModel\s*\(/u );
-	assert.match( source, /function updateHeadLookSimulation\(\s*dt,\s*view\s*\)/u );
-	assert.match( source, /view\.targetIndex\s*>=\s*0/u );
-	assert.match( source, /const striking = attackState\(\s*view\.state\s*\)[\s\S]*?striking\s*\?\s*view\.strikeX\s*:\s*view\.aimX/u );
-	assert.match( source, /rotateLookBoneInModelSpace\(\s*rigBinding\.neck/u );
-	assert.match( source, /rotateLookBoneInModelSpace\(\s*rigBinding\.head/u );
-
-	const renderStart = source.indexOf( 'function renderFrame' );
-	assert.ok( renderStart >= 0, 'renderFrame is missing' );
-	const renderEnd = source.indexOf( 'function reset', renderStart );
-	assert.ok( renderEnd > renderStart, 'renderFrame boundary is missing' );
+	assert.match( look, /view\.targetIndex\s*>=\s*0\s*\?\s*view\.targetIndex\s*:\s*view\.capturedIndex/u );
+	assert.match( look, /hybrid\.setLookTarget\(\s*preyPosition,\s*ATTACK_STATES\.has\(\s*view\.state\s*\)/u );
+	assert.match( look, /hybrid\.clearLookTarget\(\)/u );
+	const renderStart = source.indexOf( '\n\tfunction renderFrame(' );
+	const renderEnd = source.indexOf( '\n\tfunction reset(', renderStart );
 	const render = source.slice( renderStart, renderEnd );
-	const contactIndex = render.indexOf( 'commitSafeContactPose' );
-	const lookIndex = render.indexOf( 'applyHeadLookPose' );
-	const tongueIndex = render.indexOf( 'updateTongue( view, true )' );
-	assert.ok( contactIndex >= 0 && contactIndex < lookIndex,
-		'look offsets must be layered over the validated contact pose' );
-	assert.ok( lookIndex < tongueIndex,
-		'the mouth matrices must inherit the final neck/head pose before tongue aiming' );
-	assert.doesNotMatch( render, /\.lookAt\s*\(/u,
-		'Object3D.lookAt would bypass anatomical neck/head limits' );
+	assert.ok( render.indexOf( 'hybrid.syncVisual(' ) < render.indexOf( 'renderAttack( view )' ) );
+	assert.match( source, /mouthSocket\.getWorldPosition\(\s*renderedMouthPosition\s*\)/u );
+	assert.doesNotMatch( look, /\.lookAt\s*\(/u );
 
 } );

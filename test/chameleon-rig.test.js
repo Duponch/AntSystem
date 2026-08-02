@@ -484,7 +484,7 @@ test( 'CHAMELEON-RIG-010 phased body/contact IK hot paths stay allocation-free w
 
 	const [ source, integration ] = await Promise.all( [
 		readSource( '../src/chameleon-rig.js' ),
-		readSource( '../src/chameleons.js' ),
+		readSource( '../src/chameleon-lab/hybrid-chameleon.js' ),
 	] );
 	const bodyStart = source.indexOf( '\n\tfunction writeBodySurfaceDeltas(' );
 	const bodyEnd = source.indexOf( '\n\tfunction writeLocalPose(', bodyStart );
@@ -523,16 +523,14 @@ test( 'CHAMELEON-RIG-010 phased body/contact IK hot paths stay allocation-free w
 	);
 	assert.doesNotMatch( legApplyHotPath, /\bnew\s+(?:THREE\.|Float32Array|Array|Map|Set)/u );
 
-	const prepareStart = integration.indexOf( '\n\tfunction prepareProceduralRig(' );
-	const prepareEnd = integration.indexOf( '\n\tfunction applyProceduralBody(', prepareStart );
-	const prepare = integration.slice( prepareStart, prepareEnd );
-	const bodyOrder = prepare.indexOf( 'writeBodySurfaceDeltas(' );
-	const footOrder = prepare.indexOf( 'rigSolution.footTargets.set(' );
-	assert.ok( bodyOrder >= 0 && footOrder > bodyOrder );
-	assert.match( integration, /function applyProceduralBody[\s\S]*?applyBodySolution\s*\(/u );
-	assert.match( integration, /function applyProceduralTailAndLegs[\s\S]*?applyTailAndLegSolution\s*\(/u );
-	assert.doesNotMatch( integration, /instance\.model\.updateMatrixWorld\(\s*true\s*\)/u );
-	assert.match( integration, /instance\.model\.updateWorldMatrix\(\s*true,\s*false\s*\)/u );
+	assert.match( integration, /class StableVisualRig/u );
+	assert.match( integration, /class FixedRigPoseBuffer/u );
+	assert.match( integration, /const rig = new StableVisualRig\(\s*model\s*\)/u );
+	assert.match( integration, /const activeRigPose = new FixedRigPoseBuffer\(\s*rig,\s*32\s*\)/u );
+	assert.match( integration, /function beforeStep\(\s*dt\s*\)/u );
+	assert.match( integration, /wholeBodyGait\.update\(\s*dt,\s*wholeBodyInput\s*\)/u );
+	assert.match( integration, /function syncVisual\(\s*alpha\s*=\s*1/u );
+	assert.doesNotMatch( integration, /from\s*[']\.\.\/chameleon-rig\.js[']/u );
 
 	const { model } = createSyntheticRig();
 	const binding = createChameleonRigBinding( model );

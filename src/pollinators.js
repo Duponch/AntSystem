@@ -12,7 +12,15 @@ import { loadButterflyAsset, loadPollinatorAssets } from './pollinator-assets.js
  * valid before, during and after that load. Butterflies have their own lazy
  * singleton so disabling them does not disable bees or flowers.
  */
-export function createPollinators( { scene, renderer = null, camera = null, props, assets = null, butterflyVat = null } ) {
+export function createPollinators( {
+	scene,
+	renderer = null,
+	camera = null,
+	props,
+	environment = null,
+	assets = null,
+	butterflyVat = null,
+} ) {
 
 	let system = assets ? createBees( { scene, props, assets } ) : null;
 	let chameleonSystem = null;
@@ -29,18 +37,29 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 	let loadPromise = null;
 	let butterflyLoadPromise = null;
 	let chameleonLoadPromise = null;
+	let loadGeneration = 0;
+	let butterflyLoadGeneration = 0;
+	let chameleonLoadGeneration = 0;
+	let chameleonSurfaceRefreshTimer = null;
+	let chameleonSurfaceRefreshRequest = 0;
+	let chameleonSurfaceRefreshPromise = null;
+	let chameleonSurfaceRefreshWaiters = [];
+	let disposed = false;
 	let surfaceVisible = true;
 	let chameleonWasEnabled = !! gfx.chameleonEnabled;
 
 	function ensureLoaded() {
 
+		if ( disposed ) return Promise.resolve( null );
 		if ( system ) return Promise.resolve( system );
 		if ( ! gfx.pollinators ) return Promise.resolve( null );
 		if ( loadPromise ) return loadPromise;
 
+		const generation = loadGeneration;
 		loadPromise = loadPollinatorAssets()
 			.then( ( loadedAssets ) => {
 
+				if ( disposed || generation !== loadGeneration ) return null;
 				system = createBees( { scene, props, assets: loadedAssets } );
 				system.setSurfaceVisible( surfaceVisible );
 				return system;
@@ -48,8 +67,12 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 			} )
 			.catch( ( error ) => {
 
-				loadPromise = null;
-				gfx.pollinators = false;
+				if ( ! disposed && generation === loadGeneration ) {
+
+					loadPromise = null;
+					gfx.pollinators = false;
+
+				}
 				console.error( 'Chargement des pollinisateurs impossible.', error );
 				return null;
 
@@ -60,16 +83,19 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 
 	function ensureButterflies() {
 
+		if ( disposed ) return Promise.resolve( null );
 		if ( butterflySystem ) return Promise.resolve( butterflySystem );
 		if ( ! gfx.pollinators || ! gfx.butterflies ) return Promise.resolve( null );
 		if ( butterflyLoadPromise ) return butterflyLoadPromise;
 
+		const generation = butterflyLoadGeneration;
 		butterflyLoadPromise = Promise.all( [
 			ensureLoaded(),
 			butterflyVat ? Promise.resolve( butterflyVat ) : loadButterflyAsset(),
 		] )
 			.then( ( [ loadedSystem, loadedVat ] ) => {
 
+				if ( disposed || generation !== butterflyLoadGeneration ) return null;
 				butterflyVat = loadedVat;
 				if ( ! loadedSystem || ! loadedVat ) {
 
@@ -93,8 +119,12 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 			} )
 			.catch( ( error ) => {
 
-				butterflyLoadPromise = null;
-				gfx.butterflies = false;
+				if ( ! disposed && generation === butterflyLoadGeneration ) {
+
+					butterflyLoadPromise = null;
+					gfx.butterflies = false;
+
+				}
 				console.error( 'Chargement des papillons impossible.', error );
 				return null;
 
@@ -103,20 +133,35 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 
 	}
 
-	function ensureChameleon() {
+	function createChameleonInstance() {
 
-		if ( chameleonSystem ) return Promise.resolve( chameleonSystem );
-		if ( ! gfx.chameleonEnabled ) return Promise.resolve( null );
-		if ( chameleonLoadPromise ) return chameleonLoadPromise;
-		chameleonLoadPromise = createChameleons( {
+		return createChameleons( {
 			scene,
 			renderer,
 			camera,
 			props,
+			environment,
 			getButterflyPredationContext: () => butterflySystem?.getPredationContext() || null,
-		} )
+		} );
+
+	}
+
+	function ensureChameleon() {
+
+		if ( disposed ) return Promise.resolve( null );
+		if ( chameleonSystem ) return Promise.resolve( chameleonSystem );
+		if ( ! gfx.chameleonEnabled ) return Promise.resolve( null );
+		if ( chameleonLoadPromise ) return chameleonLoadPromise;
+		const generation = chameleonLoadGeneration;
+		const loading = createChameleonInstance()
 			.then( ( loaded ) => {
 
+				if ( generation !== chameleonLoadGeneration ) {
+
+					loaded?.dispose?.();
+					return chameleonSystem;
+
+				}
 				chameleonSystem = loaded;
 				chameleonSystem.setSurfaceVisible( surfaceVisible );
 				return chameleonSystem;
@@ -124,13 +169,111 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 			} )
 			.catch( ( error ) => {
 
-				chameleonLoadPromise = null;
-				gfx.chameleonEnabled = false;
+				if ( generation === chameleonLoadGeneration ) {
+
+					chameleonLoadPromise = null;
+					gfx.chameleonEnabled = false;
+
+				}
 				console.error( 'Chargement du caméléon impossible.', error );
 				return null;
 
 			} );
+		chameleonLoadPromise = loading;
 		return chameleonLoadPromise;
+
+	}
+
+	function settleChameleonSurfaceRefresh( value ) {
+
+		const waiters = chameleonSurfaceRefreshWaiters;
+		chameleonSurfaceRefreshWaiters = [];
+		for ( const resolve of waiters ) resolve( value );
+
+	}
+
+	async function rebuildChameleonSurfaces() {
+
+		chameleonSurfaceRefreshTimer = null;
+		if ( chameleonSurfaceRefreshPromise ) return chameleonSurfaceRefreshPromise;
+		chameleonSurfaceRefreshPromise = ( async () => {
+
+			while ( ! disposed && gfx.chameleonEnabled ) {
+
+				const request = chameleonSurfaceRefreshRequest;
+				const generation = ++ chameleonLoadGeneration;
+				const previous = chameleonSystem;
+				let loaded;
+				try {
+
+					loaded = await createChameleonInstance();
+
+				} catch ( error ) {
+
+					console.error( 'Reconstruction physique du caméléon impossible.', error );
+					// A superseded snapshot is retried instead of publishing stale
+					// colliders or resolving a newer caller with the previous world.
+					if ( request !== chameleonSurfaceRefreshRequest ) continue;
+					settleChameleonSurfaceRefresh( previous );
+					return previous;
+
+				}
+				const superseded = request !== chameleonSurfaceRefreshRequest;
+				const invalid = disposed || ! gfx.chameleonEnabled
+					|| generation !== chameleonLoadGeneration;
+				if ( superseded || invalid ) {
+
+					loaded?.dispose?.();
+					if ( superseded && ! disposed && gfx.chameleonEnabled ) {
+
+						clearTimeout( chameleonSurfaceRefreshTimer );
+						chameleonSurfaceRefreshTimer = null;
+						continue;
+
+					}
+					settleChameleonSurfaceRefresh( chameleonSystem );
+					return chameleonSystem;
+
+				}
+				const wasSelected = !! previous?.getDebugView?.().selected;
+				releaseCapturedButterfly();
+				loaded.setSurfaceVisible( surfaceVisible );
+				if ( wasSelected ) loaded.select();
+				chameleonSystem = loaded;
+				chameleonLoadPromise = null;
+				previous?.dispose?.();
+				settleChameleonSurfaceRefresh( loaded );
+				return loaded;
+
+			}
+			settleChameleonSurfaceRefresh( chameleonSystem );
+			return chameleonSystem;
+
+		} )().finally( () => {
+
+			chameleonSurfaceRefreshPromise = null;
+
+		} );
+		return chameleonSurfaceRefreshPromise;
+
+	}
+
+	function refreshChameleonSurfaces( debounceMs = 180 ) {
+
+		if ( disposed ) return Promise.resolve( null );
+		chameleonSurfaceRefreshRequest ++;
+		clearTimeout( chameleonSurfaceRefreshTimer );
+		const completion = new Promise( ( resolve ) => {
+
+			chameleonSurfaceRefreshWaiters.push( resolve );
+
+		} );
+		chameleonSurfaceRefreshTimer = setTimeout( () => {
+
+			void rebuildChameleonSurfaces();
+
+		}, Math.max( 0, Number.isFinite( debounceMs ) ? debounceMs : 180 ) );
+		return completion;
 
 	}
 
@@ -242,6 +385,7 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 			return system ? system.refreshHiveAnchor( force ) : false;
 
 		},
+		refreshChameleonSurfaces,
 		setHiveScale( value ) {
 
 			gfx.hiveScale = value;
@@ -349,11 +493,18 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 
 			gfx.chameleonEnabled = !! value;
 			chameleonWasEnabled = gfx.chameleonEnabled;
-			if ( ! gfx.chameleonEnabled && chameleonSystem ) {
+			if ( ! gfx.chameleonEnabled ) {
 
+				chameleonLoadGeneration ++;
+				chameleonLoadPromise = null;
+				chameleonSurfaceRefreshRequest ++;
+				clearTimeout( chameleonSurfaceRefreshTimer );
+				chameleonSurfaceRefreshTimer = null;
+				settleChameleonSurfaceRefresh( null );
 				releaseCapturedButterfly();
-				chameleonSystem.reset();
-				chameleonSystem.setSurfaceVisible( surfaceVisible );
+				chameleonSystem?.clearSelection();
+				chameleonSystem?.reset();
+				chameleonSystem?.setSurfaceVisible( surfaceVisible );
 
 			} else if ( gfx.chameleonEnabled ) {
 
@@ -409,6 +560,29 @@ export function createPollinators( { scene, renderer = null, camera = null, prop
 		get butterflyMesh() { return butterflySystem?.mesh || null; },
 		get chameleon() { return chameleonSystem?.model || null; },
 		get chameleonPickable() { return chameleonSystem?.pickable || null; },
+		dispose() {
+
+			if ( disposed ) return;
+			disposed = true;
+			loadGeneration ++;
+			butterflyLoadGeneration ++;
+			chameleonLoadGeneration ++;
+			chameleonSurfaceRefreshRequest ++;
+			clearTimeout( chameleonSurfaceRefreshTimer );
+			chameleonSurfaceRefreshTimer = null;
+			settleChameleonSurfaceRefresh( null );
+			releaseCapturedButterfly();
+			chameleonSystem?.clearSelection?.();
+			chameleonSystem?.dispose?.();
+			butterflySystem?.dispose?.();
+			system?.dispose?.();
+			chameleonSystem = null;
+			butterflySystem = null;
+			system = null;
+			chameleonLoadPromise = null;
+			chameleonSurfaceRefreshPromise = null;
+
+		},
 	};
 
 }

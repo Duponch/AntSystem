@@ -127,6 +127,7 @@ export class ChameleonSimulation {
 		maxIntegrationStep = 1 / 120,
 		maxIntegrationSteps = 256,
 		holdAtTrackEnd = false,
+		externalLocomotion = false,
 	} = {} ) {
 
 		if ( ! Number.isInteger( preyCapacity ) || preyCapacity <= 0 ) {
@@ -177,6 +178,7 @@ export class ChameleonSimulation {
 		this.maxIntegrationStep = Math.max( 1 / 1000, finiteOr( maxIntegrationStep, 1 / 120 ) );
 		this.maxIntegrationSteps = maxIntegrationSteps;
 		this.holdAtTrackEnd = !! holdAtTrackEnd;
+		this.externalLocomotion = !! externalLocomotion;
 
 		this.time = 0;
 		this.state = CHAMELEON_STATE.REST_SCAN;
@@ -206,6 +208,7 @@ export class ChameleonSimulation {
 		this.tongueTipZ = 0;
 		this.tongueVisible = 0;
 		this.tongueExtension = 0;
+		this._tongueOccluded = 0;
 		this.attackClipPhase = 0;
 
 		this.aimX = 0;
@@ -224,6 +227,9 @@ export class ChameleonSimulation {
 		this._projectedDistanceSq = Infinity;
 		this._scanCountdown = 0;
 		this._captureContext = null;
+		this._externalPoseInitialized = false;
+		this._externalPoseDirty = false;
+		this._externalPendingDistance = 0;
 
 		this._trackX = null;
 		this._trackY = null;
@@ -459,6 +465,105 @@ export class ChameleonSimulation {
 
 	}
 
+	/**
+	 * Lets an external surface planner reject a target that has no physically
+	 * reachable corridor. The index guard prevents a stale asynchronous route
+	 * result from cancelling a newer prey choice.
+	 */
+	rejectTarget( index = this.targetIndex ) {
+
+		if ( index !== this.targetIndex || index === NO_TARGET ) return false;
+		this._loseTarget( CHAMELEON_STATE.PATROL_LOG );
+		this._syncPublicState();
+		return true;
+
+	}
+
+	/**
+	 * Supplies the authoritative physical pose when externalLocomotion is enabled.
+	 * The scalar API and implementation are allocation-free so it can be called
+	 * once per frame for every simulated chameleon. The mouth coordinates are an
+	 * exact animation/rig socket and are deliberately not reconstructed here.
+	 */
+	setExternalPose(
+		x, y, z,
+		headingX, headingY, headingZ,
+		upX, upY, upZ,
+		mouthX, mouthY, mouthZ,
+		routeCompleted = this.routeCompleted,
+	) {
+
+		if ( ! this.externalLocomotion ) {
+
+			throw new Error( 'setExternalPose requires externalLocomotion' );
+
+		}
+		assertFiniteNumber( 'external pose x', x );
+		assertFiniteNumber( 'external pose y', y );
+		assertFiniteNumber( 'external pose z', z );
+		assertFiniteNumber( 'external heading x', headingX );
+		assertFiniteNumber( 'external heading y', headingY );
+		assertFiniteNumber( 'external heading z', headingZ );
+		assertFiniteNumber( 'external up x', upX );
+		assertFiniteNumber( 'external up y', upY );
+		assertFiniteNumber( 'external up z', upZ );
+		assertFiniteNumber( 'external mouth x', mouthX );
+		assertFiniteNumber( 'external mouth y', mouthY );
+		assertFiniteNumber( 'external mouth z', mouthZ );
+
+		const headingLength = Math.hypot( headingX, headingY, headingZ );
+		if ( headingLength <= EPSILON ) throw new RangeError( 'external heading must have non-zero length' );
+		const upLength = Math.hypot( upX, upY, upZ );
+		if ( upLength <= EPSILON ) throw new RangeError( 'external up must have non-zero length' );
+
+		if ( this._externalPoseInitialized ) {
+
+			this._externalPendingDistance += Math.hypot(
+				x - this.x,
+				y - this.y,
+				z - this.z,
+			);
+
+		} else {
+
+			this._externalPoseInitialized = true;
+
+		}
+
+		this.x = x;
+		this.y = y;
+		this.z = z;
+		this.headingX = headingX / headingLength;
+		this.headingY = headingY / headingLength;
+		this.headingZ = headingZ / headingLength;
+		this.upX = upX / upLength;
+		this.upY = upY / upLength;
+		this.upZ = upZ / upLength;
+		this.mouthX = mouthX;
+		this.mouthY = mouthY;
+		this.mouthZ = mouthZ;
+		this.routeCompleted = routeCompleted ? 1 : 0;
+		this._externalPoseDirty = true;
+		if ( ! this.tongueVisible ) this._resetTongueAtMouth();
+		this._syncPublicState();
+		return this._view;
+
+	}
+
+	_consumeExternalPoseTelemetry() {
+
+		const telemetry = this._telemetry;
+		telemetry.lastStepDistance = 0;
+		if ( ! this._externalPoseDirty ) return;
+		const travelled = this._externalPendingDistance;
+		this._externalPendingDistance = 0;
+		this._externalPoseDirty = false;
+		telemetry.distanceTravelled += travelled;
+		telemetry.lastStepDistance = travelled;
+		if ( travelled > telemetry.maxStepDistance ) telemetry.maxStepDistance = travelled;
+
+	}
+
 	setTrackPosition( distance, headingSign = this.patrolDirection ) {
 
 		assertFiniteNumber( 'track position', distance );
@@ -508,6 +613,7 @@ export class ChameleonSimulation {
 		this.tongueTipZ = this.mouthZ;
 		this.tongueVisible = 0;
 		this.tongueExtension = 0;
+		this._tongueOccluded = 0;
 
 	}
 
@@ -689,6 +795,17 @@ export class ChameleonSimulation {
 
 	}
 
+	_hasLineOfSight( prey, index ) {
+
+		if ( typeof prey?.hasLineOfSight !== 'function' ) return true;
+		return prey.hasLineOfSight(
+			index,
+			this.mouthX, this.mouthY, this.mouthZ,
+			prey.x[ index ], prey.y[ index ], prey.z[ index ],
+		) !== false;
+
+	}
+
 	_scanForTarget( prey ) {
 
 		this._telemetry.scans ++;
@@ -701,6 +818,7 @@ export class ChameleonSimulation {
 			this._telemetry.targetChecks ++;
 			if ( ! this._isTargetAvailable( prey, i ) ) continue;
 			const distanceSq = this._distanceSqToPrey( prey, i );
+			if ( distanceSq <= bestDistanceSq && ! this._hasLineOfSight( prey, i ) ) continue;
 			if ( distanceSq <= bestDistanceSq ) {
 
 				if ( distanceSq < bestDistanceSq || bestIndex === NO_TARGET || i < bestIndex ) {
@@ -785,6 +903,7 @@ export class ChameleonSimulation {
 		this.aimX = prey.x[ index ];
 		this.aimY = prey.y[ index ];
 		this.aimZ = prey.z[ index ];
+		if ( this.externalLocomotion ) return;
 		const dx = this.aimX - this.x;
 		const dz = this.aimZ - this.z;
 		const length = Math.hypot( dx, dz );
@@ -861,6 +980,7 @@ export class ChameleonSimulation {
 		this.tongueTipZ = this.mouthZ;
 		this.tongueVisible = 1;
 		this.tongueExtension = 0;
+		this._tongueOccluded = 0;
 		this.attackClipPhase = 0.395;
 		this._telemetry.attacksReleased ++;
 		this._setState( CHAMELEON_STATE.STRIKE_EXTEND );
@@ -881,20 +1001,44 @@ export class ChameleonSimulation {
 		const mz = startZ - centerZ;
 		const radius = this.preyRadius + this.tongueRadius;
 		const c = mx * mx + my * my + mz * mz - radius * radius;
-		if ( c <= 0 ) return 0;
+		let hit = c <= 0 ? 0 : - 1;
 		const a = dx * dx + dy * dy + dz * dz;
-		if ( a <= EPSILON ) return - 1;
-		const b = mx * dx + my * dy + mz * dz;
-		if ( b > 0 ) return - 1;
-		const discriminant = b * b - a * c;
-		if ( discriminant < 0 ) return - 1;
-		const hit = ( - b - Math.sqrt( discriminant ) ) / a;
-		return hit >= 0 && hit <= 1 ? hit : - 1;
+		if ( hit < 0 && a > EPSILON ) {
+
+			const b = mx * dx + my * dy + mz * dz;
+			const discriminant = b * b - a * c;
+			if ( b <= 0 && discriminant >= 0 ) {
+
+				const candidate = ( - b - Math.sqrt( discriminant ) ) / a;
+				if ( candidate >= 0 && candidate <= 1 ) hit = candidate;
+
+			}
+
+		}
+		// Check every travelled segment, not only a segment that already reaches
+		// the prey. Otherwise a fast tongue could cross a wall one substep, then
+		// start inside the prey sphere on the next one and bypass occlusion.
+		const clearance = hit >= 0 ? hit : 1;
+		if ( typeof prey?.isTongueSegmentClear === 'function'
+			&& prey.isTongueSegmentClear(
+				index,
+				startX, startY, startZ,
+				startX + dx * clearance,
+				startY + dy * clearance,
+				startZ + dz * clearance,
+			) === false ) {
+
+			this._tongueOccluded = 1;
+			return - 1;
+
+		}
+		return hit;
 
 	}
 
 	_attemptContact( prey, startX, startY, startZ, endX, endY, endZ ) {
 
+		if ( this._tongueOccluded ) return - 1;
 		const index = this.targetIndex;
 		const hit = this._sweepTongueAgainstTarget(
 			prey,
@@ -906,12 +1050,12 @@ export class ChameleonSimulation {
 			endY,
 			endZ,
 		);
-		if ( hit < 0 ) return false;
+		if ( hit < 0 ) return this._tongueOccluded ? - 1 : 0;
 		if ( typeof prey.tryCapture === 'function' && prey.tryCapture( index ) === false ) {
 
 			this._telemetry.captureRejected ++;
 			this.targetIndex = NO_TARGET;
-			return false;
+			return 0;
 
 		}
 
@@ -931,7 +1075,7 @@ export class ChameleonSimulation {
 		this.attackClipPhase = 0.43;
 		this._placeCapturedPrey();
 		this._setState( CHAMELEON_STATE.CONTACT );
-		return true;
+		return 1;
 
 	}
 
@@ -959,7 +1103,12 @@ export class ChameleonSimulation {
 
 		}
 		if ( accepted ) this._telemetry.consumed ++;
-		else this._telemetry.consumeRejected ++;
+		else {
+
+			this._telemetry.consumeRejected ++;
+			this._captureContext?.releaseCapture?.( this.capturedIndex );
+
+		}
 		this.capturedIndex = NO_TARGET;
 		this.targetIndex = NO_TARGET;
 		this._captureContext = null;
@@ -981,26 +1130,35 @@ export class ChameleonSimulation {
 	_integrate( dt, prey ) {
 
 		this.stateTime += dt;
-		this._telemetry.lastStepDistance = 0;
+		if ( ! this.externalLocomotion ) this._telemetry.lastStepDistance = 0;
 
 		switch ( this.state ) {
 
 			case CHAMELEON_STATE.REST_SCAN: {
 				this.attackClipPhase = 0;
-				const trackAlignment = this._turnTowardTrack( dt );
+				const trackAlignment = this.externalLocomotion ? 1 : this._turnTowardTrack( dt );
 				this._maybeScan( dt, prey );
 				if (
 					this.state === CHAMELEON_STATE.REST_SCAN
 					&& this.stateTime >= this.restScanDuration
 					&& trackAlignment >= 0.995
-				) this._setState( CHAMELEON_STATE.PATROL_LOG );
+				) {
+
+					this.routeCompleted = 0;
+					this._setState( CHAMELEON_STATE.PATROL_LOG );
+
+				}
 				break;
 			}
 				break;
 
 			case CHAMELEON_STATE.PATROL_LOG:
 				this.attackClipPhase = 0;
-				this._patrol( dt );
+				if ( this.externalLocomotion ) {
+
+					if ( this.routeCompleted ) this._setState( CHAMELEON_STATE.REST_SCAN );
+
+				} else this._patrol( dt );
 				this._maybeScan( dt, prey );
 				break;
 
@@ -1012,14 +1170,24 @@ export class ChameleonSimulation {
 					break;
 
 				}
+				if ( ! this._hasLineOfSight( prey, index ) ) {
+
+					this._loseTarget( CHAMELEON_STATE.PATROL_LOG );
+					break;
+
+				}
 				if ( this._distanceSqToPrey( prey, index ) > this.detectionDistance * this.detectionDistance ) {
 
 					this._loseTarget( CHAMELEON_STATE.PATROL_LOG );
 					break;
 
 				}
-				this._projectPreyToTrack( prey, index );
-				this._moveTowardsTrackPosition( this._projectedTrackPosition, this.trackingSpeed, dt );
+				if ( ! this.externalLocomotion ) {
+
+					this._projectPreyToTrack( prey, index );
+					this._moveTowardsTrackPosition( this._projectedTrackPosition, this.trackingSpeed, dt );
+
+				}
 				if ( this._distanceSqToPrey( prey, index ) <= this.attackDistance * this.attackDistance ) {
 
 					this._updateAimPoint( prey, index, dt );
@@ -1035,6 +1203,12 @@ export class ChameleonSimulation {
 				if ( ! this._isTargetAvailable( prey, index ) ) {
 
 					this._loseTarget();
+					break;
+
+				}
+				if ( ! this._hasLineOfSight( prey, index ) ) {
+
+					this._loseTarget( CHAMELEON_STATE.PATROL_LOG );
 					break;
 
 				}
@@ -1060,13 +1234,31 @@ export class ChameleonSimulation {
 					const endX = this.mouthX + ( this.strikeX - this.mouthX ) * progress;
 					const endY = this.mouthY + ( this.strikeY - this.mouthY ) * progress;
 					const endZ = this.mouthZ + ( this.strikeZ - this.mouthZ ) * progress;
-					if ( ! this._attemptContact( prey, previousX, previousY, previousZ, endX, endY, endZ ) ) {
+					const contact = this._attemptContact(
+						prey, previousX, previousY, previousZ, endX, endY, endZ,
+					);
+					if ( contact === 0 ) {
 
 						this.tongueTipX = endX;
 						this.tongueTipY = endY;
 						this.tongueTipZ = endZ;
 						this._updateTongueExtension();
 						this.attackClipPhase = 0.395 + progress * 0.035;
+
+
+					} else if ( contact < 0 ) {
+
+						// Stop at the last clear point and enter the ordinary miss
+						// retraction. The visual tongue never continues through the
+						// collider that invalidated the physical strike.
+						this.strikeX = previousX;
+						this.strikeY = previousY;
+						this.strikeZ = previousZ;
+						this.tongueTipX = previousX;
+						this.tongueTipY = previousY;
+						this.tongueTipZ = previousZ;
+						this.stateTime = this.extendDuration;
+						this._updateTongueExtension();
 
 					}
 
@@ -1204,6 +1396,7 @@ export class ChameleonSimulation {
 		if ( ! Number.isFinite( dt ) || dt < 0 ) throw new RangeError( 'dt must be a finite non-negative number' );
 		const prey = context && context.prey ? context.prey : context;
 		this._telemetry.updateCalls ++;
+		if ( this.externalLocomotion ) this._consumeExternalPoseTelemetry();
 		if ( dt <= 0 ) {
 
 			this._syncPublicState();

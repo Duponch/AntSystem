@@ -41,10 +41,10 @@ test( 'TIME-SCALE-RUNTIME-001 both timing modes advance the ecosystem with one s
 
 test( 'TIME-SCALE-RUNTIME-002 rendering cannot mutate or advance ecosystem logic', async () => {
 
-	const [ main, pollinators, chameleons ] = await Promise.all( [
+	const [ main, pollinators, chameleonPhysical ] = await Promise.all( [
 		readSource( '../src/main.js' ),
 		readSource( '../src/pollinators.js' ),
-		readSource( '../src/chameleons.js' ),
+		readSource( '../src/chameleon-physical-system.js' ),
 	] );
 	assert.match( main, /ants\.renderFrame\( camera \)/u );
 	assert.match( main, /spiders\.renderFrame\(\)/u );
@@ -55,13 +55,15 @@ test( 'TIME-SCALE-RUNTIME-002 rendering cannot mutate or advance ecosystem logic
 	assert.ok( renderStart >= 0 && renderEnd > renderStart );
 	assert.doesNotMatch( pollinators.slice( renderStart, renderEnd ), /\.update\(|stepSimulation/u );
 
-	const chameleonRenderStart = chameleons.indexOf( '\n\tfunction renderFrame(' );
-	const chameleonRenderEnd = chameleons.indexOf( '\n\tfunction update(', chameleonRenderStart );
+	const chameleonRenderStart = chameleonPhysical.indexOf( '\n\tfunction renderFrame(' );
+	const chameleonRenderEnd = chameleonPhysical.indexOf( '\n\tfunction reset(', chameleonRenderStart );
 	assert.ok( chameleonRenderStart >= 0 && chameleonRenderEnd > chameleonRenderStart );
+	const chameleonRender = chameleonPhysical.slice( chameleonRenderStart, chameleonRenderEnd );
 	assert.doesNotMatch(
-		chameleons.slice( chameleonRenderStart, chameleonRenderEnd ),
-		/setCapturedPosition|simulation\.update/u,
+		chameleonRender,
+		/setCapturedPosition|simulation\.update|surfaceWorld\.physics\.step/u,
 	);
+	assert.match( chameleonRender, /hybrid\.syncVisual/u );
 
 } );
 

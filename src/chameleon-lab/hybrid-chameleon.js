@@ -1401,6 +1401,7 @@ export async function createHybridChameleon( {
 		gripStiffness: 175,
 		gripDamping: 8,
 		gripReach: 0.42,
+		supportClearance: 0.008,
 		rightingStrength: 1.15,
 		surfaceCommitTime: 0.85,
 		gaitFrequency: 0.92,
@@ -1981,7 +1982,10 @@ export async function createHybridChameleon( {
 			+ ( projection.point.z - bodyPosition.z ) * currentBodyUp.z > 0.08 ) return null;
 		contact.anchor = contact._anchorStore.set(
 			projection.point.x, projection.point.y, projection.point.z,
-		).addScaledVector( lockedProjectionNormal, 0.008 );
+		).addScaledVector(
+			lockedProjectionNormal,
+			settings.supportClearance,
+		);
 		contact.normal.copy( lockedProjectionNormal );
 		contact._candidateSurface = reacquireSurface;
 		contact._candidateCollider = reacquireCollider;
@@ -2124,7 +2128,10 @@ export async function createHybridChameleon( {
 				transitionScore = candidateTransitionScore;
 				transitionDistance = distanceFromNominal;
 				probeTransitionPoint.copy( probeCandidatePoint )
-					.addScaledVector( probeBestNormal, 0.008 );
+					.addScaledVector(
+						probeBestNormal,
+						settings.supportClearance,
+					);
 				probeTransitionNormal.copy( probeBestNormal );
 				transitionSurface = surface;
 				transitionCollider = hit.collider;
@@ -2135,7 +2142,10 @@ export async function createHybridChameleon( {
 			if ( score >= bestScore ) continue;
 			bestScore = score;
 			probeBestPoint.copy( probeCandidatePoint )
-				.addScaledVector( probeBestNormal, 0.008 );
+				.addScaledVector(
+					probeBestNormal,
+					settings.supportClearance,
+				);
 			contact.normal.copy( probeBestNormal );
 			bestSurface = surface;
 			bestCollider = hit.collider;
@@ -2293,7 +2303,10 @@ export async function createHybridChameleon( {
 		}
 		if ( ! bestSurface ) return null;
 		contact.anchor = contact._anchorStore.copy( lockedProjectionPoint )
-			.addScaledVector( lockedProjectionNormal, 0.008 );
+			.addScaledVector(
+				lockedProjectionNormal,
+				settings.supportClearance,
+			);
 		contact.normal.copy( lockedProjectionNormal );
 		contact._candidateSurface = bestSurface;
 		contact._candidateCollider = bestCollider;
