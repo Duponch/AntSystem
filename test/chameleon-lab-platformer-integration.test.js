@@ -343,3 +343,32 @@ test( 'CHAMELEON-LAB-PLATFORMER-INTEGRATION-009 grab and free-ragdoll atomically
 	);
 
 } );
+
+test( 'CHAMELEON-LAB-PLATFORMER-INTEGRATION-010 click-route debug follows lifecycle and active segment', async () => {
+
+	const source = await readFile( MAIN_URL, 'utf8' );
+	assert.match( source, /new\s+SurfaceRouteDebugView\s*\(\s*\{/u );
+	assert.match(
+		source,
+		/createLabUI\s*\(\s*\{[\s\S]*?routeDebugView:\s*surfaceRouteDebugView/u,
+		'the UI must own route-overlay visibility',
+	);
+	assert.match( source, /surfaceRouteDebugView\.setRoute\(\s*route\s*\)/u );
+	assert.ok(
+		( source.match(
+			/(?:collider|destinationCollider)\s*,\s*ragdoll\.supportNormal\s*,?\s*\)/gu,
+		) ?? [] ).length >= 2,
+		'both initial planning and replanning must localize the current support face',
+	);
+	assert.match(
+		source,
+		/surfaceRouteDebugView\.setProgress\(\s*explorer\.routeProgressIndex\s*\)/u,
+		'waypoint index must be converted to the active segment',
+	);
+	assert.ok( ( source.match( /surfaceRouteDebugView\.clear\(\s*\)/gu ) ?? [] ).length >= 5,
+		'reset, rejection, failed replan, manual input and disabling auto must clear stale routes' );
+	const dispose = extractBraceBlock( source, /function\s+dispose\s*\(\s*\)\s*/u, 'dispose' );
+	assert.match( dispose, /surfaceRouteDebugView\.dispose\s*\(\s*\)/u );
+	assert.match( source, /window\.__chameleonLab\s*=\s*\{[\s\S]*?surfaceRouteDebugView/u );
+
+} );

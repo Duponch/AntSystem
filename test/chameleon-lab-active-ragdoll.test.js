@@ -2186,6 +2186,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 	let undersideFootContacts = 0;
 	let maximumFixedStepDisplacement = 0;
 	let maximumSupportAngle = 0;
+	let minimumContactState = '';
 	const previousPosition = new THREE.Vector3();
 	const previousNormal = fixture.chameleon.supportNormal.clone();
 	{
@@ -2229,6 +2230,11 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 		maximumHeight = Math.max( maximumHeight, position.y );
 		farthestX = Math.min( farthestX, position.x );
 		minimumContacts = Math.min( minimumContacts, fixture.chameleon.contactCount );
+		if ( fixture.chameleon.contactCount === minimumContacts && minimumContacts < 2 )
+			minimumContactState = 'step=' + step + ' '
+				+ fixture.chameleon.feet.map( ( foot ) =>
+					foot.state + ':' + ( foot.collider?.handle ?? '-' ),
+				).join( ',' );
 
 	} );
 	assert.ok( frontAlignment > 0.62,
@@ -2237,7 +2243,8 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 		'forward input did not wrap onto the crown (' + crownAlignment
 			+ ', y=' + maximumHeight + '; ' + checkpoints.join( '; ' ) + ')' );
 	assert.ok( oppositeAlignment < -0.5,
-		'forward input never wrapped onto the opposite face (' + oppositeAlignment + ')' );
+		'forward input never wrapped onto the opposite face (' + oppositeAlignment
+			+ '; ' + checkpoints.join( '; ' ) + ')' );
 	assert.ok( minimumHighSupportY > -0.2,
 		'the crown traversal attached to the underside (' + minimumHighSupportY + ')' );
 	assert.equal( undersideFootContacts, 0,
@@ -2247,7 +2254,7 @@ test( 'CHAMELEON-LAB-RAGDOLL-031 holding forward traverses wall, crown and oppos
 			+ '; ' + checkpoints.join( '; ' ) + ')' );
 	assert.ok( minimumContacts >= 2,
 		'the traversal lost its two-claw support polygon (' + minimumContacts
-			+ '; ' + checkpoints.join( '; ' ) + ')' );
+			+ '; ' + minimumContactState + '; ' + checkpoints.join( '; ' ) + ')' );
 	assert.ok( maximumFixedStepDisplacement < 0.035,
 		'the edge handoff teleported the body by ' + maximumFixedStepDisplacement + ' m' );
 	assert.ok( maximumSupportAngle < 0.55,

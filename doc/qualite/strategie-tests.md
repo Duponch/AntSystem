@@ -129,9 +129,10 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   tournent sans déplacement en crabe, sur sol comme sur plan incliné, et le
   réglage de sprint impose une vitesse cible au moins `2,3×` supérieure à celle
   de marche ;
-- clic de destination limité aux surfaces grippables : parcours physique des
-  jalons du graphe d’accès statique livré, sans coupe aérienne ni téléportation
-  sur les raccords configurés, puis reprise immédiate par une entrée clavier ;
+- clic de destination limité aux surfaces grippables : corridor A* sur le
+  manifold partagé, contournement d’obstacle, changement de face confirmé par
+  le support réel, sans coupe aérienne ni téléportation, puis reprise immédiate
+  par une entrée clavier ;
 - adaptation progressive des quatre appuis à deux normales dans un angle sol/mur ;
 - maintien de la seule commande avant pendant la séquence complète sol → mur →
   sommet → face opposée, sans prise de sous-face ni capture par un rayon dont
@@ -167,12 +168,16 @@ Ouvrir `?test` ou `?test=chameleon` dans un navigateur WebGPU. La campagne manue
   touchée, rotation continue du corps et absence de téléportation ;
 - absence de capture avant le premier manifold, aucune griffe dorsale,
   redressement ventral et propriétaire unique dans un coin multi-surfaces ;
+- rejet d’une suspension virtuelle créée par deux prises au mur et deux prises
+  éloignées au sol, sans dégrader un vrai angle voisin ;
 - caméra sans traversée persistante du décor ;
 - debug cohérent : un corps Rapier et au plus quatre appuis ;
 - intégrité `OK`, coût complet du sous-pas p95 stable et absence de chargement Rapier sur la route normale.
 
 Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
-`chameleon-lab-controller`, `chameleon-lab-navigation-route`, `chameleon-lab-input`,
+`chameleon-lab-controller`, `chameleon-lab-navigation-route`,
+`chameleon-lab-surface-navigation-graph`, `chameleon-lab-route-debug-view`,
+`chameleon-lab-support-cohort`, `chameleon-lab-input`,
 `chameleon-lab-platformer-control`, `chameleon-lab-platformer-jump`,
 `chameleon-lab-platformer-integration`, `chameleon-lab-whole-body-gait`,
 `chameleon-lab-anatomical-limb`, `chameleon-lab-passive-limbs`,
@@ -182,9 +187,15 @@ Les tests `chameleon-lab-route`, `chameleon-lab-physics-world`,
 `chameleon-physical-asset` protègent la structure, les commandes et les bornes.
 `CHAMELEON-LAB-CONTROLLER-011` à `013` protègent la priorité d’une destination,
 la continuité du cap et l’unique raycast d’un clic valide avec rejet du verre.
-`CHAMELEON-LAB-NAVIGATION-001` à `005` protègent les chaînes statiques des
-perchoirs et du rocher incliné ainsi que leur stockage fixe, mais pas la
-traversée physique de bout en bout. `PLATFORMER-CONTROL-015` interdit la
+`CHAMELEON-LAB-NAVIGATION-001` à `009` protègent le corridor fixe, ses
+transitions bidirectionnelles, le watchdog de progression et la confirmation du
+support attendu, puis la face source, les jalons coïncidents, l’absence de route
+fabriquée en l’air et l’arrêt d’un échec identique. Les preuves
+`CHAMELEON-LAB-SURFACE-NAV-001` à `005` protègent la connexité CSR, les faces
+opposées, les portails orientés et bornés, le contournement avec clearance et la
+réutilisation de la mémoire A* ; celles du debug et des cohortes protègent
+respectivement le tracé borné et
+le rejet déterministe des prises incompatibles. `PLATFORMER-CONTROL-015` interdit la
 translation en crabe, `PLATFORMER-CONTROL-017` fixe le ratio de vitesse cible
 du sprint, `PLATFORMER-CONTROL-018/019` maintiennent un cap de virage franc
 pendant un appui continu comme après une impulsion brève, jusqu’à l’alignement
@@ -198,7 +209,12 @@ conservation d’un saut accepté et l’amorti fondé sur la descente maximale.
 événementiel, la priorité du clavier et la réutilisation des enregistrements de
 commande ;
 `CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` annule atomiquement l’autorité du saut
-pendant une saisie ou en mode libre. `CHAMELEON-LAB-GAIT-005` protège l’idle
+pendant une saisie ou en mode libre ;
+`CHAMELEON-LAB-PLATFORMER-INTEGRATION-010` protège tout le cycle de vie du
+tracé de route. `SUPPORT-COHORT-001` à `005` exercent les seuils runtime,
+l’angle orthogonal valide, le pont mur/sol éloigné, les faces opposées d’un même
+collider, les branches radiales, la portée anatomique, l’hystérésis et la
+réutilisation des buffers. `CHAMELEON-LAB-GAIT-005` protège l’idle
 corps entier sans déplacer les pieds et `CHAMELEON-LAB-GAIT-009` supprime cette
 enveloppe terrestre lorsque le corps est détaché. Dans
 `test/chameleon-procedural-gait.test.js`, `CHAMELEON-GAIT-014` borne la remise

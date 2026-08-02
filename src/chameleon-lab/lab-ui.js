@@ -108,6 +108,7 @@ export const CHAMELEON_LAB_MOVEMENT_DEFAULTS = Object.freeze( {
 
 export const CHAMELEON_LAB_DISPLAY_DEFAULTS = Object.freeze( {
 	rigDebug: false,
+	routeDebug: true,
 } );
 
 const JUMP_PHASE_LABELS = Object.freeze( {
@@ -181,6 +182,7 @@ export function createLabUI( {
 	renderer,
 	onReset,
 	rigDebugView = null,
+	routeDebugView = null,
 	camouflage = null,
 } ) {
 
@@ -622,6 +624,14 @@ export function createLabUI( {
 		onInput: ( value ) => rigDebugView?.setVisible( value ),
 	} );
 	rigDebugView?.setVisible( state.rigDebug );
+	const routeDebugToggle = makeToggle( {
+		parent: display,
+		label: 'Chemin de surface au clic',
+		object: state,
+		property: 'routeDebug',
+		onInput: ( value ) => routeDebugView?.setVisible( value ),
+	} );
+	routeDebugView?.setVisible( state.routeDebug );
 	makeToggle( {
 		parent: display,
 		label: 'Ombres',
@@ -693,6 +703,7 @@ export function createLabUI( {
 		ragdollToggle.checked = state.fullRagdoll;
 		debugToggle.checked = state.debug;
 		rigDebugToggle.checked = state.rigDebug;
+		routeDebugToggle.checked = state.routeDebug;
 		camouflageToggle.checked = state.camouflageEnabled;
 		fpsValue.textContent = `${ lastFps } fps`;
 		stepValue.textContent = `${ physics.stats.p95StepMs.toFixed( 2 ) } ms`;

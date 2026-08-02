@@ -7,6 +7,7 @@ import { createHybridChameleon } from './hybrid-chameleon.js';
 import {
 	AutonomousExplorer,
 	LabInputController,
+	MAX_ROUTE_WAYPOINTS,
 	SurfaceDestinationPicker,
 	SurfaceRoutePlanner,
 	ThirdPersonCamera,
@@ -18,6 +19,7 @@ import { PlatformerJumpModel } from './platformer-jump-model.js';
 import { createRigDebugView } from './rig-debug-view.js';
 import { disposeLabSurfacePatternTexture } from './surface-appearance.js';
 import { createSurfaceCamouflageController } from './surface-camouflage.js';
+import { SurfaceRouteDebugView } from './surface-route-debug-view.js';
 
 function createLoadingScreen() {
 
@@ -154,8 +156,14 @@ async function main() {
 		shadows: true,
 		gravity: 9.81,
 		rigDebug: false,
+		routeDebug: true,
 		jumpPhase: platformerJump.phase,
 	};
+	const surfaceRouteDebugView = new SurfaceRouteDebugView( {
+		scene,
+		visible: state.routeDebug,
+		maximumWaypoints: MAX_ROUTE_WAYPOINTS,
+	} );
 	const camouflageMeshes = [];
 	ragdoll.model.traverse( ( object ) => {
 
@@ -183,6 +191,7 @@ async function main() {
 		ragdoll.reset();
 		explorer.clearDestination();
 		explorer.resetProgress();
+		surfaceRouteDebugView.clear();
 		platformerControl.reset( ragdoll.forward, ragdoll.supportNormal );
 		platformerJump.reset( true, ragdoll.supportNormal );
 		ragdoll.setJumpPose( null );
@@ -199,6 +208,7 @@ async function main() {
 		renderer,
 		onReset: reset,
 		rigDebugView,
+		routeDebugView: surfaceRouteDebugView,
 		camouflage,
 	} );
 	loading.done();
@@ -251,11 +261,15 @@ async function main() {
 		let selectedCount = 0;
 		for ( let candidate = 0; candidate < ragdoll.feet.length; candidate ++ ) {
 
+			if ( ragdoll.feet[ candidate ].state !== 'holding'
+				|| ragdoll.feet[ candidate ].load <= 0 ) continue;
 			const collider = ragdoll.feet[ candidate ].collider;
 			if ( ! collider ) continue;
 			let count = 0;
 			for ( let other = 0; other < ragdoll.feet.length; other ++ )
-				if ( ragdoll.feet[ other ].collider?.handle === collider.handle ) count ++;
+				if ( ragdoll.feet[ other ].state === 'holding'
+					&& ragdoll.feet[ other ].load > 0
+					&& ragdoll.feet[ other ].collider?.handle === collider.handle ) count ++;
 			if ( count > selectedCount ) {
 
 				selected = collider;
@@ -267,12 +281,14 @@ async function main() {
 		return selected;
 
 	}
+	let destinationCollider = null;
 	const destinationPicker = new SurfaceDestinationPicker( {
 		camera,
 		domElement: renderer.domElement,
 		physics,
 		onDestination: ( destination, normal, collider ) => {
 
+			destinationCollider = collider;
 			const position = ragdoll.pelvis.body.translation();
 			creaturePosition.set( position.x, position.y, position.z );
 			const route = surfaceRoutePlanner.plan(
@@ -281,9 +297,22 @@ async function main() {
 				destination,
 				normal,
 				collider,
+				ragdoll.supportNormal,
 			);
-			explorer.setDestination( destination, normal, creaturePosition, route );
-			state.autonomous = true;
+			if ( route.reachable ) {
+
+				explorer.setDestination( destination, normal, creaturePosition, route );
+				surfaceRouteDebugView.setRoute( route );
+				state.autonomous = true;
+
+			} else {
+
+				explorer.clearDestination();
+				surfaceRouteDebugView.clear();
+				destinationCollider = null;
+				state.autonomous = false;
+
+			}
 
 		},
 	} );
@@ -312,7 +341,13 @@ async function main() {
 
 			state.autonomous = ! state.autonomous;
 			if ( state.autonomous ) explorer.resetProgress();
-			else explorer.clearDestination();
+			else {
+
+				explorer.clearDestination();
+				surfaceRouteDebugView.clear();
+				destinationCollider = null;
+
+			}
 
 		}
 		if ( input.consume( 'toggleRagdollQueued' ) ) state.fullRagdoll = ! state.fullRagdoll;
@@ -341,6 +376,8 @@ async function main() {
 
 					state.autonomous = false;
 					explorer.clearDestination();
+					surfaceRouteDebugView.clear();
+					destinationCollider = null;
 
 				}
 				const velocity = rootBody.linvel();
@@ -366,7 +403,13 @@ async function main() {
 
 					const position = ragdoll.pelvis.body.translation();
 					creaturePosition.set( position.x, position.y, position.z );
-					explorer.update( fixedDt, ragdoll.supportNormal, creaturePosition, move );
+					explorer.update(
+						fixedDt,
+						ragdoll.supportNormal,
+						creaturePosition,
+						move,
+						currentSupportCollider(),
+					);
 
 				} else {
 
@@ -453,6 +496,42 @@ async function main() {
 			},
 			() => ragdoll.afterStep(),
 		);
+		// Replanning is deliberately outside the 120 Hz physics callback. It is
+		// event-driven, reuses A* scratch storage and never multiplies with substeps.
+		if ( state.autonomous && explorer.destinationActive
+			&& explorer.consumeReplanRequest() ) {
+
+			const position = ragdoll.pelvis.body.translation();
+			creaturePosition.set( position.x, position.y, position.z );
+			const route = surfaceRoutePlanner.plan(
+				creaturePosition,
+				currentSupportCollider(),
+				explorer.destination,
+				explorer.destinationNormal,
+				destinationCollider,
+				ragdoll.supportNormal,
+			);
+			if ( route.reachable ) {
+
+				explorer.setDestination(
+					explorer.destination,
+					explorer.destinationNormal,
+					creaturePosition,
+					route,
+				);
+				surfaceRouteDebugView.setRoute( route );
+
+			} else {
+
+				explorer.clearDestination();
+				surfaceRouteDebugView.clear();
+				destinationCollider = null;
+				state.autonomous = false;
+
+			}
+
+		}
+		surfaceRouteDebugView.setProgress( explorer.routeProgressIndex );
 		ragdoll.syncVisual( result.alpha, dt );
 		camouflage.update( dt, ragdoll.feet );
 		cameraRig.update( dt );
@@ -473,6 +552,7 @@ async function main() {
 		cameraRig.dispose();
 		ui.dispose();
 		rigDebugView.dispose();
+		surfaceRouteDebugView.dispose();
 		camouflage.dispose();
 		ragdoll.dispose();
 		environment.dispose();
@@ -496,6 +576,7 @@ async function main() {
 		platformerControl,
 		platformerJump,
 		rigDebugView,
+		surfaceRouteDebugView,
 		camouflage,
 		grab,
 		destinationPicker,

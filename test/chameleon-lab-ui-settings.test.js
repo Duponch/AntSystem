@@ -46,17 +46,20 @@ test( 'CHAMELEON-LAB-UI-002 preserves restored numeric tuning and repairs invali
 
 } );
 
-test( 'CHAMELEON-LAB-UI-003 completes and preserves the rig overlay display switch', () => {
+test( 'CHAMELEON-LAB-UI-003 completes and preserves both bounded overlay switches', () => {
 
 	const legacy = { debug: true };
 	assert.equal( ensureLabDisplaySettings( legacy ), legacy );
 	assert.equal( legacy.rigDebug, false );
-	const restored = { rigDebug: true };
+	assert.equal( legacy.routeDebug, true );
+	const restored = { rigDebug: true, routeDebug: false };
 	ensureLabDisplaySettings( restored );
 	assert.equal( restored.rigDebug, true );
-	const invalid = { rigDebug: 'yes' };
+	assert.equal( restored.routeDebug, false );
+	const invalid = { rigDebug: 'yes', routeDebug: 'yes' };
 	ensureLabDisplaySettings( invalid );
 	assert.equal( invalid.rigDebug, CHAMELEON_LAB_DISPLAY_DEFAULTS.rigDebug );
+	assert.equal( invalid.routeDebug, CHAMELEON_LAB_DISPLAY_DEFAULTS.routeDebug );
 	assert.equal( Object.isFrozen( CHAMELEON_LAB_DISPLAY_DEFAULTS ), true );
 	assert.throws( () => ensureLabDisplaySettings( null ), /state/u );
 

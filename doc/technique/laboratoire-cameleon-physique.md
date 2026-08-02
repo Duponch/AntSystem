@@ -49,34 +49,40 @@ CPU, la mémoire et le temps de démarrage de la colonie.
 
 ## Chaîne d’exécution
 
-Le laboratoire associe treize couches :
+Le laboratoire associe seize couches :
 
 1. `surface-appearance.js` définit les pigments procéduraux partagés et le
    repère local immuable de chaque support ;
 2. `environment.js` crée les meshes WebGPU et leurs colliders Rapier fixes ;
-3. `surface-camouflage.js` élit le support tenu et pilote la variante de peau
+3. `surface-navigation-graph.js` échantillonne une fois toutes les surfaces
+   préhensiles et publie leur graphe CSR immuable ;
+4. `third-person-controller.js` localise départ et arrivée, exécute A* à la
+   demande et suit un corridor compact ;
+5. `surface-route-debug-view.js` dessine ce corridor avec un unique tracé borné ;
+6. `surface-camouflage.js` élit le support tenu et pilote la variante de peau
    adaptative opaque ;
-4. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis
-   et coordonne le rig visuel ;
-5. `anatomical-limb-solver.js` résout les ceintures, les deux segments et la
+7. `hybrid-chameleon.js` charge le GLB, crée le corps unique, les quatre appuis,
+   filtre leur cohorte cohérente avec `support-cohort-model.js` et coordonne le
+   rig visuel ;
+8. `anatomical-limb-solver.js` résout les ceintures, les deux segments et la
    surface complète de chaque main ou pied à partir du contrat exact du GLB ;
-6. `whole-body-gait-model.js` prépare une pose anatomique corps entier à partir
+9. `whole-body-gait-model.js` prépare une pose anatomique corps entier à partir
    des phases d’appui et de transfert ;
-7. `hybrid-controller-model.js` fournit les calculs purs de cadre de support,
+10. `hybrid-controller-model.js` fournit les calculs purs de cadre de support,
    gains amortis, limites articulaires et forces bornées ;
-8. `passive-limb-ragdoll.js` relâche les quatre membres pendant la saisie ou le
+11. `passive-limb-ragdoll.js` relâche les quatre membres pendant la saisie ou le
    mode libre, sans ajouter de corps Rapier ;
-9. `passive-tail-physics.js` simule la ligne centrale passive de la queue et
+12. `passive-tail-physics.js` simule la ligne centrale passive de la queue et
    `passive-tail-visual-rig.js` la reporte sur les os du mesh original ;
-10. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
+13. `physics-world.js` avance Rapier à pas fixe et conserve deux poses pour
    l’interpolation visuelle ;
-11. `third-person-controller.js` et `platformer-control-model.js` transforment
+14. `input.js` et `platformer-control-model.js` transforment
    AZERTY/QWERTY en accélérateur et direction arcade, sélectionnent au clic une
    destination physique et transportent le cap tangent le long des supports ;
-12. `platformer-jump-model.js` possède la charge du saut, ses cibles de hauteur
+15. `platformer-jump-model.js` possède la charge du saut, ses cibles de hauteur
     et de portée, la tolérance au bord, le buffer et les enveloppes anatomiques
     de décollage, vol et atterrissage ;
-13. `grab-controller.js` applique la saisie et le lancer, tandis que
+16. `grab-controller.js` applique la saisie et le lancer, tandis que
     `rig-debug-view.js` peut afficher le squelette complet à travers la peau.
 
 Le mouvement global ne réécrit jamais directement la position du modèle : la
@@ -329,17 +335,42 @@ plus lente au lieu d’être renormalisée à pleine vitesse.
 
 Un clic gauche terminé sans glissement du pointeur lance une unique requête
 Rapier depuis la caméra. Seul un collider `clawEligible` peut devenir
-destination. Le décor fournit un petit graphe d’accès statique : chaque collider
-connu possède une chaîne bornée de jalons allant du réseau de sol vers sa zone
-d’accès. Le planificateur inverse la chaîne source, ajoute la chaîne cible puis
-le point cliqué ; l’explorateur copie ce plan dans des tableaux fixes et
-transporte son cap entre leurs normales. Les perchoirs diagonal et horizontal et
-le rocher incliné possèdent des oracles automatiques dédiés. Ce mécanisme n’est
-ni un calcul général de connexité ni une preuve que le corps franchit tout le
-décor : l’absence de raccourci aérien et l’arrivée physique sur les parcours
-complexes restent à valider dans WebGPU. Une entrée clavier annule immédiatement
-cette destination et reprend la priorité. Une saisie du modèle reste distincte,
-car elle capture le pointeur avant que le clic de décor soit validé.
+destination. Au chargement du laboratoire, le décor construit une seule fois un
+manifold de navigation partagé : grille du terrain qui contourne les obstacles,
+six faces distinctes des volumes, anneaux et bouchons des cylindres, et
+échantillonnage triangulaire de repli pour les rochers. Des portails relient les
+patches uniquement lorsque leurs surfaces sont physiquement voisines, que le
+segment ne traverse aucun autre solide et qu’il quitte/approche les deux
+demi-espaces extérieurs. Leur degré est borné à six par nœud. Une seule couture
+de repli est autorisée pour un volume irrégulier qui intersecte réellement le
+sol mais dont tous les échantillons tombent légèrement sous son plan. Le graphe
+est ensuite figé en tableaux CSR typés (`offsets`, voisins, coûts, positions,
+normales, colliders et patches) et n’est jamais modifié par un animal.
+
+Le planificateur localise le support courant avec sa normale réelle et le point
+cliqué avec la normale du rayon. Il refuse de fabriquer un départ global lorsque
+le corps est en l’air ou saisi, puis exécute un A* CPU avec un unique espace de
+travail préalloué et partageable séquentiellement entre les animaux. A* ne tourne
+ni à l’image ni au sous-pas : seulement au clic et après un blocage confirmé. Le
+corridor est simplifié uniquement sur un même patch lorsque le segment reste sur
+la surface et ne coupe aucun obstacle, puis copié dans au plus 64 jalons fixes.
+À l’arête convexe d’un volume, un jalon extérieur supplémentaire contourne
+l’enveloppe de clearance au lieu d’en couper le coin par une corde.
+Un portail sol/mur ou flanc/bouchon n’est consommé que lorsque le collider et la
+normale attendus sont réellement devenus support du corps ; la proximité seule
+ne peut donc plus faire viser la suite depuis le mauvais côté d’une couture.
+
+Le watchdog mesure une diminution réelle de la distance au jalon actif. Tourner
+autour d’une arête sans progresser déclenche ainsi une replanification,
+effectuée hors de la boucle physique. Si A* republie exactement le corridor qui
+vient d’échouer, ce corridor est marqué épuisé et n’est plus recalculé en boucle ;
+la récupération tangentielle locale reste active. Une entrée clavier annule
+immédiatement la destination, son tracé et reprend la priorité. Une saisie du
+modèle reste distincte, car
+elle capture le pointeur avant que le clic de décor soit validé. Le tracé de
+debug réutilise un seul `LineSegments` : terrain cyan, support vert, transition
+ambre, segment actif jaune pâle, partie parcourue bleu-gris et destination
+magenta.
 
 L’exploration autonome conserve elle aussi un cap tangent persistant. Quand la
 normale passe d’un mur au dessus puis à la face opposée, ce cap suit la rotation
@@ -573,6 +604,24 @@ prendre ce même collider. Le verrou persiste pendant le transitoire : un angle
 sol/mur ou deux surfaces voisines ne peuvent plus voler alternativement les
 appuis. L’ensemble reste continu, sans téléportation.
 
+Après cette acquisition, quatre griffes ne sont pas autorisées à former un pont
+virtuel entre des surfaces éloignées. Si plusieurs propriétaires sont proposés,
+`SupportCohortModel` examine les quinze sous-ensembles non vides possibles. Il
+rejette d’abord toute griffe hors de la portée réelle de son articulation, puis
+construit entre les quatre contacts un graphe de continuité locale. Deux prises
+ne sont reliées que sur une même surface voisine, à travers une couture courte,
+sur deux faces adjacentes d’un volume convexe, ou autour d’une branche
+explicitement identifiée. Des faces opposées ou deux îlots distants d’un même
+collider restent séparés.
+
+La cohorte retenue doit former une composante connexe. Une hystérésis emploie
+une distance de sortie légèrement supérieure à la distance d’entrée ; après
+trois sous-pas de rejet, la prise est libérée puis brièvement mise en cooldown.
+Un vrai angle sol/mur proche et une transition face/sommet restent donc valides,
+mais deux griffes au mur et deux au sol trop loin ne peuvent plus suspendre le
+torse dans le vide. Le calcul examine toujours quinze masques et quatre contacts,
+sans allocation ni nouvelle requête physique dans le chemin chaud.
+
 ## Pas fixe, interpolation et budget
 
 Rapier, la démarche corps entier, l’IK anatomique et la queue avancent à
@@ -602,12 +651,21 @@ rendu](../chameleon-rendering-performance.md).
 
 Le contrôleur plateforme et la machine de saut ajoutent uniquement des
 opérations scalaires/vectorielles constantes par sous-pas, sans raycast ni
-allocation. L’overlay trace chaque os selon son véritable axe local `+Y` et sa
+allocation. Le graphe de surfaces est partagé par tous les caméléons. Chaque
+requête A* réutilise ses tableaux et chaque animal ne conserve ensuite qu’un
+corridor borné ; le suivi physique est donc indépendant de la taille du graphe.
+Un calcul GPU ou un flow field ajouterait ici synchronisation et lecture retour
+pour des destinations rares et différentes. Un flow field partagé ne deviendra
+pertinent que si une population entière reçoit simultanément la même cible.
+
+L’overlay trace chaque os selon son véritable axe local `+Y` et sa
 longueur exportée ; il n’invente plus de liaisons entre les origines de branches
 hiérarchiques disjointes. Il est retiré de la scène lorsqu’il est masqué : son
 coût est alors nul. Lorsqu’il est visible, un unique `LineSegments` met à jour
 les 42 liaisons et les axes terminaux des doigts, de la mâchoire et de
 `tail_12`, soit un seul draw call et environ 1,25 Kio de données dynamiques.
+Le chemin de surface emploie lui aussi un seul draw call, des buffers fixes et ne
+réécrit ses couleurs que lorsque le jalon actif change.
 
 ## Décor de validation
 
@@ -617,7 +675,7 @@ Le décor est volontairement synthétique et reproductible :
 - mur en verre lisse non préhensile ;
 - plan rocheux incliné et tablette ;
 - troncs horizontal, diagonal et vertical, avec des raccords physiques et des
-  chaînes d’accès statiques configurées pour le décor livré ;
+  patches automatiquement reliés au manifold partagé ;
 - perchoir bas et rochers.
 
 Ces primitives couvrent les transitions sol/mur, les supports étroits, les
@@ -669,11 +727,23 @@ Les preuves automatiques actuelles sont :
   `CHAMELEON-LAB-CONTROLLER-013` couvrent en particulier la priorité de la
   destination, la continuité de son cap et l’unique raycast d’un clic valide
   avec rejet du verre ;
+- `test/chameleon-lab-surface-navigation-graph.test.js`, de
+  `CHAMELEON-LAB-SURFACE-NAV-001` à `005`, protège la connexité du CSR
+  immuable, les faces opposées d’un même collider, les portails orientés et
+  bornés en degré, le contournement avec enveloppe de clearance et la
+  réutilisation du stockage A* ;
 - `test/chameleon-lab-navigation-route.test.js`, de
-  `CHAMELEON-LAB-NAVIGATION-001` à `005`, protège les chaînes d’accès statiques
-  des perchoirs diagonal et horizontal, les trois portails du rocher incliné
-  dans les deux sens et la réutilisation du stockage de route. Il ne simule pas
-  la traversée physique complète déclenchée par un clic ;
+  `CHAMELEON-LAB-NAVIGATION-001` à `009`, protège le corridor borné, les
+  transitions de support dans les deux sens, la progression réelle du watchdog
+  et la confirmation du propriétaire à une couture. Les preuves `006` à
+  `009` figent la face source, la fusion des jalons coïncidents, le refus de
+  fabriquer une route sans support physique et l’arrêt d’une replanification
+  identique ;
+- `test/chameleon-lab-route-debug-view.test.js` protège le tracé unique, ses
+  couleurs, son stockage fixe et son coût nul lorsqu’il est masqué ;
+- `test/chameleon-lab-support-cohort.test.js` protège la sélection déterministe
+  et sans allocation d’un ensemble de griffes anatomiquement cohérent, y compris
+  le rejet du cas deux appuis mur / deux appuis sol éloignés ;
 - `test/chameleon-lab-input.test.js`, de `CHAMELEON-LAB-INPUT-001` à `007`,
   protège les transitions de touche ; `CHAMELEON-LAB-INPUT-007` interdit de
   rejouer un saut consommé pendant une saisie ou le mode libre ;
@@ -699,12 +769,14 @@ Les preuves automatiques actuelles sont :
   nul lorsqu’il est masqué et la couverture des chaînes du cou, des quatre
   membres, des doigts et de la queue ;
 - `test/chameleon-lab-platformer-integration.test.js`, de
-  `CHAMELEON-LAB-PLATFORMER-INTEGRATION-001` à `009`, verrouille l’ordre causal
+  `CHAMELEON-LAB-PLATFORMER-INTEGRATION-001` à `010`, verrouille l’ordre causal
   des forces ; `CHAMELEON-LAB-PLATFORMER-INTEGRATION-007/008` couvrent le clic
   événementiel, la priorité immédiate du pilotage manuel et les enregistrements
   de commande scellés et réutilisés ;
   `CHAMELEON-LAB-PLATFORMER-INTEGRATION-009` impose l’annulation atomique de
   l’autorité du saut pendant une saisie ou en mode libre ;
+  `CHAMELEON-LAB-PLATFORMER-INTEGRATION-010` protège la création, la
+  progression, l’effacement et la libération du tracé de route ;
 - `test/chameleon-lab-whole-body-gait.test.js`, de `CHAMELEON-LAB-GAIT-001` à
   `009`, protège les couples diagonaux, les excursions du bassin/thorax/tête, le
   lissage apériodique et l’absence d’allocation ; `CHAMELEON-LAB-GAIT-005`

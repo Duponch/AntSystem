@@ -40,6 +40,7 @@ import {
 	DEFAULT_ARCADE_TURN_RATE,
 	parallelTransportTangent,
 } from './platformer-control-model.js';
+import { SupportCohortModel } from './support-cohort-model.js';
 
 const WORLD_UP = new THREE.Vector3( 0, 1, 0 );
 const LOCAL_FORWARD = new THREE.Vector3( -1, 0, 0 );
@@ -1485,6 +1486,34 @@ export async function createHybridChameleon( {
 	);
 	const activeContacts = new Uint8Array( 4 );
 	const candidateActiveContacts = new Uint8Array( 4 );
+	const supportReachDistances = new Float32Array( 4 );
+	const supportMaximumReaches = new Float32Array( 4 );
+	const supportColliderHandles = new Float64Array( 4 );
+	const supportTopologyFlags = new Uint8Array( 4 );
+	const supportRejectTicks = new Uint8Array( 4 );
+	const supportRejectCooldown = new Uint8Array( 4 );
+	const supportCohort = new SupportCohortModel( {
+		reachSlack: 0.018,
+		enterSeamDistance: 0.29,
+		exitSeamDistance: 0.39,
+		sameSurfaceNormalDot: 0.7,
+	} );
+	for ( let foot = 0; foot < 4; foot ++ ) {
+
+		const leg = rig.legs[ foot ];
+		const lengths = leg.solver.lengths;
+		const authoredMaximum = lengths[ 0 ] + lengths[ 1 ] + lengths[ 2 ]
+			+ Math.hypot(
+				leg.solver.contactOffset[ 0 ],
+				leg.solver.contactOffset[ 1 ],
+				leg.solver.contactOffset[ 2 ],
+			);
+		supportMaximumReaches[ foot ] = Math.max(
+			leg.restSupportReach * 1.18,
+			authoredMaximum * 0.98,
+		);
+
+	}
 	const wasFootSwinging = new Uint8Array( 4 );
 	const targetFootSurfaces = new Array( 4 ).fill( null );
 	const targetFootColliders = new Array( 4 ).fill( null );
@@ -1717,6 +1746,7 @@ export async function createHybridChameleon( {
 	}
 	let contactCount = 0;
 	let candidateContactCount = 0;
+	let coherentContactMask = 0;
 	let dragging = false;
 	let passiveLimbActive = false;
 	let passiveLimbBlend = 0;
@@ -1778,6 +1808,9 @@ export async function createHybridChameleon( {
 		candidateContactCount = 0;
 		activeContacts.fill( 0 );
 		candidateActiveContacts.fill( 0 );
+		supportRejectTicks.fill( 0 );
+		supportRejectCooldown.fill( 0 );
+		coherentContactMask = 0;
 		targetFootSurfaces.fill( null );
 		targetFootColliders.fill( null );
 		for ( const foot of feet ) {
@@ -2369,6 +2402,8 @@ export async function createHybridChameleon( {
 
 	function updateGait( dt ) {
 
+		for ( let foot = 0; foot < 4; foot ++ )
+			if ( supportRejectCooldown[ foot ] > 0 ) supportRejectCooldown[ foot ] --;
 		previousFootPositions.set( currentFootPositions );
 		previousFootNormals.set( currentFootNormals );
 		const velocity = readVector( body.linvel(), tempVelocity );
@@ -2410,6 +2445,8 @@ export async function createHybridChameleon( {
 					? feet[ foot ]._candidateSurface : null;
 				feet[ foot ]._lockedCollider = candidateActiveContacts[ foot ]
 					? feet[ foot ]._candidateCollider : null;
+				supportRejectTicks[ foot ] = 0;
+				supportRejectCooldown[ foot ] = 0;
 
 			}
 			// A manifold-authoritative landing deliberately changes support
@@ -2506,8 +2543,10 @@ export async function createHybridChameleon( {
 
 			} else if ( ! swinging && wasFootSwinging[ foot ] ) {
 
-				feet[ foot ]._lockedSurface = targetFootSurfaces[ foot ];
-				feet[ foot ]._lockedCollider = targetFootColliders[ foot ];
+				feet[ foot ]._lockedSurface = supportRejectCooldown[ foot ] === 0
+					? targetFootSurfaces[ foot ] : null;
+				feet[ foot ]._lockedCollider = supportRejectCooldown[ foot ] === 0
+					? targetFootColliders[ foot ] : null;
 
 			}
 			const candidateDx = view.footPositions[ offset ] - candidatePositions[ offset ];
@@ -2515,7 +2554,8 @@ export async function createHybridChameleon( {
 			const candidateDz = view.footPositions[ offset + 2 ] - candidatePositions[ offset + 2 ];
 			const candidateClose = candidateDx * candidateDx + candidateDy * candidateDy
 				+ candidateDz * candidateDz <= Math.pow( settings.gripReach * 0.35, 2 );
-			if ( ! swinging && ! feet[ foot ]._lockedSurface
+			if ( ! swinging && supportRejectCooldown[ foot ] === 0
+				&& ! feet[ foot ]._lockedSurface
 				&& candidateActiveContacts[ foot ] && candidateClose ) {
 
 				feet[ foot ]._lockedSurface = feet[ foot ]._candidateSurface;
@@ -2555,6 +2595,167 @@ export async function createHybridChameleon( {
 			suspensionSocketPositions[ offset + 2 ] = tempDirection.z;
 
 		}
+		// Collider identity is not a surface identity: one box owns six faces and a
+		// trimesh may own disconnected islands. Ordinary coplanar contacts and a
+		// registered branch take the constant fast path; every owner/face hand-off is
+		// validated as a locally connected anatomical cohort.
+		let provisionalMask = 0;
+		let requiresCohort = false;
+		for ( let foot = 0; foot < 4; foot ++ ) {
+
+			if ( ! activeContacts[ foot ] ) {
+
+				supportColliderHandles[ foot ] = NaN;
+				supportTopologyFlags[ foot ] = 0;
+				continue;
+
+			}
+			provisionalMask |= 1 << foot;
+			supportColliderHandles[ foot ] = feet[ foot ]._lockedCollider?.handle ?? NaN;
+			const surfaceTopology = feet[ foot ]._lockedSurface?.supportTopology;
+			supportTopologyFlags[ foot ] = surfaceTopology === 'radial-branch'
+				|| feet[ foot ]._lockedSurface?.branchAxis
+				? 1
+				: surfaceTopology === 'faceted-shell'
+					|| feet[ foot ]._lockedCollider?.shapeType() === RAPIER.ShapeType.Cuboid
+						? 2 : 0;
+
+		}
+		for ( let first = 0; first < 4 && ! requiresCohort; first ++ ) {
+
+			if ( ( provisionalMask & ( 1 << first ) ) === 0 ) continue;
+			for ( let second = first + 1; second < 4; second ++ ) {
+
+				if ( ( provisionalMask & ( 1 << second ) ) === 0 ) continue;
+				const sameHandle = supportColliderHandles[ first ]
+					=== supportColliderHandles[ second ];
+				if ( ! sameHandle ) {
+
+					requiresCohort = true;
+					break;
+
+				}
+				if ( supportTopologyFlags[ first ] === 1
+					&& supportTopologyFlags[ second ] === 1 ) continue;
+				if ( supportTopologyFlags[ first ] === 2
+					&& supportTopologyFlags[ second ] === 2 ) {
+
+					const firstOffset = first * 3;
+					const secondOffset = second * 3;
+					const shellDot = currentFootNormals[ firstOffset ]
+						* currentFootNormals[ secondOffset ]
+						+ currentFootNormals[ firstOffset + 1 ]
+							* currentFootNormals[ secondOffset + 1 ]
+						+ currentFootNormals[ firstOffset + 2 ]
+							* currentFootNormals[ secondOffset + 2 ];
+					if ( shellDot >= -0.25 ) continue;
+
+				}
+				const firstOffset = first * 3;
+				const secondOffset = second * 3;
+				const normalDot = currentFootNormals[ firstOffset ]
+					* currentFootNormals[ secondOffset ]
+					+ currentFootNormals[ firstOffset + 1 ]
+						* currentFootNormals[ secondOffset + 1 ]
+					+ currentFootNormals[ firstOffset + 2 ]
+						* currentFootNormals[ secondOffset + 2 ];
+				if ( normalDot < supportCohort.sameSurfaceNormalDot ) {
+
+					requiresCohort = true;
+					break;
+
+				}
+
+			}
+
+		}
+		if ( requiresCohort ) {
+
+			supportCohort.enterSeamDistance = THREE.MathUtils.clamp(
+				Math.max(
+					settings.stepLength * 2 + 0.12,
+					settings.gripReach * 1.7,
+				),
+				0.42,
+				0.72,
+			);
+			supportCohort.exitSeamDistance = Math.min(
+				settings.gripReach * 2,
+				supportCohort.enterSeamDistance + 0.12,
+			);
+			for ( let foot = 0; foot < 4; foot ++ ) {
+
+				if ( ! activeContacts[ foot ] ) {
+
+					supportReachDistances[ foot ] = Infinity;
+					continue;
+
+				}
+				const offset = foot * 3;
+				supportReachDistances[ foot ] = Math.hypot(
+					currentFootPositions[ offset ] - suspensionSocketPositions[ offset ],
+					currentFootPositions[ offset + 1 ] - suspensionSocketPositions[ offset + 1 ],
+					currentFootPositions[ offset + 2 ] - suspensionSocketPositions[ offset + 2 ],
+				);
+
+			}
+			supportCohort.buildCompatibility(
+				currentFootPositions,
+				currentFootNormals,
+				supportColliderHandles,
+				supportTopologyFlags,
+				activeContacts,
+				coherentContactMask,
+			);
+			coherentContactMask = supportCohort.select(
+				supportReachDistances,
+				supportMaximumReaches,
+				activeContacts,
+				coherentContactMask,
+				supportCohort.compatibility,
+			).mask;
+
+		} else coherentContactMask = provisionalMask;
+		contactCount = 0;
+		let releasedIncoherentContact = false;
+		for ( let foot = 0; foot < 4; foot ++ ) {
+
+			const selected = ( coherentContactMask & ( 1 << foot ) ) !== 0;
+			if ( selected ) {
+
+				activeContacts[ foot ] = 1;
+				supportRejectTicks[ foot ] = 0;
+				feet[ foot ].load = 0.35;
+				feet[ foot ].state = 'holding';
+				contactCount ++;
+				continue;
+
+			}
+			const wasProvisional = activeContacts[ foot ] === 1;
+			activeContacts[ foot ] = 0;
+			feet[ foot ].load = 0;
+			if ( wasProvisional ) {
+
+				feet[ foot ].state = 'reaching';
+				supportRejectTicks[ foot ] = Math.min( 255, supportRejectTicks[ foot ] + 1 );
+				if ( supportRejectTicks[ foot ] >= 3 ) {
+
+					feet[ foot ]._lockedSurface = null;
+					feet[ foot ]._lockedCollider = null;
+					feet[ foot ].surface = null;
+					feet[ foot ].collider = null;
+					targetFootSurfaces[ foot ] = null;
+					targetFootColliders[ foot ] = null;
+					supportRejectTicks[ foot ] = 0;
+					supportRejectCooldown[ foot ] = 4;
+					releasedIncoherentContact = true;
+
+				}
+
+			} else supportRejectTicks[ foot ] = 0;
+
+		}
+		if ( releasedIncoherentContact ) gait.requestSettlement();
 		suspension.update( dt, suspensionInput );
 		const frame = supportFrameFromContacts(
 			currentFootPositions, currentFootNormals, activeContacts,
@@ -3453,7 +3654,10 @@ export async function createHybridChameleon( {
 		previousFootPositions.set( currentFootPositions );
 		previousFootNormals.set( currentFootNormals );
 		wasFootSwinging.fill( 0 );
+		supportRejectTicks.fill( 0 );
+		supportRejectCooldown.fill( 0 );
 		contactCount = 0;
+		coherentContactMask = 0;
 		for ( let foot = 0; foot < 4; foot ++ ) {
 
 			feet[ foot ]._lockedSurface = candidateActiveContacts[ foot ]
@@ -3463,7 +3667,12 @@ export async function createHybridChameleon( {
 			feet[ foot ].surface = feet[ foot ]._lockedSurface;
 			feet[ foot ].collider = feet[ foot ]._lockedCollider;
 			activeContacts[ foot ] = feet[ foot ]._lockedSurface ? 1 : 0;
-			if ( activeContacts[ foot ] ) contactCount ++;
+			if ( activeContacts[ foot ] ) {
+
+				contactCount ++;
+				coherentContactMask |= 1 << foot;
+
+			}
 			targetFootSurfaces[ foot ] = null;
 			targetFootColliders[ foot ] = null;
 
@@ -3703,6 +3912,9 @@ export async function createHybridChameleon( {
 				pendingSupportReset = false;
 				supportReacquireSeconds = 0;
 				activeContacts.fill( 0 );
+				supportRejectTicks.fill( 0 );
+				supportRejectCooldown.fill( 0 );
+				coherentContactMask = 0;
 				for ( const foot of feet ) {
 
 					foot._lockedSurface = null;

@@ -83,12 +83,20 @@ lancer ou un raccord sol/mur ne peut plus transformer « avancer » en dérive
 latérale.
 
 Un clic de destination active l’exploration dirigée. Le décor du laboratoire
-possède un petit graphe statique de jalons pour ses raccords connus :
-l’explorateur y transporte son cap selon les normales avant de viser le point
-cliqué. Ce routage ne prétend pas découvrir automatiquement une connexion entre
-deux supports arbitraires ; les traversées physiques du décor complet restent à
-observer dans WebGPU. Une commande clavier reprend immédiatement la priorité.
-Le verre lisse n’est pas une destination valide.
+possède un graphe partagé de toutes ses surfaces préhensiles : terrain contournant
+les obstacles, faces des murs, troncs, bouchons et rochers. A* choisit au clic un
+corridor de surface, puis le caméléon le suit physiquement sans recherche à
+chaque image. À une jonction, il ne passe au jalon suivant qu’après avoir
+réellement pris la nouvelle surface. S’il tourne sans se rapprocher du corridor,
+une nouvelle route est calculée automatiquement ; le même échec n’est jamais
+rejoué indéfiniment. Les arêtes sont contournées avec la clearance du corps et
+non coupées en diagonale. Une commande clavier reprend immédiatement la priorité
+et efface le tracé. Le verre lisse n’est pas une destination valide.
+
+Le chemin reste visible : cyan sur le terrain, vert sur un support, ambre aux
+transitions, jaune pâle sur le segment actif, bleu-gris une fois parcouru et
+magenta à la destination. Cette vue
+sert à distinguer une erreur de planification d’un échec d’adhérence physique.
 
 Le saut suit lui aussi le support. La charge comprime le corps ; le décollage
 l’étend, sépare d’abord le corps de la surface puis fait croître la hauteur et la
@@ -169,8 +177,9 @@ Ce n’est pas un ragdoll Rapier à 33 corps : le calcul passif local reste born
 Sur le sol puis sur un tronc, maintenez `Q`/`A` ou `D` sans avancer : le corps
 doit engager franchement son demi-tour, sans glisser de côté ni tourner comme
 une toupie. Comparez ensuite marche et sprint, puis cliquez
-sur une surface rugueuse reliée par les jalons statiques du décor : le caméléon
-doit parcourir physiquement ces raccords jusqu’à la cible, sans coupe aérienne.
+sur une surface rugueuse derrière un mur ou sur un tronc : le trait doit
+contourner ou escalader les obstacles et le caméléon doit parcourir physiquement
+ses transitions jusqu’à la cible, sans coupe aérienne.
 Enfin, chargez `Espace` brièvement puis à fond : le second saut doit être plus
 haut et plus long, avec accroupissement, extension et repli aérien visibles.
 
@@ -311,13 +320,17 @@ la silhouette finale de la peau reste à contrôler visuellement dans WebGPU.
 Après un saut ou un lancer, toucher une surface avec le dos ne colle jamais le
 caméléon. Il choisit un seul impact réel, se retourne face ventrale vers lui,
 puis engage au moins deux pattes. Dans un angle, il ne doit pas osciller entre
-les surfaces voisines.
+les surfaces voisines. Deux pattes sur un mur et deux autres sur un sol éloigné
+ne forment jamais une prise valide : seules les griffes anatomiquement
+atteignables et reliées par une même surface locale ou une vraie couture restent
+verrouillées. Les faces opposées d’un même objet ne sont pas confondues.
 
 ### Affichage et coût
 
 - **Proxies / contacts** révèle le corps Rapier unique et les quatre appuis ;
 - **Squelette à travers la peau** affiche dans un seul tracé les hanches,
   épaules, coudes, genoux, paumes, doigts, cou, mâchoire et chaîne de queue ;
+- **Chemin de surface au clic** affiche le corridor A* coloré et sa progression ;
 - **Ombres** coupe ou active les ombres de la scène ;
 - **Gravité** permet de comparer apesanteur, gravité terrestre et surcharge.
 

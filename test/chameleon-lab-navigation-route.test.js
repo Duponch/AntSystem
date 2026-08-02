@@ -52,171 +52,350 @@ async function withEnvironment( callback ) {
 
 }
 
-test( 'CHAMELEON-LAB-NAVIGATION-001 diagonal perch routes through its grounded endpoint', async () => {
-
-	await withEnvironment( ( environment ) => {
-
-		const ground = entryByName( environment, 'RoughGround' );
-		const diagonal = entryByName( environment, 'DiagonalPerch' );
-		const planner = new SurfaceRoutePlanner( environment.navigation );
-		const start = new THREE.Vector3( 0, 0.3, 0.75 );
-		const destination = diagonal.object.position.clone();
-		const plan = planner.plan(
-			start, ground.collider, destination, new THREE.Vector3( 0, 1, 0 ), diagonal.collider,
-		);
-		assert.equal( plan.count, 2, 'ground access plus the clicked point are sufficient' );
-		const access = pointAt( plan, 0 );
-		assert.ok( access.y < 0.05, `diagonal lower endpoint must meet the ground, got y=${ access.y }` );
-		assert.ok( access.distanceTo( destination ) > 2.5,
-			'the route must not drive directly beneath the elevated branch centre' );
-		assert.ok( pointAt( plan, plan.count - 1 ).distanceTo( destination ) < 1e-5 );
-
-	} );
-
-} );
-
-test( 'CHAMELEON-LAB-NAVIGATION-002 horizontal perch uses both ends of the access ramp', async () => {
+test( 'CHAMELEON-LAB-NAVIGATION-001 elevated perches use a connected surface corridor', async () => {
 
 	await withEnvironment( ( environment ) => {
 
 		const ground = entryByName( environment, 'RoughGround' );
 		const horizontal = entryByName( environment, 'HorizontalPerch' );
-		const ramp = entryByName( environment, 'PerchAccessRamp' );
 		const planner = new SurfaceRoutePlanner( environment.navigation );
 		const destination = horizontal.object.position.clone();
-		const plan = planner.plan(
+		const route = planner.plan(
 			new THREE.Vector3( 0, 0.3, 0.75 ),
 			ground.collider,
 			destination,
 			new THREE.Vector3( 0, 1, 0 ),
 			horizontal.collider,
 		);
-		assert.equal( plan.count, 3 );
-		const lower = pointAt( plan, 0 );
-		const upper = pointAt( plan, 1 );
-		assert.ok( lower.y < 0.1, `ramp must begin at ground height, got ${ lower.y }` );
-		assert.ok( upper.distanceTo( horizontal.object.position ) < 0.2,
-			'ramp upper portal must overlap the horizontal perch' );
-		assert.ok( upper.distanceTo( ramp.object.position ) > 1,
-			'upper portal must be an endpoint, not the ramp centre' );
-		assert.ok( pointAt( plan, 2 ).distanceTo( destination ) < 1e-5 );
+		assert.equal( route.reachable, true );
+		assert.ok( route.count >= 4 && route.count <= planner.maximumWaypoints );
+		assert.ok( Array.from( route.kinds.subarray( 0, route.count ) ).includes( 2 ),
+			'a physical support hand-off must remain explicit' );
+		assert.ok( Array.from( route.nodeIds.subarray( 0, route.count ) ).some(
+			( node ) => node >= 0
+				&& environment.navigation.handles[ node ] === horizontal.collider.handle,
+		), 'the corridor must actually enter the selected perch manifold' );
+		assert.ok( pointAt( route, route.count - 1 ).distanceTo( destination ) < 1e-5 );
 
 	} );
 
 } );
 
-test( 'CHAMELEON-LAB-NAVIGATION-003 explorer copies a fixed route and advances without replacing hot-path storage', () => {
+test( 'CHAMELEON-LAB-NAVIGATION-002 explorer copies route storage and advances deterministically', () => {
 
-	const accessByCollider = new Map( [
-		[ 1, { access: [] } ],
-		[ 2, { access: [
-			{ position: [ 1, 0, 0 ], normal: [ 0, 1, 0 ] },
-			{ position: [ 2, 0, 0 ], normal: [ 0, 1, 0 ] },
-		] } ],
+	const positions = new Float32Array( [
+		0, 0, 0,
+		1, 0, 0,
+		2, 0, 0,
+		3, 0, 0,
 	] );
-	const planner = new SurfaceRoutePlanner( { accessByCollider, maximumWaypoints: 12 } );
-	const destination = new THREE.Vector3( 3, 0, 0 );
-	const route = planner.plan(
-		new THREE.Vector3(), 1, destination, new THREE.Vector3( 0, 1, 0 ), 2,
-	);
+	const normals = new Float32Array( [
+		0, 1, 0,
+		0, 1, 0,
+		0, 1, 0,
+		0, 1, 0,
+	] );
+	const route = { positions, normals, count: 4 };
 	const explorer = new AutonomousExplorer( 0x321 );
 	explorer.heading.set( 1, 0, 0 );
-	explorer.setDestination( destination, new THREE.Vector3( 0, 1, 0 ), new THREE.Vector3(), route );
-	const positions = explorer.routePositions;
-	const normals = explorer.routeNormals;
+	explorer.setDestination(
+		new THREE.Vector3( 3, 0, 0 ),
+		new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3(),
+		route,
+	);
+	assert.equal( explorer.routeProgressIndex, 0 );
+	const copiedPositions = explorer.routePositions;
+	const copiedNormals = explorer.routeNormals;
 	const output = new THREE.Vector3();
-	const position = new THREE.Vector3();
 	for ( let waypoint = 0; waypoint < route.count; waypoint ++ ) {
 
-		pointAt( route, waypoint, position );
-		explorer.update( 1 / 120, new THREE.Vector3( 0, 1, 0 ), position, output );
+		explorer.update(
+			1 / 120,
+			new THREE.Vector3( 0, 1, 0 ),
+			pointAt( route, waypoint ),
+			output,
+		);
+		const expectedSegment = waypoint >= route.count - 1
+			? route.count - 1
+			: Math.max( 0, waypoint );
+		assert.equal( explorer.routeProgressIndex, expectedSegment );
 
 	}
 	assert.equal( explorer.destinationActive, false );
 	assert.equal( explorer.destinationCompleted, true );
-	assert.equal( explorer.routePositions, positions );
-	assert.equal( explorer.routeNormals, normals );
+	assert.equal( explorer.routePositions, copiedPositions );
+	assert.equal( explorer.routeNormals, copiedNormals );
 	assert.equal( output.lengthSq(), 0 );
 
 } );
 
-test( 'CHAMELEON-LAB-NAVIGATION-004 sloped rock crosses face, lip and top in collider-local order', async () => {
+test( 'CHAMELEON-LAB-NAVIGATION-003 opposite faces remain distinct through a wall traversal', async () => {
 
 	await withEnvironment( ( environment ) => {
 
 		const ground = entryByName( environment, 'RoughGround' );
-		const rock = entryByName( environment, 'SlopedRock' );
-		const descriptor = environment.navigation.accessByCollider.get( rock.collider.handle );
-		assert.deepEqual( descriptor.access.map( ( portal ) => portal.phase ), [ 'face', 'lip', 'top' ] );
-		const inverseRotation = rock.object.getWorldQuaternion( new THREE.Quaternion() ).invert();
-		const localPortalNormals = descriptor.access.map( ( portal ) => new THREE.Vector3()
-			.fromArray( portal.normal ).applyQuaternion( inverseRotation ).normalize() );
-		assert.ok( localPortalNormals[ 0 ].dot( new THREE.Vector3( 0, 0, 1 ) ) > 0.9999,
-			'the face portal must retain the outward front-face normal' );
-		assert.ok( localPortalNormals[ 1 ].dot( new THREE.Vector3( 0, 1, 1 ).normalize() ) > 0.9999,
-			'the lip portal must blend the front and top support frames' );
-		assert.ok( localPortalNormals[ 2 ].dot( new THREE.Vector3( 0, 1, 0 ) ) > 0.9999,
-			'the top portal must finish in the upper support frame' );
-		const planner = new SurfaceRoutePlanner( environment.navigation );
-		const destination = rock.object.localToWorld( new THREE.Vector3( -0.8, 0.275, -0.45 ) );
-		const topNormal = new THREE.Vector3( 0, 1, 0 ).transformDirection( rock.object.matrixWorld );
-		const plan = planner.plan(
-			new THREE.Vector3( 0, 0.3, 0.75 ),
+		const wall = entryByName( environment, 'RoughBackWall' );
+		const depth = wall.object.geometry.parameters.depth;
+		const target = wall.object.localToWorld( new THREE.Vector3( 0, 1.4, -depth * 0.5 ) );
+		const targetNormal = new THREE.Vector3( 0, 0, -1 )
+			.transformDirection( wall.object.matrixWorld );
+		const route = new SurfaceRoutePlanner( environment.navigation ).plan(
+			new THREE.Vector3( 0, 0.25, -5 ),
 			ground.collider,
-			destination,
-			topNormal,
-			rock.collider,
+			target,
+			targetNormal,
+			wall.collider,
 		);
-		assert.equal( plan.count, 4, 'three transition portals must precede the clicked point' );
-
-		const inverse = rock.object.matrixWorld.clone().invert();
-		const face = pointAt( plan, 0 ).applyMatrix4( inverse );
-		const lip = pointAt( plan, 1 ).applyMatrix4( inverse );
-		const top = pointAt( plan, 2 ).applyMatrix4( inverse );
-		const depth = rock.object.geometry.parameters.depth;
-		const height = rock.object.geometry.parameters.height;
-		assert.ok( face.z > depth * 0.5,
-			'the first portal must hold the body outside the front face' );
-		assert.ok( lip.y > face.y + height * 0.65,
-			'the lip portal must command a real climb instead of another ground approach' );
-		assert.ok( top.z < lip.z - 0.4,
-			'the upper portal must commit the body behind the lip' );
-		assert.ok( top.y > height * 0.5,
-			'the upper portal must preserve body clearance over the top face' );
-		assert.ok( face.distanceTo( lip ) > 0.42 && lip.distanceTo( top ) > 0.42,
-			'each transition must survive the explorer waypoint arrival radius' );
-		assert.ok( Math.abs( face.y ) < height * 0.12,
-			'the face portal must stay at the collider-local standing height' );
-		assert.ok( pointAt( plan, 3 ).distanceTo( destination ) < 1e-5 );
+		assert.equal( route.reachable, true );
+		assert.ok( route.count > 3, 'the rear face must not become a direct chord' );
+		assert.ok( Array.from( route.kinds.subarray( 0, route.count ) ).includes( 2 ) );
+		const finalOffset = ( route.count - 1 ) * 3;
+		const finalNormal = new THREE.Vector3(
+			route.normals[ finalOffset ],
+			route.normals[ finalOffset + 1 ],
+			route.normals[ finalOffset + 2 ],
+		);
+		assert.ok( finalNormal.dot( targetNormal ) > 0.999 );
+		assert.ok( pointAt( route, route.count - 1 ).distanceTo( target ) < 1e-5 );
 
 	} );
 
 } );
 
-test( 'CHAMELEON-LAB-NAVIGATION-005 leaving sloped rock reverses the same stable portal chain', async () => {
+test( 'CHAMELEON-LAB-NAVIGATION-004 leaving an irregular support returns through real graph edges', async () => {
 
 	await withEnvironment( ( environment ) => {
 
 		const ground = entryByName( environment, 'RoughGround' );
 		const rock = entryByName( environment, 'SlopedRock' );
-		const planner = new SurfaceRoutePlanner( environment.navigation );
 		const destination = new THREE.Vector3( 0, 0.16, 0.8 );
-		const plan = planner.plan(
-			rock.object.position,
+		const route = new SurfaceRoutePlanner( environment.navigation ).plan(
+			rock.object.localToWorld( new THREE.Vector3( 0, 0.275, 0 ) ),
 			rock.collider,
 			destination,
 			new THREE.Vector3( 0, 1, 0 ),
 			ground.collider,
 		);
-		assert.equal( plan.count, 4 );
-		const expected = [ ...environment.navigation.accessByCollider
-			.get( rock.collider.handle ).access ].reverse();
-		for ( let index = 0; index < expected.length; index ++ ) assert.ok(
-			pointAt( plan, index ).distanceTo( new THREE.Vector3().fromArray( expected[ index ].position ) ) < 1e-5,
-			`reversed portal ${ index } must be copied exactly`,
-		);
-		assert.ok( pointAt( plan, 3 ).distanceTo( destination ) < 1e-5 );
+		assert.equal( route.reachable, true );
+		assert.ok( route.count > 2 );
+		assert.ok( Array.from( route.kinds.subarray( 0, route.count ) ).includes( 2 ) );
+		for ( let waypoint = 0; waypoint < route.count; waypoint ++ ) {
+
+			const point = pointAt( route, waypoint );
+			assert.ok( [ point.x, point.y, point.z ].every( Number.isFinite ) );
+
+		}
+		assert.ok( pointAt( route, route.count - 1 ).distanceTo( destination ) < 1e-5 );
 
 	} );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-005 a portal waits for the expected support owner and normal', () => {
+
+	const route = {
+		positions: new Float32Array( [
+			0, 0, 0,
+			1, 0, 0,
+			2, 0, 0,
+		] ),
+		normals: new Float32Array( [
+			0, 1, 0,
+			1, 0, 0,
+			1, 0, 0,
+		] ),
+		kinds: new Uint8Array( [ 0, 2, 1 ] ),
+		handles: new Float64Array( [ 11, 22, 22 ] ),
+		patchIds: new Int16Array( [ 2, 0, 0 ] ),
+		count: 3,
+	};
+	const explorer = new AutonomousExplorer();
+	const output = new THREE.Vector3();
+	explorer.heading.set( 1, 0, 0 );
+	explorer.setDestination(
+		new THREE.Vector3( 2, 0, 0 ),
+		new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3(),
+		route,
+	);
+	explorer.update(
+		1 / 120, new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3(), output, 11,
+	);
+	assert.equal( explorer.routeIndex, 1 );
+	explorer.update(
+		1 / 120, new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3( 1, 0, 0 ), output, 11,
+	);
+	assert.equal( explorer.routeIndex, 1,
+		'distance cannot advance a transition while the former collider owns support' );
+	explorer.update(
+		1 / 120, new THREE.Vector3( 0, 1, 0 ),
+		new THREE.Vector3( 1, 0, 0 ), output, 22,
+	);
+	assert.equal( explorer.routeIndex, 1,
+		'the expected collider must also own the expected support frame' );
+	explorer.update(
+		1 / 120, new THREE.Vector3( 1, 0, 0 ),
+		new THREE.Vector3( 1, 0, 0 ), output, 22,
+	);
+	assert.equal( explorer.routeIndex, 2 );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-006 a source face remains stable at a box seam', async () => {
+
+	await withEnvironment( ( environment ) => {
+
+		const graph = environment.navigation;
+		const wall = entryByName( environment, 'RoughBackWall' );
+		const rearNormal = new THREE.Vector3( 0, 0, -1 )
+			.transformDirection( wall.object.matrixWorld ).normalize();
+		let source = -1;
+		let sourceY = Infinity;
+		for ( let node = 0; node < graph.nodeCount; node ++ ) {
+
+			if ( graph.handles[ node ] !== wall.collider.handle ) continue;
+			const offset = node * 3;
+			const dot = graph.normals[ offset ] * rearNormal.x
+				+ graph.normals[ offset + 1 ] * rearNormal.y
+				+ graph.normals[ offset + 2 ] * rearNormal.z;
+			if ( dot < 0.999 || graph.rawPositions[ offset + 1 ] >= sourceY ) continue;
+			source = node;
+			sourceY = graph.rawPositions[ offset + 1 ];
+
+		}
+		assert.ok( source >= 0 );
+		const sourceOffset = source * 3;
+		let target = -1;
+		let targetDistance = Infinity;
+		for ( let node = 0; node < graph.nodeCount; node ++ ) {
+
+			if ( graph.handles[ node ] !== wall.collider.handle ) continue;
+			const offset = node * 3;
+			const dot = graph.normals[ offset ] * rearNormal.x
+				+ graph.normals[ offset + 1 ] * rearNormal.y
+				+ graph.normals[ offset + 2 ] * rearNormal.z;
+			const height = graph.rawPositions[ offset + 1 ] - sourceY;
+			if ( dot < 0.999 || height < 0.45 ) continue;
+			const distance = Math.abs( graph.rawPositions[ offset ] - graph.rawPositions[ sourceOffset ] )
+				+ Math.abs( graph.rawPositions[ offset + 2 ] - graph.rawPositions[ sourceOffset + 2 ] )
+				+ height;
+			if ( distance >= targetDistance ) continue;
+			target = node;
+			targetDistance = distance;
+
+		}
+		assert.ok( target >= 0 );
+		const targetOffset = target * 3;
+		const currentPosition = new THREE.Vector3().fromArray(
+			graph.positions, sourceOffset,
+		);
+		const destination = new THREE.Vector3().fromArray(
+			graph.rawPositions, targetOffset,
+		);
+		const planner = new SurfaceRoutePlanner( graph );
+		const explicit = planner.plan(
+			currentPosition, wall.collider, destination, rearNormal, wall.collider, rearNormal,
+		);
+		assert.equal( explicit.reachable, true,
+			'an authored source normal must retain the rear face at the bottom seam' );
+		const inferred = planner.plan(
+			currentPosition, wall.collider, destination, rearNormal, wall.collider,
+		);
+		assert.equal( inferred.reachable, true,
+			'clearance-space fallback must remain stable for the existing production call' );
+
+	} );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-007 coincident semantic waypoints merge instead of rejecting a route', () => {
+
+	let locateCalls = 0;
+	const graph = Object.freeze( {
+		positions: new Float32Array( [ 0, 0, 0, 0, 0, 0 ] ),
+		rawPositions: new Float32Array( [ 0, 0, 0, 0, 0, 0 ] ),
+		normals: new Float32Array( [ 0, 1, 0, 0, 1, 0 ] ),
+		handles: new Float64Array( [ 11, 11 ] ),
+		kinds: new Uint8Array( [ 1, 1 ] ),
+		patchIds: new Int16Array( [ 0, 1 ] ),
+		offsets: new Uint32Array( [ 0, 1, 2 ] ),
+		edgeTo: new Uint32Array( [ 1, 0 ] ),
+		edgeCost: new Float32Array( [ 0.001, 0.001 ] ),
+		nodeCount: 2,
+		locate() {
+
+			return locateCalls ++ === 0 ? 0 : 1;
+
+		},
+		canShortcut() {
+
+			return false;
+
+		},
+	} );
+	const route = new SurfaceRoutePlanner( graph ).plan(
+		new THREE.Vector3(), 11,
+		new THREE.Vector3(), new THREE.Vector3( 0, 1, 0 ), 11,
+	);
+	assert.equal( route.reachable, true );
+	assert.equal( route.count, 1 );
+	assert.equal( route.nodeIds[ 0 ], 1 );
+	assert.equal( route.patchIds[ 0 ], 1 );
+	assert.equal( route.kinds[ 0 ], 2,
+		'the merged point must retain its support-transition semantics' );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-008 planning without a physical source support is rejected', async () => {
+
+	await withEnvironment( ( environment ) => {
+
+		const ground = entryByName( environment, 'RoughGround' );
+		const route = new SurfaceRoutePlanner( environment.navigation ).plan(
+			new THREE.Vector3( 0, 2, 0 ),
+			null,
+			new THREE.Vector3( 2, 0, 2 ),
+			new THREE.Vector3( 0, 1, 0 ),
+			ground.collider,
+		);
+		assert.equal( route.reachable, false );
+		assert.equal( route.count, 0 );
+		assert.equal( route.expanded, 0 );
+
+	} );
+
+} );
+
+test( 'CHAMELEON-LAB-NAVIGATION-009 an identical failed corridor is not replanned forever', () => {
+
+	const route = {
+		positions: new Float32Array( [ 0, 0, 0, 2, 0, 0 ] ),
+		normals: new Float32Array( [ 0, 1, 0, 0, 1, 0 ] ),
+		kinds: new Uint8Array( [ 0, 0 ] ),
+		nodeIds: new Int32Array( [ 4, 5 ] ),
+		handles: new Float64Array( [ 11, 11 ] ),
+		patchIds: new Int16Array( [ 2, 2 ] ),
+		count: 2,
+	};
+	const explorer = new AutonomousExplorer();
+	const position = new THREE.Vector3();
+	const output = new THREE.Vector3();
+	const supportNormal = new THREE.Vector3( 0, 1, 0 );
+	explorer.setDestination(
+		new THREE.Vector3( 2, 0, 0 ), supportNormal, position, route,
+	);
+	for ( let tick = 0; tick < 220; tick ++ )
+		explorer.update( 1 / 120, supportNormal, position, output, 11 );
+	assert.equal( explorer.consumeReplanRequest(), true );
+	explorer.setDestination(
+		new THREE.Vector3( 2, 0, 0 ), supportNormal, position, route,
+	);
+	for ( let tick = 0; tick < 220; tick ++ )
+		explorer.update( 1 / 120, supportNormal, position, output, 11 );
+	assert.equal( explorer.consumeReplanRequest(), false,
+		'the same failed node corridor must not trigger an unbounded A* loop' );
 
 } );

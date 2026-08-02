@@ -1,6 +1,10 @@
 import * as THREE from 'three/webgpu';
 
 import { parallelTransportTangent } from './platformer-control-model.js';
+import {
+	LAB_SURFACE_NODE_KIND,
+	LabSurfaceGraphSearch,
+} from './surface-navigation-graph.js';
 
 const MOVEMENT_KEYS = new Set( [
 	'KeyW', 'KeyZ', 'ArrowUp',
@@ -8,7 +12,7 @@ const MOVEMENT_KEYS = new Set( [
 	'KeyA', 'KeyQ', 'ArrowLeft',
 	'KeyD', 'ArrowRight',
 ] );
-const MAX_ROUTE_WAYPOINTS = 12;
+export const MAX_ROUTE_WAYPOINTS = 64;
 
 function isEditableTarget( target ) {
 
@@ -60,6 +64,13 @@ export function cameraRelativeMovement( axes, cameraForward, supportNormal, targ
 function expSmoothing( lambda, dt ) {
 
 	return 1 - Math.exp( -lambda * Math.min( dt, 0.1 ) );
+
+}
+
+function numericColliderHandle( collider ) {
+
+	if ( Number.isFinite( collider ) ) return collider;
+	return Number.isFinite( collider?.handle ) ? collider.handle : NaN;
 
 }
 
@@ -464,58 +475,56 @@ export class SurfaceDestinationPicker {
 }
 
 /**
- * One-shot route builder. The environment owns a tiny static access graph and
- * this class only expands its source/target access chains when the user clicks.
- * Its returned typed-array view is reused, then copied by AutonomousExplorer.
+ * Event-driven A* planner over the immutable surface manifold baked by the
+ * environment. Search and corridor simplification happen on a click/replan;
+ * the 120 Hz follower only reads the resulting fixed typed arrays.
  */
 export class SurfaceRoutePlanner {
 
 	constructor( navigation = null, maximumWaypoints = null ) {
 
-		this.accessByCollider = navigation?.accessByCollider ?? new Map();
+		if ( ! navigation?.locate || ! navigation?.offsets )
+			throw new TypeError( 'SurfaceRoutePlanner requires a baked surface graph' );
+		this.navigation = navigation;
+		this.search = new LabSurfaceGraphSearch( navigation );
 		this.maximumWaypoints = Math.max( 2, Math.min(
-			32,
+			128,
 			Math.trunc( maximumWaypoints ?? navigation?.maximumWaypoints ?? MAX_ROUTE_WAYPOINTS ),
 		) );
 		this.positions = new Float32Array( this.maximumWaypoints * 3 );
 		this.normals = new Float32Array( this.maximumWaypoints * 3 );
+		this.kinds = new Uint8Array( this.maximumWaypoints );
+		this.nodeIds = new Int32Array( this.maximumWaypoints );
+		this.handles = new Float64Array( this.maximumWaypoints );
+		this.patchIds = new Int32Array( this.maximumWaypoints );
+		this.nodeIds.fill( -1 );
+		this.handles.fill( NaN );
+		this.patchIds.fill( -1 );
 		this.count = 0;
 		this.view = Object.seal( {
 			positions: this.positions,
 			normals: this.normals,
+			kinds: this.kinds,
+			nodeIds: this.nodeIds,
+			handles: this.handles,
+			patchIds: this.patchIds,
 			count: 0,
+			cost: Infinity,
+			expanded: 0,
+			reachable: false,
+			progressIndex: 0,
 		} );
 
 	}
 
-	_colliderHandle( collider ) {
+	_append( position, normal, kind = LAB_SURFACE_NODE_KIND.SUPPORT, nodeId = -1 ) {
 
-		if ( Number.isFinite( collider ) ) return collider;
-		return Number.isFinite( collider?.handle ) ? collider.handle : null;
-
-	}
-
-	_append( position, normal ) {
-
-		if ( this.count >= this.maximumWaypoints || ! position ) return false;
+		if ( ! position ) return false;
 		const x = Number( position.x ?? position[ 0 ] );
 		const y = Number( position.y ?? position[ 1 ] );
 		const z = Number( position.z ?? position[ 2 ] );
 		if ( ! Number.isFinite( x ) || ! Number.isFinite( y ) || ! Number.isFinite( z ) )
 			return false;
-		if ( this.count > 0 ) {
-
-			const previous = ( this.count - 1 ) * 3;
-			const dx = this.positions[ previous ] - x;
-			const dy = this.positions[ previous + 1 ] - y;
-			const dz = this.positions[ previous + 2 ] - z;
-			if ( dx * dx + dy * dy + dz * dz <= 0.025 * 0.025 ) return false;
-
-		}
-		const offset = this.count * 3;
-		this.positions[ offset ] = x;
-		this.positions[ offset + 1 ] = y;
-		this.positions[ offset + 2 ] = z;
 		let nx = Number( normal?.x ?? normal?.[ 0 ] ?? 0 );
 		let ny = Number( normal?.y ?? normal?.[ 1 ] ?? 1 );
 		let nz = Number( normal?.z ?? normal?.[ 2 ] ?? 0 );
@@ -529,52 +538,230 @@ export class SurfaceRoutePlanner {
 			nx /= normalLength; ny /= normalLength; nz /= normalLength;
 
 		}
+		if ( this.count > 0 ) {
+
+			const waypoint = this.count - 1;
+			const previous = waypoint * 3;
+			const dx = this.positions[ previous ] - x;
+			const dy = this.positions[ previous + 1 ] - y;
+			const dz = this.positions[ previous + 2 ] - z;
+			if ( dx * dx + dy * dy + dz * dz <= 0.025 * 0.025 ) {
+
+				// Coincident graph vertices encode a semantic face/triangle hand-off.
+				// Merge it into the existing record instead of treating it as a capacity
+				// failure, while preserving the strongest transition debug semantic.
+				this.positions[ previous ] = x;
+				this.positions[ previous + 1 ] = y;
+				this.positions[ previous + 2 ] = z;
+				this.normals[ previous ] = nx;
+				this.normals[ previous + 1 ] = ny;
+				this.normals[ previous + 2 ] = nz;
+				this.kinds[ waypoint ] = Math.max( this.kinds[ waypoint ], kind );
+				if ( nodeId >= 0 ) {
+
+					this.nodeIds[ waypoint ] = nodeId;
+					this.handles[ waypoint ] = this.navigation.handles[ nodeId ];
+					this.patchIds[ waypoint ] = this.navigation.patchIds[ nodeId ];
+
+				}
+				return true;
+
+			}
+
+		}
+		if ( this.count >= this.maximumWaypoints ) return false;
+		const offset = this.count * 3;
+		this.positions[ offset ] = x;
+		this.positions[ offset + 1 ] = y;
+		this.positions[ offset + 2 ] = z;
 		this.normals[ offset ] = nx;
 		this.normals[ offset + 1 ] = ny;
 		this.normals[ offset + 2 ] = nz;
+		this.kinds[ this.count ] = kind;
+		this.nodeIds[ this.count ] = nodeId;
+		this.handles[ this.count ] = nodeId >= 0 ? this.navigation.handles[ nodeId ] : NaN;
+		this.patchIds[ this.count ] = nodeId >= 0 ? this.navigation.patchIds[ nodeId ] : -1;
 		this.count ++;
 		return true;
 
 	}
 
-	_appendAccess( descriptor, reverse = false ) {
+	_appendNode( node, kind = null ) {
 
-		const access = descriptor?.access;
-		if ( ! Array.isArray( access ) || access.length === 0 ) return;
-		if ( reverse ) {
-
-			for ( let index = access.length - 1; index >= 0; index -- )
-				this._append( access[ index ].position, access[ index ].normal );
-
-		} else for ( let index = 0; index < access.length; index ++ )
-			this._append( access[ index ].position, access[ index ].normal );
+		const offset = node * 3;
+		return this._append(
+			[
+				this.navigation.positions[ offset ],
+				this.navigation.positions[ offset + 1 ],
+				this.navigation.positions[ offset + 2 ],
+			],
+			[
+				this.navigation.normals[ offset ],
+				this.navigation.normals[ offset + 1 ],
+				this.navigation.normals[ offset + 2 ],
+			],
+			kind ?? this.navigation.kinds[ node ],
+			node,
+		);
 
 	}
 
-	plan( currentPosition, sourceCollider, destination, destinationNormal, targetCollider ) {
+	_appendClearanceCorner( fromNode, toNode ) {
+
+		if ( this.navigation.handles[ fromNode ] !== this.navigation.handles[ toNode ] )
+			return true;
+		const from = fromNode * 3;
+		const to = toNode * 3;
+		const rawDx = this.navigation.rawPositions[ from ]
+			- this.navigation.rawPositions[ to ];
+		const rawDy = this.navigation.rawPositions[ from + 1 ]
+			- this.navigation.rawPositions[ to + 1 ];
+		const rawDz = this.navigation.rawPositions[ from + 2 ]
+			- this.navigation.rawPositions[ to + 2 ];
+		if ( rawDx * rawDx + rawDy * rawDy + rawDz * rawDz > 0.03 * 0.03 )
+			return true;
+		const nx = this.navigation.normals[ from ] + this.navigation.normals[ to ];
+		const ny = this.navigation.normals[ from + 1 ] + this.navigation.normals[ to + 1 ];
+		const nz = this.navigation.normals[ from + 2 ] + this.navigation.normals[ to + 2 ];
+		const normalLength = Math.hypot( nx, ny, nz );
+		const normalDot = this.navigation.normals[ from ]
+			* this.navigation.normals[ to ]
+			+ this.navigation.normals[ from + 1 ]
+				* this.navigation.normals[ to + 1 ]
+			+ this.navigation.normals[ from + 2 ]
+				* this.navigation.normals[ to + 2 ];
+		if ( normalDot >= 0.92 || normalDot < -0.25 || normalLength <= 1e-8 )
+			return true;
+		const inverseLength = 1 / normalLength;
+		const clearance = Number.isFinite( this.navigation.clearance )
+			? this.navigation.clearance : 0;
+		// At a convex edge, joining the two normal-offset face samples with a
+		// straight chord cuts the clearance envelope. The sum (not the normalized
+		// average) reaches the outer square corner and yields two tangent segments.
+		return this._append(
+			[
+				( this.navigation.rawPositions[ from ]
+					+ this.navigation.rawPositions[ to ] ) * 0.5 + nx * clearance,
+				( this.navigation.rawPositions[ from + 1 ]
+					+ this.navigation.rawPositions[ to + 1 ] ) * 0.5 + ny * clearance,
+				( this.navigation.rawPositions[ from + 2 ]
+					+ this.navigation.rawPositions[ to + 2 ] ) * 0.5 + nz * clearance,
+			],
+			[ nx * inverseLength, ny * inverseLength, nz * inverseLength ],
+			LAB_SURFACE_NODE_KIND.TRANSITION,
+			fromNode,
+		);
+
+	}
+
+	plan(
+		currentPosition,
+		sourceCollider,
+		destination,
+		destinationNormal,
+		targetCollider,
+		sourceNormal = null,
+	) {
 
 		this.count = 0;
-		const sourceHandle = this._colliderHandle( sourceCollider );
-		const targetHandle = this._colliderHandle( targetCollider );
-		if ( sourceHandle !== null && sourceHandle !== targetHandle )
-			this._appendAccess( this.accessByCollider.get( sourceHandle ), true );
-		if ( targetHandle !== null && sourceHandle !== targetHandle )
-			this._appendAccess( this.accessByCollider.get( targetHandle ), false );
-		this._append( destination, destinationNormal );
-		// A malformed or capacity-saturated graph must still keep the clicked point
-		// as its final objective rather than silently stopping at an access portal.
-		if ( this.count === 0 ) this._append( currentPosition, { x: 0, y: 1, z: 0 } );
-		const finalOffset = ( this.count - 1 ) * 3;
-		const dx = this.positions[ finalOffset ] - destination.x;
-		const dy = this.positions[ finalOffset + 1 ] - destination.y;
-		const dz = this.positions[ finalOffset + 2 ] - destination.z;
-		if ( dx * dx + dy * dy + dz * dz > 0.025 * 0.025 ) {
+		this.view.count = 0;
+		this.view.cost = Infinity;
+		this.view.expanded = 0;
+		this.view.reachable = false;
+		this.view.progressIndex = 0;
+		this.nodeIds.fill( -1 );
+		this.handles.fill( NaN );
+		this.patchIds.fill( -1 );
+		// Airborne/grabbed bodies have no physical surface owner. Mapping them to the
+		// globally nearest node manufactures a corridor whose first portal can never
+		// be confirmed by the follower.
+		if ( ! Number.isFinite( numericColliderHandle( sourceCollider ) ) ) return this.view;
+		const start = this.navigation.locate( currentPosition, sourceNormal, sourceCollider );
+		const target = this.navigation.locate( destination, destinationNormal, targetCollider );
+		const search = this.search.search( start, target );
+		this.view.expanded = search.expanded;
+		if ( ! search.reachable ) return this.view;
+		const startOffset = start * 3;
+		if ( ! this._append(
+			currentPosition,
+			[
+				this.navigation.normals[ startOffset ],
+				this.navigation.normals[ startOffset + 1 ],
+				this.navigation.normals[ startOffset + 2 ],
+			],
+			this.navigation.kinds[ start ],
+			start,
+		) ) return this.view;
 
-			if ( this.count >= this.maximumWaypoints ) this.count --;
-			this._append( destination, destinationNormal );
+		let cursor = 0;
+		while ( cursor < search.count - 1 ) {
+
+			let next = cursor + 1;
+			for ( let candidate = search.count - 1; candidate > cursor + 1; candidate -- ) {
+
+				if ( this.navigation.canShortcut( search.path, cursor, candidate ) ) {
+
+					next = candidate;
+					break;
+
+				}
+
+			}
+			const previousNode = search.path[ cursor ];
+			const node = search.path[ next ];
+			const previousOffset = previousNode * 3;
+			const offset = node * 3;
+			const normalDot = this.navigation.normals[ previousOffset ]
+				* this.navigation.normals[ offset ]
+				+ this.navigation.normals[ previousOffset + 1 ]
+				* this.navigation.normals[ offset + 1 ]
+				+ this.navigation.normals[ previousOffset + 2 ]
+				* this.navigation.normals[ offset + 2 ];
+			const transition = this.navigation.handles[ previousNode ]
+				!== this.navigation.handles[ node ]
+				|| this.navigation.patchIds[ previousNode ] !== this.navigation.patchIds[ node ]
+				|| normalDot < 0.92;
+			if ( ! this._appendClearanceCorner( previousNode, node )
+				|| ! this._appendNode(
+				node,
+				transition ? LAB_SURFACE_NODE_KIND.TRANSITION : null,
+			) ) {
+
+				this.count = 0;
+				return this.view;
+
+			}
+			cursor = next;
+
+		}
+		const targetKind = this.navigation.kinds[ target ];
+		if ( ! this._append( destination, destinationNormal, targetKind, target ) ) {
+
+			if ( this.count >= this.maximumWaypoints ) {
+
+				this.count = 0;
+				return this.view;
+
+			}
+			// The clicked point may coincide exactly with the final baked sample.
+			// Preserve the exact click/normal without manufacturing another waypoint.
+			const waypoint = this.count - 1;
+			const offset = waypoint * 3;
+			this.positions[ offset ] = destination.x;
+			this.positions[ offset + 1 ] = destination.y;
+			this.positions[ offset + 2 ] = destination.z;
+			this.normals[ offset ] = destinationNormal.x;
+			this.normals[ offset + 1 ] = destinationNormal.y;
+			this.normals[ offset + 2 ] = destinationNormal.z;
+			this.kinds[ waypoint ] = targetKind;
+			this.nodeIds[ waypoint ] = target;
+			this.handles[ waypoint ] = this.navigation.handles[ target ];
+			this.patchIds[ waypoint ] = this.navigation.patchIds[ target ];
 
 		}
 		this.view.count = this.count;
+		this.view.cost = search.cost;
+		this.view.reachable = true;
 		return this.view;
 
 	}
@@ -602,6 +789,7 @@ export class AutonomousExplorer {
 		this.destinationNormal = new THREE.Vector3( 0, 1, 0 );
 		this.destinationActive = false;
 		this.destinationCompleted = false;
+		this.replanRequested = false;
 		this.destinationArrivalRadius = 0.48;
 		// Access portals represent a physical support hand-off, not a loose visual
 		// hint. The radius stays just above the pelvis-to-ground clearance so branch
@@ -610,6 +798,13 @@ export class AutonomousExplorer {
 		this.routeWaypointRadius = 0.28;
 		this.routePositions = new Float32Array( MAX_ROUTE_WAYPOINTS * 3 );
 		this.routeNormals = new Float32Array( MAX_ROUTE_WAYPOINTS * 3 );
+		this.routeKinds = new Uint8Array( MAX_ROUTE_WAYPOINTS );
+		this.routeNodeIds = new Int32Array( MAX_ROUTE_WAYPOINTS );
+		this.routeHandles = new Float64Array( MAX_ROUTE_WAYPOINTS );
+		this.routePatchIds = new Int32Array( MAX_ROUTE_WAYPOINTS );
+		this.routeNodeIds.fill( -1 );
+		this.routeHandles.fill( NaN );
+		this.routePatchIds.fill( -1 );
 		this.routeCount = 0;
 		this.routeIndex = 0;
 		this.goalTurnRate = Math.PI * 1.65;
@@ -622,6 +817,8 @@ export class AutonomousExplorer {
 		this._goalMotionDistance = 0;
 		this._recoverySeconds = 0;
 		this._recoverySign = 1;
+		this._replanAwaitingRoute = false;
+		this._identicalRouteExhausted = false;
 		this._surfaceFrameValid = false;
 		this._transportScratch = {
 			axis: new THREE.Vector3(),
@@ -649,12 +846,49 @@ export class AutonomousExplorer {
 		this._goalMotionDistance = 0;
 		this._recoverySeconds = 0;
 		this.destinationCompleted = false;
+		this.replanRequested = false;
 		this._surfaceFrameValid = false;
+
+	}
+
+	_routeMatches( routePlan ) {
+
+		const plannedCount = Math.max( 0, Math.min(
+			MAX_ROUTE_WAYPOINTS,
+			Math.trunc( routePlan?.count ?? 0 ),
+		) );
+		if ( plannedCount !== this.routeCount ) return false;
+		for ( let waypoint = 0; waypoint < plannedCount; waypoint ++ ) {
+
+			const currentNode = this.routeNodeIds[ waypoint ];
+			const plannedNode = Math.trunc( routePlan.nodeIds?.[ waypoint ] ?? -1 );
+			if ( currentNode >= 0 && plannedNode >= 0 ) {
+
+				if ( currentNode !== plannedNode ) return false;
+				continue;
+
+			}
+			const offset = waypoint * 3;
+			const dx = this.routePositions[ offset ] - routePlan.positions?.[ offset ];
+			const dy = this.routePositions[ offset + 1 ] - routePlan.positions?.[ offset + 1 ];
+			const dz = this.routePositions[ offset + 2 ] - routePlan.positions?.[ offset + 2 ];
+			if ( ! Number.isFinite( dx + dy + dz ) || dx * dx + dy * dy + dz * dz > 0.04 * 0.04 )
+				return false;
+			const currentHandle = this.routeHandles[ waypoint ];
+			const plannedHandle = routePlan.handles?.[ waypoint ] ?? NaN;
+			if ( Number.isFinite( currentHandle ) && Number.isFinite( plannedHandle )
+				&& currentHandle !== plannedHandle ) return false;
+
+		}
+		return true;
 
 	}
 
 	setDestination( position, normal = null, currentPosition = null, routePlan = null ) {
 
+		const identicalFailedRoute = this._replanAwaitingRoute
+			&& this._routeMatches( routePlan );
+		this._replanAwaitingRoute = false;
 		this.destination.copy( position );
 		this.destinationNormal.copy( normal ?? this.destinationNormal );
 		if ( this.destinationNormal.lengthSq() < 1e-8 ) this.destinationNormal.set( 0, 1, 0 );
@@ -663,6 +897,9 @@ export class AutonomousExplorer {
 		this.destinationCompleted = false;
 		this.routeCount = 0;
 		this.routeIndex = 0;
+		this.routeNodeIds.fill( -1 );
+		this.routeHandles.fill( NaN );
+		this.routePatchIds.fill( -1 );
 		const plannedCount = Math.max( 0, Math.min(
 			MAX_ROUTE_WAYPOINTS,
 			Math.trunc( routePlan?.count ?? 0 ),
@@ -682,6 +919,11 @@ export class AutonomousExplorer {
 			this.routeNormals[ targetOffset ] = routePlan.normals?.[ offset ] ?? 0;
 			this.routeNormals[ targetOffset + 1 ] = routePlan.normals?.[ offset + 1 ] ?? 1;
 			this.routeNormals[ targetOffset + 2 ] = routePlan.normals?.[ offset + 2 ] ?? 0;
+			this.routeKinds[ this.routeCount ] = routePlan.kinds?.[ waypoint ]
+				?? LAB_SURFACE_NODE_KIND.TERRAIN;
+			this.routeNodeIds[ this.routeCount ] = routePlan.nodeIds?.[ waypoint ] ?? -1;
+			this.routeHandles[ this.routeCount ] = routePlan.handles?.[ waypoint ] ?? NaN;
+			this.routePatchIds[ this.routeCount ] = routePlan.patchIds?.[ waypoint ] ?? -1;
 			this.routeCount ++;
 
 		}
@@ -701,10 +943,18 @@ export class AutonomousExplorer {
 			this.routeNormals[ offset ] = this.destinationNormal.x;
 			this.routeNormals[ offset + 1 ] = this.destinationNormal.y;
 			this.routeNormals[ offset + 2 ] = this.destinationNormal.z;
+			this.routeKinds[ this.routeCount ] = LAB_SURFACE_NODE_KIND.SUPPORT;
+			this.routeNodeIds[ this.routeCount ] = -1;
+			this.routeHandles[ this.routeCount ] = NaN;
+			this.routePatchIds[ this.routeCount ] = -1;
 			this.routeCount ++;
 
 		}
 		this.resetProgress( currentPosition );
+		// One retry may legitimately produce a different corridor. If A* publishes
+		// the exact failed node sequence again, keep local steering recovery active
+		// but do not schedule the same expensive search forever.
+		this._identicalRouteExhausted = identicalFailedRoute;
 		return this.destination;
 
 	}
@@ -719,6 +969,28 @@ export class AutonomousExplorer {
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = Infinity;
 		this._goalMotionDistance = 0;
+		this.replanRequested = false;
+		this._replanAwaitingRoute = false;
+		this._identicalRouteExhausted = false;
+
+	}
+
+	consumeReplanRequest() {
+
+		const requested = this.replanRequested;
+		this.replanRequested = false;
+		if ( requested ) this._replanAwaitingRoute = true;
+		return requested;
+
+	}
+
+	get routeProgressIndex() {
+
+		if ( this.routeCount <= 1 ) return 0;
+		if ( this.destinationCompleted ) return this.routeCount - 1;
+		// routeIndex names the waypoint currently pursued. The active visual
+		// segment therefore begins one waypoint earlier.
+		return Math.max( 0, Math.min( this.routeCount - 2, this.routeIndex - 1 ) );
 
 	}
 
@@ -827,7 +1099,12 @@ export class AutonomousExplorer {
 		// Climbing a wall can temporarily increase Euclidean goal distance. It is
 		// progress nonetheless, so recovery is reserved for a genuinely immobile
 		// body instead of disrupting a successful edge traversal.
-		const stuck = this._goalMotionDistance < 0.055;
+		// Travelling in circles is not progress. The former watchdog only counted
+		// travelled distance, so a floor -> wall -> floor loop could run forever.
+		// A compiled surface corridor makes distance-to-current-waypoint monotone;
+		// require that geodesic progress as well as some physical displacement.
+		const goalAdvance = this._goalWindowDistance - distance;
+		const stuck = this._goalMotionDistance < 0.055 || goalAdvance < 0.035;
 		this._goalProgressSeconds = 0;
 		this._goalWindowDistance = distance;
 		this._goalMotionDistance = 0;
@@ -835,13 +1112,15 @@ export class AutonomousExplorer {
 
 	}
 
-	_updateDestination( dt, position, target ) {
+	_updateDestination( dt, position, target, supportCollider = null ) {
 
 		let distance = 0;
 		let arrivalRadius = this.destinationArrivalRadius;
+		const supportHandle = numericColliderHandle( supportCollider );
 		for ( let skipped = 0; skipped < MAX_ROUTE_WAYPOINTS; skipped ++ ) {
 
-			const offset = Math.min( this.routeIndex, Math.max( 0, this.routeCount - 1 ) ) * 3;
+			const waypoint = Math.min( this.routeIndex, Math.max( 0, this.routeCount - 1 ) );
+			const offset = waypoint * 3;
 			this._toDestination.set(
 				this.routeCount > 0 ? this.routePositions[ offset ] : this.destination.x,
 				this.routeCount > 0 ? this.routePositions[ offset + 1 ] : this.destination.y,
@@ -851,6 +1130,21 @@ export class AutonomousExplorer {
 			const finalWaypoint = this.routeCount <= 1 || this.routeIndex >= this.routeCount - 1;
 			arrivalRadius = finalWaypoint ? this.destinationArrivalRadius : this.routeWaypointRadius;
 			if ( distance > arrivalRadius ) break;
+			const expectedHandle = this.routeHandles[ waypoint ];
+			const ownerConfirmed = ! Number.isFinite( expectedHandle )
+				|| supportHandle === expectedHandle;
+			const expectedNormalX = this.routeNormals[ offset ];
+			const expectedNormalY = this.routeNormals[ offset + 1 ];
+			const expectedNormalZ = this.routeNormals[ offset + 2 ];
+			const normalConfirmed = ! Number.isFinite( expectedHandle )
+				|| this._surfaceNormal.x * expectedNormalX
+					+ this._surfaceNormal.y * expectedNormalY
+					+ this._surfaceNormal.z * expectedNormalZ > 0.34;
+			// A portal represents a support hand-off. Distance alone used to skip the
+			// crown while the rear claws were still on the floor, sending the follower
+			// back through the solid. Advance only after the expected patch owns the
+			// coherent support frame.
+			if ( ! ownerConfirmed || ! normalConfirmed ) break;
 			if ( finalWaypoint ) {
 
 				this.destinationActive = false;
@@ -860,6 +1154,7 @@ export class AutonomousExplorer {
 
 			}
 			this.routeIndex ++;
+			if ( this.routeIndex > 1 ) this._identicalRouteExhausted = false;
 			this._goalProgressSeconds = 0;
 			this._goalWindowDistance = Infinity;
 			this._goalMotionDistance = 0;
@@ -887,6 +1182,7 @@ export class AutonomousExplorer {
 
 		if ( this._trackGoalProgress( dt, distance, position ) ) {
 
+			if ( ! this._identicalRouteExhausted ) this.replanRequested = true;
 			this._recoverySign *= -1;
 			this._rotateTangent(
 				this._recoveryHeading,
@@ -929,12 +1225,12 @@ export class AutonomousExplorer {
 
 	}
 
-	update( dt, supportNormal, position, target = null ) {
+	update( dt, supportNormal, position, target = null, supportCollider = null ) {
 
 		this._updateSurfaceFrame( supportNormal );
 		target ??= this.output;
 		if ( this.destinationActive )
-			return this._updateDestination( dt, position, target );
+			return this._updateDestination( dt, position, target, supportCollider );
 		if ( this.destinationCompleted ) return target.set( 0, 0, 0 );
 		this.timeToChange -= dt;
 		this.phase += dt;
